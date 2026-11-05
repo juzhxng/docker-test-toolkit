@@ -1,0 +1,13 @@
+"""Stable toolkit identities: label keys, name prefixes and environment variable names."""
+
+PROJECT_LABEL = "dev.docker-test-toolkit.installed.project"
+RUN_LABEL = "dev.docker-test-toolkit.installed.run"
+SESSION_LABEL = "dev.docker-test-toolkit.installed.session"
+PRIVATE_ROOT_NAME = "docker-test-toolkit"
+COMPOSE_PREFIX = "dtt"
+BUILDER_PREFIX = "dtt"
+TEST_BUILDER_PREFIX = "dtt-test"
+PROJECT_ID_ENV = "DOCKER_TEST_TOOLKIT_PROJECT_ID"
+PROJECT_LABEL_ENV = "DOCKER_TEST_TOOLKIT_PROJECT_LABEL"
+PROJECT_ROOT_ENV = "DOCKER_TEST_TOOLKIT_PROJECT_ROOT"
+SESSION_ID_ENV = "DOCKER_TEST_TOOLKIT_SESSION_ID"

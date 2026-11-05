@@ -1,0 +1,210 @@
+
+
+[project]
+name = "docker_test_toolkit"
+version = "0.7.1"
+description = "Private, workspace-agnostic lifecycle authority for local Docker-backed tests"
+authors = [{name = "juzhxng", email = "juzhxng@users.noreply.github.com"}]
+readme = "README.md"
+requires-python = ">=3.12,<4.0"
+dependencies = []
+
+[project.scripts]
+docker-test-toolkit = "docker_test_toolkit.factories.cli:main"
+
+[dependency-groups]
+dev = [
+    "coverage[toml]>=7.16.0",
+    "hypothesis>=6.168.0",
+    "mkdocs-material>=9.7.7",
+    "mkdocstrings[python]>=1.0.6",
+    "mypy>=2.3.1",
+    "nbqa>=1.9.1",
+    "poethepoet>=0.48.0",
+    "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.7",
+]
+
+[build-system]
+requires = ["hatchling>=1.32.0,<2.0.0"]
+build-backend = "hatchling.build"
+
+[tool.coverage.run]
+parallel = false
+branch = true
+source = ["src"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "def __repr__",
+  "def __str__",
+  "raise AssertionError",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+  "if typing.TYPE_CHECKING:"
+]
+
+[tool.coverage.html]
+directory = "cov_html"
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+testpaths = [
+  "tests",
+]
+pythonpath = [
+  "src"
+]
+markers = [
+    "e2e: mark a real host end-to-end test",
+    "integration: mark an integration test",
+    "unit: mark a unit test",
+    "extras: mark a test that needs extra dependencies",
+    "previous_release: an e2e test that runs the previous release against the selected daemon (Docker Desktop or Linux only)"
+]
+
+[tool.mypy]
+check_untyped_defs = true
+ignore_errors = false
+ignore_missing_imports = true
+strict_optional = true
+follow_imports = "silent"
+
+[tool.ruff]
+src = ["src"]
+line-length = 120
+
+# Set python target version from cookiecutter
+target-version = "py312"  # noqa
+
+[tool.ruff.format]
+exclude = [
+    ".pytest_cache",
+    "build",
+    "joblib"
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "C",    # flake8-comprehensions
+    "B",    # flake8-bugbear
+    "S",    # flake8-bandit
+    "N",    # pep8-naming
+    "BLE",  # flake8-blind-except
+    "A",    # flake8-builtins
+    "ICN",  # flake8-import-conventions
+    "G",    # flake8-logging-format
+    "SLF",  # flake8-self
+    "RET",  # flake8-return
+    "SIM",  # flake8-simplify
+    "PD",   # pandas-vet
+    "PERF", # perflint
+    "PGH",  # pygrep-hooks
+    "RUF",  # ruff
+    "ASYNC",# flake8-async
+]
+ignore = [
+    "C901",  # Lifecycle algorithms are inspected as state machines; complexity is not a refactoring verdict.
+    "N818",  # Stable internal lifecycle exception names are preserved during extraction.
+    "S102",  # Private, authority-checked managed-consumer code is an explicit local execution boundary.
+    "S108",  # The fallback is used only when the native temporary-directory setting is unavailable.
+    "S603",  # The toolkit's purpose is bounded subprocess execution with structured argv.
+    "S607",  # Git/Docker discovery uses fixed executable names before binding exact identities.
+    "SIM102", # Nested state checks make lifecycle authority conditions easier to audit.
+    "SIM105", # Explicit exception boundaries document fail-open observation.
+]
+
+fixable = [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "I",
+    "N",
+    "Q",
+    "S",
+    "T",
+    "W",
+    "ANN",
+    "ARG",
+    "BLE",
+    "COM",
+    "DJ",
+    "DTZ",
+    "EM",
+    "ERA",
+    "EXE",
+    "FBT",
+    "ICN",
+    "INP",
+    "ISC",
+    "NPY",
+    "PD",
+    "PGH",
+    "PIE",
+    "PL",
+    "PT",
+    "PTH",
+    "PYI",
+    "RET",
+    "RSE",
+    "RUF",
+    "SIM",
+    "SLF",
+    "TCH",
+    "TID",
+    "TRY",
+    "UP",
+    "YTT"
+]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.mccabe]
+# Unlike Flake8, default to a complexity level of 10.
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["BLE001", "S101", "S603", "S607", "SLF001"]
+
+[tool.uv]
+# Wheel baselines uv must prove a wheel for: the supported hosts, darwin narrowed to the oldest macOS the wheels target.
+# SUPPORTED_HOSTS (tests/guard/test_supported_platforms.py) are the same three without the platform_release narrowing.
+required-environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64' and platform_release == '23.0.0'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+
+[tool.poe.tasks]
+unit = "pytest tests/unit tests/guard --cov -p no:warnings"
+int = "pytest --basetemp=.pytest-tmp/int -m 'integration and not e2e' tests/integration --cov -p no:warnings"
+e2e = "pytest --basetemp=.pytest-tmp/e2e -m 'e2e' tests/e2e -v"
+_cov_run = "coverage run -m pytest tests/unit tests/guard"
+_cov_report = "coverage html"
+cov = ["_cov_run", "_cov_report"]
+_static_ruff_format = "ruff format --check src scripts tests"
+_static_ruff_lint = "ruff check src scripts tests"
+_static_nbqa = "nbqa ruff src"
+static = ["_static_ruff_format", "_static_ruff_lint", "_static_nbqa"]
+_fix_ruff_lint = "ruff check src scripts tests --fix"
+_fix_nbqa = "nbqa ruff src --fix"
+_fix_ruff_format = "ruff format src scripts tests"
+fix = ["_fix_ruff_format", "_fix_ruff_lint",  "_fix_nbqa"] # The order is important
+typecheck = "mypy --check-untyped-defs --no-implicit-optional --show-error-codes src"
+qa = ["typecheck", "static", "unit", "int"]
+docs = "mkdocs build --strict"
+certify = "python scripts/freeze_evidence.py verify --manifest evidence/final-snapshot.json"

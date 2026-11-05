@@ -1,0 +1,1 @@
+"""Inbound command adapters."""
