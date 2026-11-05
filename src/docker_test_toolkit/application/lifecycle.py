@@ -28,7 +28,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.parse
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
@@ -193,6 +192,7 @@ from docker_test_toolkit.domain.policy import (
     is_creation_prefix,
     known_fields,
     live_queued,
+    loopback_endpoint,
     memory_limit,
     net_external_limits,
     parse_cpu_pressure,
@@ -1262,7 +1262,7 @@ def _remove_private_root(context: RunContext) -> None:
     shape = (root.name, project_folder.name, session_folder.name, session_folder.parent.name)
     if shape != (context.run_id, context.project.project_id, context.session_id, PRIVATE_ROOT_NAME):
         return
-    # ponytail: safe for one remover per session (session ids are unique per run; the release helper's pair is
+    # NOTE: safe for one remover per session (session ids are unique per run; the release helper's pair is
     # sequential). Two runs finishing concurrently in one session could fail a sibling's preparation; the upgrade path
     # is a bounded retry in make_private_directories, as git retries SCLD_VANISHED.
     try:
@@ -8417,22 +8417,6 @@ def existing_ancestor(path: Path) -> Path:
     return path
 
 
-def loopback_endpoint(endpoint: str) -> bool:
-    """Whether a Docker endpoint is a TCP socket on this machine's loopback (``127.0.0.1``, ``localhost``, ``::1``)."""
-    if not endpoint.startswith("tcp://"):
-        return False
-    try:
-        host = urllib.parse.urlsplit(endpoint).hostname
-    except ValueError:
-        return False  # a malformed URL names no machine: never this one
-    if host == "localhost":
-        return True
-    try:
-        return host is not None and ipaddress.ip_address(host).is_loopback  # 127.0.0.0/8 and ::1, never a DNS name
-    except ValueError:
-        return False
-
-
 def _data_root_figure(data: dict, docker, daemon_id: str | None) -> DiskFigure:
     """Return the daemon's data-root figure from the probe; unknown without a verified daemon, on another machine's
     daemon, or when the probe has none. A remote endpoint on the loopback (a CI runner reaching its own host's daemon
@@ -13447,7 +13431,7 @@ def reconcile_account(context: RunContext | None = None, *, _test_directory: Pat
     ordinary codec, so a non-empty version 1 queue (the recovery-only phase) is refused before any detection.
     Never recovers a run inline.
     """
-    # ponytail: a dead entry lingers on an idle account until the next toolkit activity; ceiling: no always-on
+    # NOTE: a dead entry lingers on an idle account until the next toolkit activity; ceiling: no always-on
     # daemon; upgrade path: a scheduled recovery pass
     directory = account_directory() if _test_directory is None else _test_directory.resolve()
     own = None if context is None else context.run_id

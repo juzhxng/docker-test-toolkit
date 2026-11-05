@@ -16,7 +16,7 @@ N_MAX = 16
 MARGIN_BYTES = 2 * 1024**3
 SHARED_LOCK_SECONDS = 5
 EXCLUSIVE_LOCK_SECONDS = 10
-# ponytail: probe-derived bounds (design 3.8, 5); ceiling: one value for every project and machine; upgrade path:
+# NOTE: probe-derived bounds (design 3.8, 5); ceiling: one value for every project and machine; upgrade path:
 # an account setting when projects need different values.
 C_RET_BYTES = 4 * 1024**3
 CACHE_BLOB_COUNT_MAX = 4096
@@ -88,7 +88,7 @@ def build_key(caller_argv: Sequence[str], *, private_root: str, project_root: st
         ):
             continue
         tokens.append(token.replace(private_root, "${private}").replace(project_root, "${project}"))
-    # ponytail: short-option clusters such as -qtTAG are kept verbatim; ceiling: such a spelling only loses key
+    # NOTE: short-option clusters such as -qtTAG are kept verbatim; ceiling: such a spelling only loses key
     # stability (hits), never correctness; upgrade path: read clusters with the shared short-option reader.
     return hashlib.sha256(json.dumps(tokens, separators=(",", ":")).encode()).hexdigest()
 

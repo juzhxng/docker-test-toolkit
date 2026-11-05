@@ -23,7 +23,7 @@ from docker_test_toolkit.domain.policy import PODMAN_BINARY_TEXT
 if TYPE_CHECKING:
     from docker_test_toolkit.application.lifecycle import Deadline
 
-PODMAN_STDERR_LIMIT = 256  # ponytail: characters of a failed call's stderr kept in its message
+PODMAN_STDERR_LIMIT = 256  # NOTE: characters of a failed call's stderr kept in its message
 _OUTPUT_LIMIT = 1024**2
 _DEFAULT_SECONDS = 30
 _IMAGE_DIRS: dict[str, Path] = {}  # binary path -> Host.MachineImageDir, read once per process

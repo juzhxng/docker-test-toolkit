@@ -20,7 +20,7 @@ from docker_test_toolkit.domain.errors import ArchiveRejected, ResourceError
 from docker_test_toolkit.domain.platform import Platform
 from docker_test_toolkit.domain.records import unique_object
 
-# ponytail: per-archive cap is checked at admission and after the write, not during it; an export can
+# NOTE: per-archive cap is checked at admission and after the write, not during it; an export can
 # overshoot until it ends and is rejected; upgrade path: an adapter stdout pump with a byte limit.
 ARCHIVE_MAX_BYTES = 4 * 1024**3
 METADATA_MEMBER_MAX = 4 * 1024**2

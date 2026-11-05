@@ -11,7 +11,7 @@ from docker_test_toolkit.domain.models import RunSpec
 from docker_test_toolkit.factories.cli import bind_docker_adapter, build_docker_adapter
 
 _PREPARE_BUDGET_SECONDS = (
-    60.0  # ponytail: 60 s preparation budget; ceiling: fixed per artifact; upgrade path: configurable bound
+    60.0  # NOTE: 60 s preparation budget; ceiling: fixed per artifact; upgrade path: configurable bound
 )
 
 

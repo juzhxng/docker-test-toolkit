@@ -39,10 +39,10 @@ if TYPE_CHECKING:
 PROBE_IMAGE = "alpine@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"
 PROBE_LABEL = "com.docker-test-toolkit.probe"
 PROBE_MEMORY = "32m"
-PROBE_CACHE_NS = 10_000_000_000  # ponytail: fixed; avg60 is a one-minute average, so 10 s loses nothing
-PROBE_RUN_BOUND_S = 10  # ponytail: fixed bound of one probe run inside an admission pass
-PROBE_PULL_BOUND_S = 120  # ponytail: fixed bound of one probe image pull, outside every admission pass
-PROBE_PULL_BACKOFF_NS = 600_000_000_000  # ponytail: a failed pull is retried after 10 min, per daemon
+PROBE_CACHE_NS = 10_000_000_000  # NOTE: fixed; avg60 is a one-minute average, so 10 s loses nothing
+PROBE_RUN_BOUND_S = 10  # NOTE: fixed bound of one probe run inside an admission pass
+PROBE_PULL_BOUND_S = 120  # NOTE: fixed bound of one probe image pull, outside every admission pass
+PROBE_PULL_BACKOFF_NS = 600_000_000_000  # NOTE: a failed pull is retried after 10 min, per daemon
 PROBES_DIRECTORY = "probes"
 PROBE_IMAGE_FILE = "probe-image.json"
 PROBE_READING_FILE = "probe-reading.json"  # the last reading per daemon, for readiness (which runs no container)

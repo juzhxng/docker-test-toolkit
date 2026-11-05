@@ -1136,7 +1136,7 @@ def _survivors_match(kind: str, listed: list[str], survivors: list[dict]) -> boo
 
 
 _IDENTITY_RETRY_PAUSES = (0.2, 0.4)  # seconds before the second and the third identity read
-_PROBE_REMOVAL_SECONDS = 1.0  # ponytail: fixed share of a probe's deadline kept for `rm -f` at its timeout
+_PROBE_REMOVAL_SECONDS = 1.0  # NOTE: fixed share of a probe's deadline kept for `rm -f` at its timeout
 
 
 def _vanished(kind: str, ids: list[str], result: DockerResult, engine: str = "docker") -> set[str]:

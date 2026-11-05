@@ -365,7 +365,7 @@ def read_admission_settings(account_directory: Path) -> AdmissionSettings:
 VERDICTS_DIRECTORY = "share-verdicts"
 _VERDICT_FILE_FIELDS = frozenset({"schema", "rules", "verdicts"})
 _VERDICT_FIELDS = frozenset({"shareable", "reason", "run_id", "origin", "tick_ns"})
-# ponytail: fixed bound; ceiling: a project with more distinct selections gets exclusive runs for the evicted ones;
+# NOTE: fixed bound; ceiling: a project with more distinct selections gets exclusive runs for the evicted ones;
 # upgrade path: an LRU keyed by last use.
 VERDICTS_PER_PROJECT = 256
 

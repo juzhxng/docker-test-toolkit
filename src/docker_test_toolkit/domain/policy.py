@@ -1,9 +1,11 @@
 """Pure validation and closed compatibility policies."""
 
 import hashlib
+import ipaddress
 import json
 import math
 import re
+import urllib.parse
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -18,11 +20,11 @@ if TYPE_CHECKING:  # models imports this module, so its types are only named for
 BUILD_VALUE_LETTERS = frozenset("fot")  # the Buildx short options that take a value (-f, -o, -t)
 NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
 DEAD_GRACE_NS = (
-    30_000_000_000  # ponytail: fixed 30 s dead grace; ceiling: one constant per artifact; upgrade path: profile setting
+    30_000_000_000  # NOTE: fixed 30 s dead grace; ceiling: one constant per artifact; upgrade path: profile setting
 )
 UNBOUND_CLAIM_NS = 30_000_000_000
 TAKEOVER_ACCOUNT_CAP = (
-    2  # ponytail: account worker cap 2; ceiling: two concurrent takeovers; upgrade path: configurable cap
+    2  # NOTE: account worker cap 2; ceiling: two concurrent takeovers; upgrade path: configurable cap
 )
 RECOVERY_PHASES = ("authorize", "claim", "operation", "receipts", "consumers", "resources", "private-root", "publish")
 STORED_RECOVERY_PHASES = RECOVERY_PHASES[1:]  # ``authorize`` leaves no durable trace, so a queue entry never stores it
@@ -392,7 +394,7 @@ def attributed_ids(containers: Sequence[Mapping[str, Any]], holder: HolderFacts,
     return frozenset(attributed)
 
 
-# ponytail: one fixed threshold on the kernel's minute average; an operator setting is the upgrade if machines differ.
+# NOTE: one fixed threshold on the kernel's minute average; an operator setting is the upgrade if machines differ.
 CPU_PRESSURE_JOIN_LIMIT = 50.0  # percent of time some task waited for a CPU (Linux PSI ``some avg60``)
 _CPU_PRESSURE = re.compile(r"some avg10=[0-9.]+ avg60=([0-9]+\.[0-9]+) ")
 
@@ -590,7 +592,7 @@ _MIB = 1024**2
 def cache_cap_bytes(fs_total: int) -> int:
     """Return the build-cache store's total cap: 1/64 of its filesystem, clamped to 4..32 GiB (design DD7).
 
-    ponytail: fixed fraction and clamps; ceiling: a store larger than 32 GiB is never kept; upgrade path: an install
+    NOTE: fixed fraction and clamps; ceiling: a store larger than 32 GiB is never kept; upgrade path: an install
     setting beside the disk reserve.
     """
     return min(max(fs_total // 64, 4 * _GIB), 32 * _GIB)
@@ -599,14 +601,14 @@ def cache_cap_bytes(fs_total: int) -> int:
 def archive_cap_bytes(fs_total: int) -> int:
     """Return the run-archive store's total cap: 1/1024 of its filesystem, clamped to 64 MiB..1 GiB (design DD7).
 
-    ponytail: fixed fraction and clamps; archives are small records, so the clamp, not the disk, decides in practice.
+    NOTE: fixed fraction and clamps; archives are small records, so the clamp, not the disk, decides in practice.
     """
     return min(max(fs_total // 1024, 64 * _MIB), _GIB)
 
 
-ARCHIVE_AGE_NS = 90 * 86_400 * 1_000_000_000  # ponytail: fixed age of an archived run record
-SESSION_FOLDER_AGE_NS = 86_400 * 1_000_000_000  # ponytail: an empty recorded session folder older than a day
-PROBE_FILE_AGE_NS = 60 * 1_000_000_000  # ponytail: a probe record older than a minute outlived its probe
+ARCHIVE_AGE_NS = 90 * 86_400 * 1_000_000_000  # NOTE: fixed age of an archived run record
+SESSION_FOLDER_AGE_NS = 86_400 * 1_000_000_000  # NOTE: an empty recorded session folder older than a day
+PROBE_FILE_AGE_NS = 60 * 1_000_000_000  # NOTE: a probe record older than a minute outlived its probe
 
 # (guest reserve, host side) per runtime; a runtime without an entry is not qualified and is refused (design 2.5)
 RUNTIME_OVERHEADS: dict[str, tuple[int, int]] = {
@@ -626,9 +628,9 @@ UNSUPPORTED_RUNTIME_TEXT = (
 )
 PODMAN_ENGINE_COMPONENT = "Podman Engine"
 PODMAN_HELPER_ENDPOINT = "unix:///var/run/docker.sock"
-# ponytail: below every measured guest share of configured memory (0.938-0.965, W0); upgrade: a per-size table
+# NOTE: below every measured guest share of configured memory (0.938-0.965, W0); upgrade: a per-size table
 PODMAN_GUEST_SHARE = 0.93
-PODMAN_MEMORY_STEP_MIB = 256  # ponytail: the granularity the size hint rounds `podman machine set --memory` to
+PODMAN_MEMORY_STEP_MIB = 256  # NOTE: the granularity the size hint rounds `podman machine set --memory` to
 PODMAN_HELPER_TEXT = (
     "Podman reached through /var/run/docker.sock (podman-mac-helper) is not supported; point a Docker context at the"
     " machine's API socket (podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}'): docker context"
@@ -701,18 +703,38 @@ def match_machine(endpoint: str, machines: Sequence["MachineFacts"]) -> "Machine
     )
 
 
+def loopback_endpoint(endpoint: str) -> bool:
+    """Whether a Docker endpoint is a TCP socket on this machine's loopback (``127.0.0.1``, ``localhost``, ``::1``)."""
+    if not endpoint.startswith("tcp://"):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(endpoint)
+        host, _port = parsed.hostname, parsed.port  # reading the port validates it
+    except ValueError:
+        return False  # a malformed URL names no machine: never this one
+    if host == "localhost":
+        return True
+    try:
+        return host is not None and ipaddress.ip_address(host).is_loopback  # 127.0.0.0/8 and ::1, never a DNS name
+    except ValueError:
+        return False
+
+
 def detect_runtime(
     info: Mapping[str, object], client_platform: str, endpoint: str, home: Path
 ) -> str | RuntimeRefusal | None:
     """Name the runtime behind a local Docker daemon from its ``/info``, the client platform and the client endpoint.
 
-    ``None`` is an endpoint that is not a local Unix socket (``tcp://``, ``ssh://``, ``npipe://``): a remote daemon,
-    accounted as today's remote from any client. A Mac VM daemon is only recognised from a ``darwin`` client, and
-    Colima only through its own profile's socket, so no Mac VM is ever accounted as native Linux. A Podman machine is
-    never classified here: its binding decides (``lifecycle.runtime_of``; the adapter refuses a Podman engine it
-    cannot bind, design 2.2).
+    ``None`` is an endpoint that is not this machine's (another host's ``tcp://``, ``ssh://``, ``npipe://``): a remote
+    daemon, accounted as today's remote from any client. A ``tcp://`` endpoint on the loopback is this machine's daemon
+    (a CI runner reaching its own host's daemon) and is classified like its local socket; on a Mac only a daemon this
+    rule recognises there (Docker Desktop) is, and any other stays remote (a tunnel to another host). A Mac VM daemon is
+    only recognised from a ``darwin`` client, and Colima only through its own profile's socket, so no Mac VM is ever
+    accounted as native Linux. A Podman machine is never classified here: its binding decides (``lifecycle.runtime_of``;
+    the adapter refuses a Podman engine it cannot bind, design 2.2).
     """
-    if not endpoint.startswith("unix://"):
+    local_socket = endpoint.startswith("unix://")
+    if not local_socket and not loopback_endpoint(endpoint):
         return None
     operating_system = info.get("OperatingSystem")
     desktop = isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
@@ -725,7 +747,11 @@ def detect_runtime(
             socket = home / ".colima" / (colima.group(1) or "default") / "docker.sock"
             if endpoint == f"unix://{socket}":
                 return "colima"
+        if not local_socket:
+            return None  # a loopback port to a daemon not recognised here: a tunnel to another host stays remote
     elif client_platform == "linux":
+        if desktop and not local_socket:
+            return None  # a loopback port to a Desktop daemon (WSL2's exposed one) stays remote, as before
         if desktop:
             return RuntimeRefusal(
                 "Docker Desktop daemon seen from a Linux client; use Docker Engine in the WSL2 distribution."
@@ -751,7 +777,7 @@ def vm_disk_host_directory(runtime: str | None, name: str | None, home: Path) ->
     return home / ".colima" / "_lima" / name
 
 
-# ponytail: one measurement (8 GiB configured: 96.7 % reported as MemTotal, c6 window); upgrade: a per-size table
+# NOTE: one measurement (8 GiB configured: 96.7 % reported as MemTotal, c6 window); upgrade: a per-size table
 COLIMA_GUEST_SHARE = 0.96
 
 
@@ -817,8 +843,8 @@ class CapacityDecision:
     detail: str | None = None
 
 
-DISK_FLOOR_BYTES = 4 * _GIB  # ponytail: the per-run estimate without a previous run's image sizes (design DD8)
-PRIVATE_ROOT_FLOOR_BYTES = _GIB  # ponytail: a run's private root needs this much free; it holds no images
+DISK_FLOOR_BYTES = 4 * _GIB  # NOTE: the per-run estimate without a previous run's image sizes (design DD8)
+PRIVATE_ROOT_FLOOR_BYTES = _GIB  # NOTE: a run's private root needs this much free; it holds no images
 
 
 @dataclass(frozen=True)
@@ -835,7 +861,7 @@ class DiskFigure:
 def derive_reserve(fs_total: int, declared: int | None) -> int:
     """Return a place's reserve: the declared one, else 1/32 clamped to 2..8 GiB; never more than half the place.
 
-    ponytail: fixed fraction and clamps (design DD7); upgrade path: the declared `install --disk-reserve-bytes`.
+    NOTE: fixed fraction and clamps (design DD7); upgrade path: the declared `install --disk-reserve-bytes`.
     """
     derived = min(max(fs_total // 32, 2 * _GIB), 8 * _GIB) if declared is None else declared
     return min(derived, fs_total // 2)
@@ -873,8 +899,8 @@ def private_root_fit(free: int) -> CapacityDecision:
     return CapacityDecision(CapacityState.READY, "disk-fits")
 
 
-OVERTAKE_WINDOW_NS = 30 * 60 * 1_000_000_000  # ponytail: fixed bound; an operator setting is the upgrade if needed
-TURN_GRACE_NS = 120_000_000_000  # ponytail: fixed; an operator setting is the upgrade
+OVERTAKE_WINDOW_NS = 30 * 60 * 1_000_000_000  # NOTE: fixed bound; an operator setting is the upgrade if needed
+TURN_GRACE_NS = 120_000_000_000  # NOTE: fixed; an operator setting is the upgrade
 
 
 @dataclass(frozen=True)

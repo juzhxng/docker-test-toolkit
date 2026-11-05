@@ -53,9 +53,9 @@ if TYPE_CHECKING:
     from docker_test_toolkit.application.lifecycle import Deadline, NativeClock
     from docker_test_toolkit.application.ports.docker import DockerPort
 
-RETENTION_INTERVAL_NS = 600_000_000_000  # ponytail: one pass per 10 min unless the last one deferred work
-RETENTION_BUDGET_S = 60  # ponytail: fixed time bound of one pass
-RETENTION_MAX_DELETIONS = 200  # ponytail: fixed bound of one pass
+RETENTION_INTERVAL_NS = 600_000_000_000  # NOTE: one pass per 10 min unless the last one deferred work
+RETENTION_BUDGET_S = 60  # NOTE: fixed time bound of one pass
+RETENTION_MAX_DELETIONS = 200  # NOTE: fixed bound of one pass
 STAMP_FILE = "retention-stamp.json"
 REPORT_FILE = "retention-report.json"
 _TERMINAL = "complete"
