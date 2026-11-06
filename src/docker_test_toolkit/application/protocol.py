@@ -50,7 +50,11 @@ def _error_payload(error: BaseException, *, cleanup: bool = False) -> tuple[dict
     return {
         "category": category,
         "message": _safe_message(error),
-        "context": {"next_action": next_action, "reason": reason if reason in REASONS else "unspecified"},
+        "context": {
+            **getattr(error, "details", {}),
+            "next_action": next_action,
+            "reason": reason if reason in REASONS else "unspecified",
+        },
     }, exit_code
 
 

@@ -2,7 +2,7 @@
 
 [project]
 name = "docker_test_toolkit"
-version = "0.7.2"
+version = "0.7.4"
 description = "Private, workspace-agnostic lifecycle authority for local Docker-backed tests"
 authors = [{name = "juzhxng", email = "juzhxng@users.noreply.github.com"}]
 readme = "README.md"
@@ -207,4 +207,3 @@ fix = ["_fix_ruff_format", "_fix_ruff_lint",  "_fix_nbqa"] # The order is import
 typecheck = "mypy --check-untyped-defs --no-implicit-optional --show-error-codes src"
 qa = ["typecheck", "static", "unit", "int"]
 docs = "mkdocs build --strict"
-certify = "python scripts/freeze_evidence.py verify --manifest evidence/final-snapshot.json"

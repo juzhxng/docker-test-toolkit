@@ -149,10 +149,12 @@ from docker_test_toolkit.domain.models import (
 )
 from docker_test_toolkit.domain.platform import Platform, classify_emulation, daemon_platform, parse_requested_platform
 from docker_test_toolkit.domain.policy import (
+    DEAD_GRACE_NS,
     DISK_FLOOR_BYTES,
     HOLDER_PHASES,
     NAME,
     OVERTAKE_WINDOW_NS,
+    RECOVERY_BACKOFF_NS,
     RECOVERY_PHASES,
     REMOTE_OVERHEADS,
     RUNTIME_OVERHEADS,
@@ -177,9 +179,11 @@ from docker_test_toolkit.domain.policy import (
     allowance_bytes,
     attributed_ids,
     claim_eligible,
+    clock_namespace,
     combined,
     counted_grant,
     cpu_pressure_blocks_join,
+    deadline_unexpired,
     derive_reserve,
     detect_runtime,
     disk_estimate,
@@ -337,6 +341,14 @@ class _Timebase(ctypes.Structure):
     _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
 
 
+def _time_namespace_offsets() -> str | None:
+    """Return this process's time namespace offsets; ``None`` when the kernel does not show them."""
+    try:
+        return Path("/proc/self/timens_offsets").read_text()
+    except OSError:
+        return None
+
+
 class NativeClock:
     """Elapsed time includes system sleep; an origin change never renews a budget."""
 
@@ -365,7 +377,7 @@ class NativeClock:
             namespace = os.readlink("/proc/self/ns/time")
         except (OSError, ValueError) as error:
             raise ResourceError("Cannot resolve boot/time namespace.") from error
-        return f"linux-boottime:{boot}:{namespace}"
+        return f"linux-boottime:{boot}:{clock_namespace(namespace, _time_namespace_offsets())}"
 
     def read(self) -> int:
         """Read nanoseconds, rejecting origin changes and backwards observations."""
@@ -6985,6 +6997,45 @@ def recorded_run_context(registry: Path, run_id: str, raw: dict) -> RunContext |
     )
 
 
+def run_locator(context: RunContext) -> dict[str, str]:
+    """Return the exact six-field locator an operator passes to ``run recover`` or ``run release``."""
+    return {
+        "project_root": str(context.project.root),
+        "project_state": str(context.project.state),
+        "run_id": context.run_id,
+        "session_id": context.session_id,
+        "record": str(context.record),
+        "private_root": str(context.private_root),
+    }
+
+
+def indexed_run_item(project: Context, run_id: str, location: str) -> dict[str, object]:
+    """Describe one run a project's index names for a cleanup refusal: its locator, or why it has none.
+
+    ``record-foreign`` when the index points outside this registry's record or the record belongs to another project,
+    ``record-unloadable`` when the record does not load; only a record that loads for this project gets a locator.
+    """
+    item: dict[str, object] = {"run_id": run_id, "action": None, "context": None, "reason": "record-foreign"}
+    path = project.state / "runs" / f"{run_id}.json"
+    if location != str(path):
+        return item
+    try:
+        raw = _read_private_json(path)
+    except (OSError, ResourceError, ValueError, RecursionError):
+        return {**item, "reason": "record-unloadable"}
+    context = recorded_run_context(project.state, run_id, raw) if isinstance(raw, dict) else None
+    if context is None:
+        return {**item, "reason": "record-unloadable"}
+    if raw["project_root"] != str(project.root):
+        return item
+    try:
+        loaded = _load_run(context)
+    except ResourceError:
+        return {**item, "reason": "record-unloadable"}
+    action = "run.release" if loaded["state"] == "stopped-retained" else "run.recover"
+    return {"run_id": run_id, "action": action, "context": run_locator(context), "reason": None}
+
+
 def run_record_loads(registry: Path, run_id: str, raw: dict) -> bool:
     """Return whether a run record loads under the identity it records for itself."""
     context = recorded_run_context(registry, run_id, raw)
@@ -13311,12 +13362,13 @@ def _entry_vitals(run_id: str, entry: QueueEntry, directory: Path) -> str:
 
 def _note_deaths_and_claim(
     directory: Path, entries: dict[str, QueueEntry], observed: dict[str, str], deadline_ns: int | None = None
-) -> tuple[str, str] | None:
-    """Record what the unlocked reads saw and, in the same metadata section, claim at most one dead entry to recover.
+) -> list[tuple[str, str]]:
+    """Record what the unlocked reads saw and, in the same metadata section, claim the dead entries to recover.
 
-    Entries seen dead get ``dead_since`` (restarted when its clock origin changed); anything else clears it. The first
-    entry (ticket order) that ``spawn_eligible`` accepts gets the claim intent ``{attempt, 30 s deadline, claimant
-    null}``; eligibility, the account cap and the intent never span two sections. Returns ``(run_id, attempt)``.
+    Entries seen dead get ``dead_since`` (restarted when its clock origin changed); anything else clears it. Dead
+    entries that ``spawn_eligible`` accepts get, in ticket order and up to the account cap, the claim intent
+    ``{attempt, deadline, claimant null}``, whose deadline holds through the rest of the entry's grace plus the
+    worker's start; eligibility, the cap and the intents never span two sections. Returns ``(run_id, attempt)`` pairs.
     """
     account = Context(directory, directory)
     with lock(account, "metadata", deadline_ns=deadline_ns) as anchor:
@@ -13347,31 +13399,32 @@ def _note_deaths_and_claim(
             )
             for entry in state.entries.values()
         )
-        chosen = None
+        claims: list[tuple[str, str]] = []
         for run_id, entry in sorted(seen.items(), key=lambda item: item[1].ticket):
             if observed[run_id] == "dead" and spawn_eligible(
                 {"dead_since": entry.dead_since, "takeover": entry.takeover},
                 claimant_state=_claim_observation(entry.takeover),
                 now_tick_ns=now,
                 origin=clock.origin,
-                live_or_unbound_claims=held,
-                spawned_this_pass=False,
+                live_or_unbound_claims=held + len(claims),
             ):
                 attempt = str(uuid.uuid4())
+                dead_since = cast(dict, entry.dead_since)
+                hold_ns = max(0, dead_since["tick_ns"] + DEAD_GRACE_NS - now) + UNBOUND_CLAIM_NS
                 entry.takeover = {
                     "attempt": attempt,
-                    "deadline": asdict(Deadline.after(clock, UNBOUND_CLAIM_NS // 1_000_000_000)),
+                    "deadline": asdict(Deadline.after(clock, hold_ns / 1_000_000_000)),
                     "claimant": None,
                 }
-                chosen, changed = (run_id, attempt), True
-                break
+                claims.append((run_id, attempt))
+                changed = True
         if changed:
             _save_queue(directory, state, anchor)
-        return chosen
+        return claims
 
 
 def _clear_claim_intent(directory: Path, run_id: str, attempt: str, deadline_ns: int | None = None) -> None:
-    """Withdraw this spawner's own unbound claim intent after its worker could not start; anything else is left."""
+    """Withdraw this worker's own unbound claim intent when its entry stopped being dead; anything else is left."""
     with lock(Context(directory, directory), "metadata", deadline_ns=deadline_ns) as anchor:
         state = _load_queue(directory, anchor)
         entry = state.entries.get(run_id)
@@ -13422,37 +13475,51 @@ def _spawn_recovery_worker(context: RunContext, attempt: str, test_directory: Pa
     threading.Thread(target=child.wait, name=f"recovery-worker-reaper-{context.run_id}", daemon=True).start()
 
 
-def reconcile_account(context: RunContext | None = None, *, _test_directory: Path | None = None) -> None:
-    """Detect dead queue entries of other runs and spawn at most one takeover worker per pass (design 3.10).
+@dataclass
+class RecoveryTriggerReport:
+    """What one detection pass did: the workers it started, the starts that failed, and whether it did not finish."""
 
-    Run by a queued guardian in its admission pass; ``context`` is its own run, whose entry is never claimed by itself.
-    Foreign records are read only, without any project or run lock, and a record that cannot be trusted just blocks that
-    entry for this pass. A dead holder keeps the slot until its takeover publishes. The queue is read through the
-    ordinary codec, so a non-empty version 1 queue (the recovery-only phase) is refused before any detection.
-    Never recovers a run inline.
+    spawned: int = 0
+    spawn_failed: int = 0
+    skipped: bool = False
+
+
+def reconcile_account(
+    context: RunContext | None = None, *, _test_directory: Path | None = None, _deadline_ns: int | None = None
+) -> RecoveryTriggerReport:
+    """Detect dead queue entries of other runs and spawn one takeover worker per claim, within the account cap.
+
+    Run by a queued guardian in its admission pass, where ``context`` is its own run, whose entry is never claimed by
+    itself, and by an operator command as its trigger pass (``_deadline_ns`` is the absolute budget of the pass's two
+    metadata sections; missing it raises ``lock-deadline``). Foreign records are read only, without any project or run
+    lock, and a record that cannot be trusted just blocks that entry for this pass. A dead holder keeps the slot until
+    its takeover publishes. The queue is read through the ordinary codec, so a non-empty version 1 queue (the
+    recovery-only phase) is refused before any detection. A worker that cannot start leaves its intent to expire. Never
+    recovers a run inline.
     """
     # NOTE: a dead entry lingers on an idle account until the next toolkit activity; ceiling: no always-on
     # daemon; upgrade path: a scheduled recovery pass
     directory = account_directory() if _test_directory is None else _test_directory.resolve()
     own = None if context is None else context.run_id
-    deadline_ns = None if context is None else _queue_budget_ns(_load_run(context))
+    deadline_ns = _deadline_ns if context is None else _queue_budget_ns(_load_run(context))
     with lock(Context(directory, directory), "metadata", deadline_ns=deadline_ns) as anchor:
         entries = {run_id: entry for run_id, entry in _load_queue(directory, anchor).entries.items() if run_id != own}
     observed = {run_id: _entry_vitals(run_id, entry, directory) for run_id, entry in entries.items()}
     failpoint("detection-read")
-    claim = _note_deaths_and_claim(directory, entries, observed, deadline_ns)
-    if claim is None:
-        return
-    run_id, attempt = claim
-    entry = entries[run_id]
-    registry = Path(entry.registry)
-    try:
-        worker = recorded_run_context(registry, run_id, _read_private_json(Path(entry.record)))
-        if worker is None:
-            raise ResourceError("The dead run's record names no usable context.")
-        _spawn_recovery_worker(worker, attempt, _test_directory)
-    except (OSError, ResourceError):
-        _clear_claim_intent(directory, run_id, attempt, deadline_ns)
+    claims = _note_deaths_and_claim(directory, entries, observed, deadline_ns)
+    report = RecoveryTriggerReport()
+    for run_id, attempt in claims:
+        entry = entries[run_id]
+        try:
+            worker = recorded_run_context(Path(entry.registry), run_id, _read_private_json(Path(entry.record)))
+            if worker is None:
+                raise ResourceError("The dead run's record names no usable context.")
+            _spawn_recovery_worker(worker, attempt, _test_directory)
+        except (OSError, ResourceError):
+            report.spawn_failed += 1
+        else:
+            report.spawned += 1
+    return report
 
 
 @dataclass
@@ -14194,9 +14261,9 @@ def _register_worker_cleanup() -> None:
 def _require_own_attempt(context: RunContext, attempt: str, directory: Path) -> None:
     """Refuse ``claim-held`` unless the claim predicate lets this worker proceed on its entry; reads, never writes."""
     clock = NativeClock()
+    entry = _own_entry(context, directory)
+    takeover = None if entry is None else entry.takeover
     try:
-        raw = json.loads((directory / "queue.json").read_text())
-        takeover = account_queue.to_logical(raw).entries[context.run_id].takeover
         own = claim_eligible(
             takeover,
             caller_attempt=attempt,
@@ -14204,10 +14271,106 @@ def _require_own_attempt(context: RunContext, attempt: str, directory: Path) -> 
             now_tick_ns=clock.read(),
             origin=clock.origin,
         )
-    except (OSError, RecursionError, ValueError, KeyError, TypeError, ResourceError):
+    except (ValueError, KeyError, TypeError, ResourceError):
         own = False
     if not own:
         raise ResourceError("This worker's takeover attempt is absent, replaced or expired.", reason="claim-held")
+
+
+def _own_entry(context: RunContext, directory: Path) -> QueueEntry | None:
+    """Return this run's queue entry from a lock-free read; ``None`` on any read or parse failure."""
+    try:
+        return account_queue.to_logical(json.loads((directory / "queue.json").read_text())).entries.get(context.run_id)
+    except (OSError, RecursionError, ValueError, KeyError, TypeError, ResourceError):
+        return None
+
+
+def _worker_lock_deadline() -> int:
+    """The absolute deadline of one metadata section of a takeover worker: no wait of a worker is unbounded."""
+    return time.monotonic_ns() + UNBOUND_CLAIM_NS
+
+
+def _renew_own_intent(context: RunContext, attempt: str, directory: Path) -> bool:
+    """Rewrite this worker's expired intent after a host sleep: only its own, unbound, on an entry dead on this origin.
+
+    Returns whether the intent was written; no other part of the queue changes.
+    """
+    with lock(Context(directory, directory), "metadata", deadline_ns=_worker_lock_deadline()) as anchor:
+        state = _load_queue(directory, anchor)
+        entry = state.entries.get(context.run_id)
+        clock = NativeClock()
+        takeover = None if entry is None else entry.takeover
+        if (
+            entry is None
+            or takeover is None
+            or takeover["attempt"] != attempt
+            or takeover["claimant"] is not None
+            or entry.dead_since is None
+            or entry.dead_since["origin"] != clock.origin
+        ):
+            return False
+        entry.takeover = {
+            **takeover,
+            "deadline": asdict(Deadline.after(clock, UNBOUND_CLAIM_NS // 1_000_000_000)),
+        }
+        _save_queue(directory, state, anchor)
+    return True
+
+
+def _await_grace(context: RunContext, attempt: str, directory: Path) -> bool:
+    """Wait until the entry has been dead for the grace on this clock origin; the worker's first proof of death.
+
+    Reads lock-free once per second and renews the own intent when the host slept past it. Returns ``False`` once the
+    wait no longer holds (the entry seen alive, another origin, the record untrusted, the claim or the entry gone),
+    after withdrawing the own unbound intent.
+    """
+    clock = NativeClock()
+    while True:
+        entry = _own_entry(context, directory)
+        takeover = None if entry is None else entry.takeover
+        if entry is None or takeover is None or takeover["attempt"] != attempt:
+            return False
+        if takeover["claimant"] is not None:
+            return True  # a dead worker's claim on this attempt, which it bound after its own wait
+        dead_since = entry.dead_since
+        if (
+            dead_since is None
+            or dead_since["origin"] != clock.origin
+            or _entry_vitals(context.run_id, entry, directory) != "dead"
+        ):
+            _clear_claim_intent(directory, context.run_id, attempt, _worker_lock_deadline())
+            return False
+        lapsed = not deadline_unexpired(takeover["deadline"], clock.read(), clock.origin)
+        if lapsed and not _renew_own_intent(context, attempt, directory):
+            return False
+        if clock.read() - dead_since["tick_ns"] >= DEAD_GRACE_NS:
+            return True
+        time.sleep(1)
+
+
+def _write_owned_back_off(context: RunContext, attempt: str, directory: Path) -> bool:
+    """Bind this failed worker to its own claim until the back-off deadline; any other claim stays untouched.
+
+    A claim bound to another identity (an operator's bind keeps the attempt) is not this worker's to write. Returns
+    whether the back-off was written. Holds nothing but the metadata lock.
+    """
+    clock = NativeClock()
+    actor = asdict(current_process(clock))
+    with lock(Context(directory, directory), "metadata", deadline_ns=_worker_lock_deadline()) as anchor:
+        state = _load_queue(directory, anchor)
+        entry = state.entries.get(context.run_id)
+        takeover = None if entry is None else entry.takeover
+        if entry is None or takeover is None or takeover["attempt"] != attempt:
+            return False
+        if takeover["claimant"] not in (None, actor):
+            return False
+        entry.takeover = {
+            "attempt": attempt,
+            "deadline": asdict(Deadline.after(clock, RECOVERY_BACKOFF_NS // 1_000_000_000)),
+            "claimant": actor,
+        }
+        _save_queue(directory, state, anchor)
+    return True
 
 
 def _run_takeover_worker(
@@ -14215,23 +14378,38 @@ def _run_takeover_worker(
     attempt: str,
     test_directory: Path | None,
 ) -> int:
-    """Run one takeover worker (design 3.10): validate, confirm its attempt read-only, recover.
+    """Run one takeover worker (design 3.3): validate, confirm its attempt, wait out the grace, recover or back off.
 
     The context is checked for shape only, so a blocked or legacy record yields a named refusal instead of a loader
-    error. Any installed version of the account's state format may recover a run (installed-once design I5).
+    error. Any installed version of the account's state format may recover a run (installed-once design I5). The own
+    intent may have lapsed while the host slept: it is renewed once, and only a claim that is no longer this worker's
+    refuses. A wait that no longer holds exits 0 with nothing but the own intent withdrawn.
     """
     if not UUID.fullmatch(attempt):
         raise ResourceError("The takeover attempt is not a UUID.")
     _register_worker_cleanup()
     context = _context_from_payload(payload, validate_record=False)
     directory = account_directory() if test_directory is None else test_directory.resolve()
-    _require_own_attempt(context, attempt, directory)
-    recover_run(
-        context,
-        drain_live_consumers=False,
-        takeover_attempt=attempt,
-        _test_directory=test_directory,
-    )
+    try:
+        _require_own_attempt(context, attempt, directory)
+    except ResourceError:
+        if not _renew_own_intent(context, attempt, directory):
+            raise
+    if not _await_grace(context, attempt, directory):
+        return 0
+    try:
+        recover_run(
+            context,
+            drain_live_consumers=False,
+            takeover_attempt=attempt,
+            _test_directory=test_directory,
+        )
+    except Exception:  # whatever failed the recovery, no respawn per command: the failure itself still ends the worker
+        try:
+            _write_owned_back_off(context, attempt, directory)
+        except (OSError, ResourceError) as error:
+            print(f"Takeover back-off not written: {error}", file=sys.stderr)
+        raise
     return 0
 
 

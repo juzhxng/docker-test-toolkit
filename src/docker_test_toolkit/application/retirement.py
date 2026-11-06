@@ -358,21 +358,6 @@ def _actor_reasons(scope: _Scope, raw: dict, reasons: set[str]) -> None:
             reasons.add("actor-unverifiable")
 
 
-def _run_locator(scope: _Scope, context: lifecycle.RunContext, action: str) -> dict[str, object]:
-    """Return the exact six-field locator an operator passes to `run recover` or `run release`."""
-    return {
-        "action": action,
-        "context": {
-            "project_root": str(context.project.root),
-            "project_state": str(scope.registry),
-            "run_id": context.run_id,
-            "session_id": context.session_id,
-            "record": str(context.record),
-            "private_root": str(context.private_root),
-        },
-    }
-
-
 def _derive_run(scope: _Scope, derivation: _Derivation, run_id: str, indexed: bool) -> None:
     """Evaluate every run clause for one run attributed to the project and record locators and evidence."""
     path = scope.registry / "runs" / f"{run_id}.json"
@@ -421,7 +406,7 @@ def _derive_run(scope: _Scope, derivation: _Derivation, run_id: str, indexed: bo
     elif indexed or _RECOVER_CODES & set(blockers):
         action = "run.recover"
     if action is not None:
-        derivation.locators.append(_run_locator(scope, context, action))
+        derivation.locators.append({"action": action, "context": lifecycle.run_locator(context)})
 
 
 def _queue_reasons(scope: _Scope, run_ids: set[str], reasons: set[str]) -> None:

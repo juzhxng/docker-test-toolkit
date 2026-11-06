@@ -53,10 +53,18 @@ class ToolkitError(RuntimeError):
     cleanup: "ToolkitError | None" = None
     """A separate cleanup failure that accompanies this primary error, reported on its own."""
 
-    def __init__(self, message: str = "", *, reason: str = "unspecified", observer: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason: str = "unspecified",
+        observer: str | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.reason = reason
         self.observer = observer  # the observation source, set once at the innermost boundary that knows it
+        self.details = {} if details is None else details  # structured facts for ``error.context``, additive
 
 
 class ResourceError(ToolkitError):

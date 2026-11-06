@@ -23,6 +23,9 @@ DEAD_GRACE_NS = (
     30_000_000_000  # NOTE: fixed 30 s dead grace; ceiling: one constant per artifact; upgrade path: profile setting
 )
 UNBOUND_CLAIM_NS = 30_000_000_000
+RECOVERY_BACKOFF_NS = (
+    300_000_000_000  # NOTE: fixed 300 s back-off after a failed worker; ceiling: one constant; upgrade path: profile
+)
 TAKEOVER_ACCOUNT_CAP = (
     2  # NOTE: account worker cap 2; ceiling: two concurrent takeovers; upgrade path: configurable cap
 )
@@ -222,9 +225,32 @@ def admission_gate(
     return None if loaded == current else "toolkit-upgraded"
 
 
+INITIAL_TIME_NAMESPACE = "time:[4026531834]"  # the kernel's fixed identity of the initial time namespace
+
+
+def clock_namespace(link: str, offsets: str | None) -> str:
+    """Return the time namespace identity a clock origin carries: what tells clocks apart, not which container this is.
+
+    A container may run in its own time namespace with the host's clocks (Docker on recent hosts does), and runners that
+    share a PID namespace must then agree on one origin, or each sees the others' live processes as replaced. Only
+    offsets read as exactly zero for both clocks prove that; anything else keeps the namespace's own identity.
+    """
+    if offsets is None or sorted(" ".join(line.split()) for line in offsets.splitlines()) != [
+        "boottime 0 0",
+        "monotonic 0 0",
+    ]:
+        return link
+    return INITIAL_TIME_NAMESPACE
+
+
 def actors_dead(states: Iterable[str | None]) -> bool:
     """Return whether every observed actor state proves death (absent or replaced); anything unprovable is not death."""
     return all(state in _DEAD_STATES for state in states)
+
+
+def deadline_unexpired(deadline: Mapping[str, Any], now_tick_ns: int, origin: str) -> bool:
+    """Return whether a recorded deadline still runs: on this clock origin and not yet past."""
+    return deadline["origin"] == origin and now_tick_ns <= deadline["expires_ns"]
 
 
 def claim_eligible(
@@ -249,8 +275,7 @@ def claim_eligible(
         return False
     if takeover["claimant"] is not None:
         return claimant_state in _DEAD_STATES
-    deadline = takeover["deadline"]
-    unexpired = deadline["origin"] == origin and now_tick_ns <= deadline["expires_ns"]
+    unexpired = deadline_unexpired(takeover["deadline"], now_tick_ns, origin)
     return unexpired if caller_attempt is not None else not unexpired
 
 
@@ -261,21 +286,28 @@ def spawn_eligible(
     now_tick_ns: int,
     origin: str,
     live_or_unbound_claims: int,
-    spawned_this_pass: bool,
 ) -> bool:
-    """Return whether a dead queue entry may get a takeover worker spawned for it in this admission pass.
+    """Return whether a dead queue entry may get a takeover worker spawned for it in this pass.
 
-    Requires: no other spawn this pass; fewer than the account cap of live or unbound-unexpired claims; the entry seen
-    dead for at least the grace on the same clock origin (a changed origin restarts the grace); and its own claim free
-    (null, unbound and expired, or bound to a proven-dead claimant). An unblocked entry is the caller's precondition.
+    Requires: room under the account cap beside the live or unbound-unexpired claims, this pass's included; the entry
+    seen dead on this clock origin (the worker waits out the grace itself); and its own claim free (null, unbound and
+    expired, or bound to a proven-dead claimant whose deadline has passed: before it, the claim is a failed worker's
+    back-off, which holds off automatic spawns only). An unblocked entry is the caller's precondition.
     """
-    if spawned_this_pass or live_or_unbound_claims >= TAKEOVER_ACCOUNT_CAP:
+    if live_or_unbound_claims >= TAKEOVER_ACCOUNT_CAP:
         return False
     dead_since = entry["dead_since"]
-    if dead_since is None or dead_since["origin"] != origin or now_tick_ns - dead_since["tick_ns"] < DEAD_GRACE_NS:
+    if dead_since is None or dead_since["origin"] != origin:
+        return False
+    takeover = entry["takeover"]
+    if (
+        takeover is not None
+        and takeover["claimant"] is not None
+        and deadline_unexpired(takeover["deadline"], now_tick_ns, origin)
+    ):
         return False
     return claim_eligible(
-        entry["takeover"], caller_attempt=None, claimant_state=claimant_state, now_tick_ns=now_tick_ns, origin=origin
+        takeover, caller_attempt=None, claimant_state=claimant_state, now_tick_ns=now_tick_ns, origin=origin
     )
 
 

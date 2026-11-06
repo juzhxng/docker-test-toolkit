@@ -141,7 +141,7 @@ def _check_entries(layout: Path, *, staging: bool) -> None:
         listed = list(entries)
     for entry in listed:
         kind = entry.stat(follow_symlinks=False).st_mode
-        if entry.name in ("oci-layout", "index.json", "index.json.lock") and stat.S_ISREG(kind):
+        if entry.name in ("oci-layout", "index.json", "index.json.lock", "cache.lock") and stat.S_ISREG(kind):
             continue
         if entry.name == "blobs" and stat.S_ISDIR(kind):
             continue

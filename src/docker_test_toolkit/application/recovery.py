@@ -979,6 +979,7 @@ def _cleanup(
     *,
     selected_session=None,
     verify_run=None,
+    locate_run=None,
     image_hold=None,
     image_in_use=None,
 ):
@@ -994,6 +995,7 @@ def _cleanup(
         docker: Bound Docker adapter used for inspection and cleanup.
         execute: Whether to perform the planned cleanup.
         verify_run: Verdict on one attributable unindexed run record, ``(run_id, raw) -> bool``; project cleanup only.
+        locate_run: Describes one indexed run for the refusal, ``(run_id, location) -> dict``.
         image_hold: The image lock K's descriptor an executing cleanup holds; each image removal's child inherits it.
         image_in_use: Whether a live or retained run still uses an image, decided under K; such images are kept.
 
@@ -1008,7 +1010,19 @@ def _cleanup(
                 raise ResourceError("Session is not registered to this project.")
             indexed_sessions = indexed_session_ids(ctx, record) if selected_session is not None else set()
             if record["runs"] and (selected_session is None or selected_session in indexed_sessions):
-                raise ResourceError("Indexed test runs require lifecycle reconciliation before project cleanup.")
+                items = [locate_run(*entry) for entry in record["runs"].items()] if locate_run else []
+                raise ResourceError(
+                    "Indexed test runs require lifecycle reconciliation before project cleanup.",
+                    details={
+                        "runs": [
+                            item
+                            for item in items
+                            if selected_session is None
+                            or item["context"] is None
+                            or item["context"]["session_id"] == selected_session
+                        ]
+                    },
+                )
             before = inventory(ctx, record, docker, selected_session=selected_session)
             history = (
                 {"history_unverified": [*_unverified_history(ctx, verify_run), *_unverified_archive(ctx)]}
@@ -1181,7 +1195,9 @@ def _cleanup(
         }
 
 
-def cleanup_project(ctx, docker, execute=False, *, verify_run=None, image_account=None, image_in_use=None):
+def cleanup_project(
+    ctx, docker, execute=False, *, verify_run=None, locate_run=None, image_account=None, image_in_use=None
+):
     """Plan or execute project cleanup.
 
     ``verify_run`` judges the project's unindexed run history (see ``_unverified_history``); unverified history keeps
@@ -1196,19 +1212,26 @@ def cleanup_project(ctx, docker, execute=False, *, verify_run=None, image_accoun
             docker,
             execute,
             verify_run=verify_run,
+            locate_run=locate_run,
             image_hold=hold_fd,
             image_in_use=image_in_use,
         )
 
 
-def cleanup_session(ctx, docker, session_id, execute=False, *, image_account=None, image_in_use=None):
+def cleanup_session(ctx, docker, session_id, execute=False, *, locate_run=None, image_account=None, image_in_use=None):
     """Plan or execute cleanup for one exact registered session (``image_account``, ``image_in_use``: see
     ``cleanup_project``)."""
     if not isinstance(session_id, str) or not UUID.fullmatch(session_id):
         raise ResourceError("Session cleanup identity is invalid.")
     with _image_lock_without_waiting(image_account, execute) as hold_fd:
         return _cleanup(
-            ctx, docker, execute, selected_session=session_id, image_hold=hold_fd, image_in_use=image_in_use
+            ctx,
+            docker,
+            execute,
+            selected_session=session_id,
+            locate_run=locate_run,
+            image_hold=hold_fd,
+            image_in_use=image_in_use,
         )
 
 

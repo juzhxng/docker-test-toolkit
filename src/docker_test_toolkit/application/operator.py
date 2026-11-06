@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from dataclasses import MISSING, asdict, fields
 from functools import partial
@@ -16,7 +17,7 @@ from docker_test_toolkit.application.build_cache import remove_caches
 from docker_test_toolkit.application.ports.docker import DockerPort
 from docker_test_toolkit.application.recovery import UUID, Context, cleanup_project, cleanup_session
 from docker_test_toolkit.application.retirement import retire_projects
-from docker_test_toolkit.application.state import account_directory, registry_directory
+from docker_test_toolkit.application.state import account_directory, canonical_account, registry_directory
 from docker_test_toolkit.application.timeline import project_timeline
 from docker_test_toolkit.domain.errors import InvalidInput, ResourceError, ToolkitError
 from docker_test_toolkit.domain.models import (
@@ -346,7 +347,63 @@ class LeaseOperator:
         self._control_capabilities.clear()
 
 
+_RECOVERY_TRIGGERS = {"cleanup.project", "project.retire"}  # only with execute; every other command starts no recovery
+_TRIGGER_LOCK_BUDGET_NS = 28_000_000_000  # the pass's two metadata sections; AC1's 30 s allow 2 s for the rest
+
+
+def _trigger_recovery() -> dict[str, object]:
+    """Run one detection pass after an executing command and return its report; it never changes the command's outcome.
+
+    The account comparison is the composition seam: the pass and its worker use the production path unless a test bound
+    another account. Any failure of the pass reports ``skipped``, and the next executing command retries.
+    """
+    try:
+        account = account_directory()
+        test_directory = None if account == canonical_account() else account
+        report = lifecycle.reconcile_account(
+            _test_directory=test_directory, _deadline_ns=time.monotonic_ns() + _TRIGGER_LOCK_BUDGET_NS
+        )
+    except (
+        RuntimeError,
+        OSError,
+        LookupError,
+        ValueError,
+        TypeError,
+        AttributeError,
+    ):  # ToolkitError is a RuntimeError
+        report = lifecycle.RecoveryTriggerReport(skipped=True)
+    return asdict(report)
+
+
 def execute(
+    command: str,
+    payload: dict,
+    *,
+    docker_factory: Callable[..., DockerPort],
+    execute_cleanup: bool = False,
+) -> dict[str, object]:
+    """Execute one closed operator command; an executing cleanup or retirement then triggers the recovery pass.
+
+    The pass runs after the command's result or refusal is fixed and its locks are released, for any outcome but invalid
+    input, and adds one ``recovery_trigger`` key to the result or to ``error.context``. A filesystem failure of the
+    command carries no context of its own, so it is reported as it is and the pass stays unreported.
+    """
+    if not (execute_cleanup and command in _RECOVERY_TRIGGERS):
+        return _execute(command, payload, docker_factory=docker_factory, execute_cleanup=execute_cleanup)
+    try:
+        result = _execute(command, payload, docker_factory=docker_factory, execute_cleanup=True)
+    except InvalidInput:
+        raise
+    except ToolkitError as error:
+        error.details["recovery_trigger"] = _trigger_recovery()
+        raise
+    except OSError:
+        _trigger_recovery()
+        raise
+    return {**result, "recovery_trigger": _trigger_recovery()}
+
+
+def _execute(
     command: str,
     payload: dict,
     *,
@@ -427,6 +484,7 @@ def execute(
                 docker_factory(),
                 payload["session_id"],
                 execute=execute_cleanup,
+                locate_run=partial(lifecycle.indexed_run_item, cleanup_context),
                 image_account=image_account,
                 image_in_use=image_in_use,
             )
@@ -435,6 +493,7 @@ def execute(
             docker_factory(),
             execute=execute_cleanup,
             verify_run=partial(lifecycle.run_record_loads, cleanup_context.state),
+            locate_run=partial(lifecycle.indexed_run_item, cleanup_context),
             image_account=image_account,
             image_in_use=image_in_use,
         )

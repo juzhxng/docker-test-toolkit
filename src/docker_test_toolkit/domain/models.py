@@ -14,7 +14,7 @@ from docker_test_toolkit.domain.policy import NAME, VERSION, require_name
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
-TOOLKIT_VERSION = "0.7.2"
+TOOLKIT_VERSION = "0.7.4"
 BUILDER_RELEASE_MIN_VERSION = (
     "0.6.17"  # the first release whose shared runs refuse a builder after their first phase (R16)
 )
