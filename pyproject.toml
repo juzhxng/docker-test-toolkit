@@ -2,7 +2,7 @@
 
 [project]
 name = "docker_test_toolkit"
-version = "0.7.4"
+version = "0.7.5"
 description = "Private, workspace-agnostic lifecycle authority for local Docker-backed tests"
 authors = [{name = "juzhxng", email = "juzhxng@users.noreply.github.com"}]
 readme = "README.md"

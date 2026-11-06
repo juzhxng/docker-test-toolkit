@@ -2282,6 +2282,10 @@ def _compose_promotion(adapter, receipt: dict, result: DockerResult, data: dict)
     return "promoted", resources
 
 
+_BUILDER_RESTARTS = 3
+_BUILDER_SETUP_SECONDS = 2
+
+
 def _builder_observation(adapter, name: str) -> dict | None:
     observed = adapter.execute(("buildx", "ls", "--format", "{{json .}}"), timeout_seconds=30)
     if observed.exit_code:
@@ -2359,6 +2363,38 @@ def _builder_promotion(adapter, receipt: dict, result: DockerResult) -> tuple[st
     if cleanup_buildkit is not None:
         resources.append(buildkit or cleanup_buildkit)
     return "promoted", resources
+
+
+def _builder_memory_controller_missing(adapter, worker: str) -> bool:
+    """Return whether a builder's root cgroup offers the memory controller but does not pass it to its children."""
+    observed = adapter.execute(
+        ("exec", worker, "cat", "/sys/fs/cgroup/cgroup.controllers", "/sys/fs/cgroup/cgroup.subtree_control"),
+        timeout_seconds=30,
+    )
+    lines = observed.stdout.splitlines() if observed.exit_code == 0 else []  # an empty second file prints no line
+    return bool(lines) and "memory" in lines[0].split() and "memory" not in " ".join(lines[1:]).split()
+
+
+def _restore_builder_memory_controller(adapter, builder: str, worker: str) -> None:
+    """Restart a builder whose memory controller did not come up, because its first memory-limited build would fail.
+
+    BuildKit enables its cgroup controllers once at start and only logs a warning when the kernel refuses, as it does
+    while a ``docker exec`` (Buildx's own bootstrap check) has a process in the root cgroup. The build then fails with
+    ``openat2 .../memory.max: no such file or directory``. A restart repeats the setup and keeps the container's
+    identity and limits. The check is best effort: a builder that stays broken fails its build as it would have.
+    """
+    try:
+        for _ in range(_BUILDER_RESTARTS):
+            if not _builder_memory_controller_missing(adapter, worker):
+                return
+            print(f"Builder {builder} has no memory controller; restarting it.", file=sys.stderr)
+            adapter.execute(("restart", "-t", "0", worker), timeout_seconds=60)
+            time.sleep(_BUILDER_SETUP_SECONDS)  # no ``docker exec`` while the setup runs, or it can fail the same way
+            adapter.execute(("buildx", "inspect", "--bootstrap", "--builder", builder), timeout_seconds=60)
+        if _builder_memory_controller_missing(adapter, worker):
+            print(f"Builder {builder} still has no memory controller.", file=sys.stderr)
+    except (ResourceError, OSError) as error:
+        print(f"Builder {builder} memory controller check failed: {type(error).__name__}.", file=sys.stderr)
 
 
 def _state_volume_identity(adapter, state_volume: object, worker: dict) -> dict | None:
@@ -4163,6 +4199,8 @@ def _dispatch_classified(
             for resource in resources
         )
     )
+    if command.kind == "builder-create" and state == "promoted" and not invalid_builder:
+        _restore_builder_memory_controller(adapter, receipt["plan"]["name"], receipt["plan"]["buildkit_name"])
     # A loaded build finished by its dispatcher records its cache outcome and when it finished; an unresolved one is
     # finished later by reconciliation, which records no cache facts (design 3.2, 3.9).
     cache = None
@@ -8132,7 +8170,10 @@ def _test_capacity_inputs(
     )
     if host_script is None:
         current = HostMemoryObservation(clock.origin, now, host_memory, host_memory // 2, 0, 0, 4096, {})
-        start = HostMemoryObservation(clock.origin, now - _WINDOW_NS, host_memory, host_memory // 2, 0, 0, 4096, {})
+        # The clock counts from boot: a machine younger than the window waits for the rest of it, as in production.
+        start = HostMemoryObservation(
+            clock.origin, max(0, now - _WINDOW_NS), host_memory, host_memory // 2, 0, 0, 4096, {}
+        )
     else:
         current = host_script.next(clock, host_memory)
         start = baseline or current
@@ -9037,6 +9078,11 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                 continuity = None if unscripted else baseline
                 pressure = assess_pressure(current, window_start, admission_baseline=continuity, window_ns=window_ns)
                 if pressure.state == CapacityState.REFUSED:
+                    print(
+                        f"Admission refused ({pressure.reason}): current {current}, window start {window_start}, "
+                        f"baseline {continuity}.",
+                        file=sys.stderr,
+                    )
                     return revoke_ungranted(
                         context,
                         capacity_stack,
@@ -11506,6 +11552,7 @@ def _recover_run(
             raise ResourceBusy("Prepared run still has a live requester; recovery refused.", reason="actor-live")
         if data["guardian"] is not None and observe_process(_identity_from_json(data["guardian"])) == "executing":
             raise ResourceBusy("Prepared run still has a live guardian; recovery refused.", reason="actor-live")
+        print(f"Recovery revokes ungranted run {context.run_id}: requester and guardian are gone.", file=sys.stderr)
         revoke_ungranted(
             context,
             _test_directory=_test_directory,
