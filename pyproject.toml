@@ -2,7 +2,7 @@
 
 [project]
 name = "docker_test_toolkit"
-version = "0.7.5"
+version = "0.7.6"
 description = "Let coding agents run Docker-backed tests from several projects on one machine"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
