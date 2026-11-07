@@ -40,7 +40,7 @@ def _private_invocation(values: list[str]) -> bool:
 
 
 def _refuse_unreadable_state(values: list[str]) -> int | None:
-    """Run the start check (design 3.4): refuse every real-account entry whose state format this toolkit cannot read.
+    """Run the start check: refuse every real-account entry whose state format this toolkit cannot read.
 
     The check applies only inside an installation and never to a private invocation (``--test-directory``),
     ``install`` or ``protocol``; ``readiness inspect`` is dispatched before it. Returns the refusal's exit code after
@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         from docker_test_toolkit.adapters.inbound.harness_guard import main as guard_main
 
         return guard_main(values[2:])
-    if values[:1] == ["install"]:  # the installer runs its own format check under the account lock (design 2.3)
+    if values[:1] == ["install"]:  # the installer runs its own format check under the account lock
         from docker_test_toolkit.adapters.inbound.cli import install_main
 
         return install_main(values[1:])

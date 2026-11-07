@@ -1,0 +1,86 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "store-a": {
+   "command": [
+    "postgres",
+    "-c",
+    "shared_preload_libraries=pg_textsearch,pg_cron",
+    "-c",
+    "cron.database_name=sample-a",
+    "-c",
+    "autovacuum=off",
+    "-c",
+    "effective_cache_size=6GB",
+    "-c",
+    "jit=off",
+    "-c",
+    "maintenance_work_mem=2GB",
+    "-c",
+    "max_parallel_maintenance_workers=0",
+    "-c",
+    "max_parallel_workers_per_gather=0",
+    "-c",
+    "plan_cache_mode=force_custom_plan",
+    "-c",
+    "random_page_cost=1.1",
+    "-c",
+    "shared_buffers=2GB",
+    "-c",
+    "track_io_timing=on",
+    "-c",
+    "work_mem=64MB"
+   ],
+   "cpus": 4,
+   "entrypoint": null,
+   "environment": {
+    "POSTGRES_DB": "sample-a",
+    "POSTGRES_PASSWORD": "fixture-password",
+    "POSTGRES_USER": "sample-a"
+   },
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 20,
+    "start_period": "10s",
+    "test": [
+     "CMD-SHELL",
+     "pg_isready -U sample-a -d sample-a && test \"$$(df -Pk /var/lib/postgresql/data | awk 'NR == 2 {print $$4}')\" -ge 10485760"
+    ],
+    "timeout": "5s"
+   },
+   "image": "sample-a-postgres:00000000-0000-4000-8000-0000000000aa",
+   "mem_limit": "8589934592",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 5432
+    }
+   ],
+   "restart": "no",
+   "volumes": [
+    {
+     "source": "store-a-data",
+     "target": "/var/lib/postgresql/data",
+     "type": "volume",
+     "volume": {}
+    }
+   ]
+  }
+ },
+ "volumes": {
+  "store-a-data": {
+   "name": "dtt-capture_store-a-data"
+  }
+ }
+}

@@ -1,4 +1,4 @@
-"""The host-side Podman machine port (design 2026-11-03-podman-runtime, PD3)."""
+"""The host-side Podman machine port."""
 
 from __future__ import annotations
 

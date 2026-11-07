@@ -51,7 +51,7 @@ def _observed_check(
 
 
 def _runtime_fact(daemon: DockerDaemonObservation, binding: PodmanBinding | None = None) -> str | None:
-    """Name the detected runtime (design 2.5): ``None`` for a remote endpoint, ``unsupported`` for a refused one."""
+    """Name the detected runtime: ``None`` for a remote endpoint, ``unsupported`` for a refused one."""
     if daemon.endpoint is None:
         return None
     detected = lifecycle.runtime_of(
@@ -203,7 +203,7 @@ def pressure_facts(
 
 
 def _disk_facts(reading: DiskFigure | None, declared: int | None, vm_folder: Path | None) -> dict[str, object]:
-    """Return free, total, reserve and state of each disk place (design 2.6), without any Docker call.
+    """Return free, total, reserve and state of each disk place, without any Docker call.
 
     The data root is the guardians' latest probe reading of this boot; the runtime's VM disk folder and the private
     root's nearest existing parent are measured here. A place that cannot be measured is ``unknown``.

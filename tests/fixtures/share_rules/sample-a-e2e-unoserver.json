@@ -1,0 +1,43 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "e2e-unoserver": {
+   "command": null,
+   "cpus": 1,
+   "entrypoint": null,
+   "environment": {
+    "S6_CMD_WAIT_FOR_SERVICES_MAXTIME": "0"
+   },
+   "healthcheck": {
+    "interval": "10s",
+    "retries": 10,
+    "start_period": "30s",
+    "test": [
+     "CMD-SHELL",
+     "bash -c 'echo > /dev/tcp/localhost/2004'"
+    ],
+    "timeout": "5s"
+   },
+   "image": "libreofficedocker/libreoffice-unoserver:3.24@sha256:80d7f34d5f6d2286e6093fe97f9d6d3fc706460399a3f8a0d34120b9d92016da",
+   "mem_limit": "1073741824",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 2004
+    }
+   ],
+   "restart": "no"
+  }
+ }
+}

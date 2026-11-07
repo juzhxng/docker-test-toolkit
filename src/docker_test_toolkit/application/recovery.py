@@ -186,7 +186,7 @@ IMAGE_LOCK = "images"
 
 @contextmanager
 def image_lock(ctx, *, deadline_ns=None, nonblocking=False):
-    """Hold the account image lock K (design 2.6) and yield its descriptor for Docker children to inherit.
+    """Hold the account image lock K and yield its descriptor for Docker children to inherit.
 
     Released only by closing this descriptor, never by ``LOCK_UN``: flock keeps K held while any inheriting Docker
     child still runs, so K outlives a holder that unwinds or dies first. A busy nonblocking attempt raises
@@ -541,7 +541,7 @@ def claim_build_records(ctx, docker, kind, arguments):
 
 
 def daemon_identity(docker, deadline=None) -> str:
-    """Return the daemon's identity for a comparison with a record (design 2.2).
+    """Return the daemon's identity for a comparison with a record.
 
     On Docker this is exactly today's read, ``info --format {{.ID}}``; on Podman the compat ``ID`` changes on every
     call, so it is the bound machine's identity after a fresh verification. Never a cached value.
@@ -879,7 +879,7 @@ def _save_if_unchanged(ctx, record, expected_digest) -> str:
 
 
 def _unverified_history(ctx, verify_run) -> list[str]:
-    """Return cell ids of this project's attributable run records that do not verify (S10).
+    """Return cell ids of this project's attributable run records that do not verify.
 
     A record is attributable when it parses to an object naming this project. ``verify_run(run_id, raw)`` is the
     application's verdict (``lifecycle.run_record_loads``); without one nothing verifies, so a caller that cannot judge
@@ -1097,7 +1097,7 @@ def _cleanup(
                 remove(*command, target)
         for image_id, references in before["images"].items():
             if image_in_use is not None and image_in_use(image_id):
-                continue  # a live run still uses it: decided under K, before the registry lock (design 2.7)
+                continue  # a live run still uses it: decided under K, before the registry lock
             for reference in references:
                 # Another project may claim this image after the plan: re-read the claims under the registry lock
                 # for each removal and keep the image as soon as one exists.
@@ -1203,8 +1203,8 @@ def cleanup_project(
     ``verify_run`` judges the project's unindexed run history (see ``_unverified_history``); unverified history keeps
     the result unclean. ``image_account`` (the account directory) makes an execution take the image lock K without
     waiting first: a busy K refuses at once with ``image-lock-held`` before anything is removed, and every image
-    removal's Docker child inherits K (design 2.6). ``image_in_use(image_id)``, decided under K, keeps an image another
-    run still uses (design 2.7).
+    removal's Docker child inherits K. ``image_in_use(image_id)``, decided under K, keeps an image another
+    run still uses.
     """
     with _image_lock_without_waiting(image_account, execute) as hold_fd:
         return _cleanup(

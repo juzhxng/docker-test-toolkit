@@ -1,0 +1,49 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "extra": {
+   "internal": true,
+   "ipam": {
+    "config": [
+     {
+      "subnet": "11.0.0.0/24"
+     }
+    ]
+   },
+   "name": "dtt-capture_extra"
+  }
+ },
+ "services": {
+  "e2e-extra-postgres": {
+   "command": [
+    "postgres",
+    "-c",
+    "shared_preload_libraries=pg_textsearch,pg_cron",
+    "-c",
+    "cron.database_name=sample_b_test"
+   ],
+   "cpus": 1,
+   "entrypoint": null,
+   "environment": {
+    "POSTGRES_DB": "sample_b_test",
+    "POSTGRES_PASSWORD": "fixture-password",
+    "POSTGRES_USER": "sample_b_test"
+   },
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 12,
+    "test": [
+     "CMD-SHELL",
+     "pg_isready -U sample_b_test"
+    ],
+    "timeout": "5s"
+   },
+   "image": "sample-b-e2e-extra-postgres:00000000-0000-4000-8000-0000000000aa",
+   "mem_limit": "268435456",
+   "networks": {
+    "extra": null
+   },
+   "restart": "no"
+  }
+ }
+}

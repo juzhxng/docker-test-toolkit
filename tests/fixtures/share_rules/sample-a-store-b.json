@@ -1,0 +1,60 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "store-b": {
+   "command": [
+    "./qdrant",
+    "--uri",
+    "http://store-b:6335"
+   ],
+   "cpus": 4,
+   "entrypoint": null,
+   "environment": {
+    "QDRANT__CLUSTER__ENABLED": "true"
+   },
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 20,
+    "start_period": "10s",
+    "test": [
+     "CMD-SHELL",
+     "bash -lc 'exec 3<>/dev/tcp/localhost/6333 && printf \"GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && grep -q \"200 OK\" <&3'"
+    ],
+    "timeout": "5s"
+   },
+   "image": "qdrant/qdrant:v1.19.1@sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10",
+   "mem_limit": "8589934592",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 6333
+    }
+   ],
+   "restart": "no",
+   "volumes": [
+    {
+     "source": "store-b-data",
+     "target": "/qdrant/storage",
+     "type": "volume",
+     "volume": {}
+    }
+   ]
+  }
+ },
+ "volumes": {
+  "store-b-data": {
+   "name": "dtt-capture_store-b-data"
+  }
+ }
+}

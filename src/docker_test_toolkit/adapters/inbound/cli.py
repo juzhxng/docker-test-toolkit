@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Literal, NoReturn
 
-from docker_test_toolkit.application.installation import install
+from docker_test_toolkit.application.installation import command_link_path, install
 from docker_test_toolkit.application.operator import execute
 from docker_test_toolkit.application.protocol import error_envelope, success_envelope
 from docker_test_toolkit.application.state import RUNNING_ARCHIVE
@@ -159,7 +159,7 @@ def install_main(argv: list[str]) -> int:
         home = Path(pwd.getpwuid(os.getuid()).pw_dir)
         test_root = arguments.root is not None
         root = arguments.root if test_root else platform_root(home, sys.platform)
-        link = home / ".local/bin/docker-test-toolkit" if not test_root and sys.platform == "darwin" else None
+        link = None if test_root else command_link_path(home, sys.platform)
         result = install(
             RUNNING_ARCHIVE,
             root=root,

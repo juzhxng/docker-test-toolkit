@@ -1,0 +1,75 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "integration-jaeger-persistence": {
+   "command": [
+    "--config=/etc/jaeger/config.yaml"
+   ],
+   "cpus": 1,
+   "entrypoint": null,
+   "healthcheck": {
+    "interval": "2s",
+    "retries": 30,
+    "start_period": "5s",
+    "test": [
+     "CMD-SHELL",
+     "body=$$(wget -qO- http://localhost:13133/status) && echo \"$$body\" | grep -Eq '\"healthy\"[[:space:]]*:[[:space:]]*true' && echo \"$$body\" | grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"StatusOK\"'"
+    ],
+    "timeout": "2s"
+   },
+   "image": "jaegertracing/jaeger:2.21.0@sha256:3d0ac795ff98aa04d1be04311d2dac6c25b4bfc8322dc02e53bc5b170c5018c3",
+   "mem_limit": "268435456",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 16686
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 4318
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 13133
+    }
+   ],
+   "restart": "no",
+   "stop_grace_period": "30s",
+   "volumes": [
+    {
+     "bind": {},
+     "read_only": true,
+     "source": "$CHECKOUT/infra/jaeger-config.yaml",
+     "target": "/etc/jaeger/config.yaml",
+     "type": "bind"
+    },
+    {
+     "source": "integration-jaeger-data",
+     "target": "/tmp",
+     "type": "volume",
+     "volume": {}
+    }
+   ]
+  }
+ },
+ "volumes": {
+  "integration-jaeger-data": {
+   "name": "dtt-capture_integration-jaeger-data"
+  }
+ }
+}

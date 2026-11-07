@@ -544,7 +544,7 @@ def _select_projects(scope: _Scope, selection: tuple[str, list]) -> tuple[list[s
 def _cache_sizes(scope: _Scope, project_id: str) -> dict[str, int] | str | None:
     """Return one project's build-cache bytes per platform without creating anything, or ``None`` without a cache.
 
-    A cache that cannot be read is ``"error"``: the cache is never a retire failure (design 3.10).
+    A cache that cannot be read is ``"error"``: the cache is never a retire failure.
     """
     try:
         inventory = build_cache.cache_inventory(build_cache.cache_root(scope.registry), project_id)
@@ -641,7 +641,7 @@ def _place(rename: Callable[[Path, Path], None], source: Path, destination: Path
         source.unlink()
         return True
     rename(source, destination)
-    try:  # a rename keeps the record's own mtime; retention ages an archive from when it was archived (design 2.7)
+    try:  # a rename keeps the record's own mtime; retention ages an archive from when it was archived
         os.utime(destination, None)
     except OSError:
         pass  # retention also reads ctime, which the rename itself updated

@@ -57,7 +57,7 @@ def _protocol_result() -> dict[str, object]:
 
 
 _T = TypeVar("_T")
-_TOOLKIT = {"version": TOOLKIT_VERSION}  # additive since 0.5.0 (the R3 proof release); projects ignore it
+_TOOLKIT = {"version": TOOLKIT_VERSION}  # additive since 0.5.0; projects ignore it
 
 
 def _construct(cls: Callable[..., _T], value: object, invalid: InvalidInput) -> _T:
@@ -348,7 +348,7 @@ class LeaseOperator:
 
 
 _RECOVERY_TRIGGERS = {"cleanup.project", "project.retire"}  # only with execute; every other command starts no recovery
-_TRIGGER_LOCK_BUDGET_NS = 28_000_000_000  # the pass's two metadata sections; AC1's 30 s allow 2 s for the rest
+_TRIGGER_LOCK_BUDGET_NS = 28_000_000_000  # the pass's two metadata sections; the 30 s bound allows 2 s for the rest
 
 
 def _trigger_recovery() -> dict[str, object]:
@@ -430,7 +430,7 @@ def _execute(
         context = _one_shot_context(payload)
         if command == "run.recover":
             recovered = asdict(lifecycle.recover_run(context))
-            report = lifecycle.retention_after_release(context, None, "recovery")  # no lock is held here (design 2.7)
+            report = lifecycle.retention_after_release(context, None, "recovery")  # no lock is held here
             return {**recovered, "retention": None if report is None else asdict(report)}
         return asdict(lifecycle.release_run(context))
     if command == "resource.observe":
@@ -473,7 +473,7 @@ def _execute(
             raise InvalidInput("Project cleanup path is invalid.") from error
         cleanup_context = Context(root, registry_directory())
         # Only an executing cleanup resolves the account: it takes the image lock K and, under it, decides per image
-        # whether a live or retained run still uses it (2.6, 2.7); a dry run reads the registry alone.
+        # whether a live or retained run still uses it; a dry run reads the registry alone.
         image_account = account_directory() if execute_cleanup else None
         image_in_use = (
             lifecycle.operator_image_interest(image_account, cleanup_context.state) if image_account else None

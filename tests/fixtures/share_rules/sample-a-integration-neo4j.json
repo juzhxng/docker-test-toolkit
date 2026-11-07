@@ -1,0 +1,58 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "integration-neo4j": {
+   "command": null,
+   "cpus": 1,
+   "entrypoint": null,
+   "environment": {
+    "NEO4J_AUTH": "neo4j/fixture-password",
+    "NEO4J_db_tx__log_preallocate": "false",
+    "NEO4J_dbms_cypher_min__replan__interval": "1h",
+    "NEO4J_server_memory_heap_initial__size": "256m",
+    "NEO4J_server_memory_heap_max__size": "512m",
+    "NEO4J_server_memory_pagecache_size": "256m"
+   },
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 36,
+    "start_period": "20s",
+    "test": [
+     "CMD-SHELL",
+     "cypher-shell -a neo4j://localhost:7687 -u neo4j -p 'Neo4j-test-2026!' 'RETURN 1' >/dev/null || exit 1"
+    ],
+    "timeout": "15s"
+   },
+   "image": "neo4j:2026.08.1-community@sha256:7f2c38fa0de8caf875d35237fa7dabda74de4f4fc2fc7c3c9e4b53c2add268ad",
+   "mem_limit": "1342177280",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 7687
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 7474
+    }
+   ],
+   "restart": "no",
+   "tmpfs": [
+    "/data:rw,noexec,nosuid,size=1g,mode=0755",
+    "/logs:rw,noexec,nosuid,size=64m,mode=0755"
+   ]
+  }
+ }
+}

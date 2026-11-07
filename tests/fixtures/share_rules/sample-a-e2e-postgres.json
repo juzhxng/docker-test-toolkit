@@ -1,0 +1,63 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "e2e-postgres": {
+   "command": [
+    "postgres",
+    "-c",
+    "shared_preload_libraries=pg_textsearch,pg_cron",
+    "-c",
+    "cron.database_name=sample-a"
+   ],
+   "cpus": 1,
+   "entrypoint": null,
+   "environment": {
+    "POSTGRES_DB": "sample-a",
+    "POSTGRES_PASSWORD": "fixture-password",
+    "POSTGRES_USER": "sample-a"
+   },
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 10,
+    "test": [
+     "CMD-SHELL",
+     "pg_isready -U sample-a -d sample-a"
+    ],
+    "timeout": "5s"
+   },
+   "image": "sample-a-postgres:00000000-0000-4000-8000-0000000000aa",
+   "mem_limit": "402653184",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 5432
+    }
+   ],
+   "restart": "no",
+   "volumes": [
+    {
+     "source": "e2e-postgres-data",
+     "target": "/var/lib/postgresql/data",
+     "type": "volume",
+     "volume": {}
+    }
+   ]
+  }
+ },
+ "volumes": {
+  "e2e-postgres-data": {
+   "name": "dtt-capture_e2e-postgres-data"
+  }
+ }
+}

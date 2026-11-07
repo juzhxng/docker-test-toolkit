@@ -666,7 +666,7 @@ def classify_command(
     raise InvalidInput("Docker command is outside the classified toolkit surface.")
 
 
-# ---- transient share facts (design 2.3, plan P5): read for the share rules, never written into a receipt plan ----
+# ---- transient share facts: read for the share rules, never written into a receipt plan ----
 
 _COMPOSE_UP_VALUE_OPTIONS = frozenset(
     {"--scale", "--wait-timeout", "--timeout", "-t", "--exit-code-from", "--attach", "--no-attach", "--pull"}
@@ -756,7 +756,7 @@ def compose_trailing_globals(argv: tuple[str, ...]) -> tuple[tuple[str, ...], bo
     No subcommand has a local option of these long names, so Compose applies them to the project after every subcommand
     the classifier accepts except ``run`` and ``exec``, whose closed option tables refuse them:
     ``up --file=override.yml`` and ``down --file=other.yml`` read that file. A short cluster that hides ``f``
-    (``-df x``) or a dangling ``-f`` is not understood: its value cannot be bound, so a shared run refuses it (R15).
+    (``-df x``) or a dangling ``-f`` is not understood: its value cannot be bound, so a shared run refuses it.
     """
     subcommand, index = _compose_subcommand(argv)
     if subcommand in _CLOSED_COMPOSE_SUBCOMMANDS:

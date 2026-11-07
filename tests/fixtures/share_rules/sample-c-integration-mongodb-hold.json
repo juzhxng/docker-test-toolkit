@@ -1,0 +1,202 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "authority": {
+   "ipam": {},
+   "name": "dtt-capture_authority"
+  }
+ },
+ "services": {
+  "mongo1": {
+   "command": [
+    "install -o mongodb -g mongodb -m 400 /run/secrets/mongo-keyfile /tmp/mongo-keyfile; install -o mongodb -g mongodb -m 600 /run/secrets/mongo1.pem /tmp/mongo1.pem; install -o mongodb -g mongodb -m 644 /run/secrets/ca.crt /tmp/ca.crt; exec /usr/local/bin/docker-entrypoint.sh mongod --replSet authority --auth --tlsMode requireTLS --tlsCAFile /tmp/ca.crt --tlsCertificateKeyFile /tmp/mongo1.pem --tlsAllowConnectionsWithoutCertificates --keyFile /tmp/mongo-keyfile --setParameter enableTestCommands=1 --setParameter shutdownTimeoutMillisForSignaledShutdown=250"
+   ],
+   "deploy": {
+    "placement": {},
+    "resources": {
+     "limits": {
+      "cpus": 1,
+      "memory": "805306368"
+     }
+    }
+   },
+   "entrypoint": [
+    "/bin/sh",
+    "-ceu"
+   ],
+   "image": "fixture-sample_c_test_mongo_image",
+   "networks": {
+    "authority": {
+     "aliases": [
+      "mongo1.test"
+     ]
+    }
+   },
+   "profiles": [
+    "mongodb"
+   ],
+   "pull_policy": "never",
+   "restart": "no",
+   "user": "0",
+   "volumes": [
+    {
+     "source": "mongo1-data",
+     "target": "/data/db",
+     "type": "volume",
+     "volume": {}
+    }
+   ]
+  },
+  "mongo2": {
+   "command": [
+    "install -o mongodb -g mongodb -m 400 /run/secrets/mongo-keyfile /tmp/mongo-keyfile; install -o mongodb -g mongodb -m 600 /run/secrets/mongo2.pem /tmp/mongo2.pem; install -o mongodb -g mongodb -m 644 /run/secrets/ca.crt /tmp/ca.crt; exec /usr/local/bin/docker-entrypoint.sh mongod --replSet authority --auth --tlsMode requireTLS --tlsCAFile /tmp/ca.crt --tlsCertificateKeyFile /tmp/mongo2.pem --tlsAllowConnectionsWithoutCertificates --keyFile /tmp/mongo-keyfile --setParameter enableTestCommands=1 --setParameter shutdownTimeoutMillisForSignaledShutdown=250"
+   ],
+   "deploy": {
+    "placement": {},
+    "resources": {
+     "limits": {
+      "cpus": 1,
+      "memory": "805306368"
+     }
+    }
+   },
+   "entrypoint": [
+    "/bin/sh",
+    "-ceu"
+   ],
+   "image": "fixture-sample_c_test_mongo_image",
+   "networks": {
+    "authority": {
+     "aliases": [
+      "mongo2.test"
+     ]
+    }
+   },
+   "profiles": [
+    "mongodb"
+   ],
+   "pull_policy": "never",
+   "restart": "no",
+   "user": "0",
+   "volumes": [
+    {
+     "source": "mongo2-data",
+     "target": "/data/db",
+     "type": "volume",
+     "volume": {}
+    }
+   ]
+  },
+  "mongo3": {
+   "command": [
+    "install -o mongodb -g mongodb -m 400 /run/secrets/mongo-keyfile /tmp/mongo-keyfile; install -o mongodb -g mongodb -m 600 /run/secrets/mongo3.pem /tmp/mongo3.pem; install -o mongodb -g mongodb -m 644 /run/secrets/ca.crt /tmp/ca.crt; exec /usr/local/bin/docker-entrypoint.sh mongod --replSet authority --auth --tlsMode requireTLS --tlsCAFile /tmp/ca.crt --tlsCertificateKeyFile /tmp/mongo3.pem --tlsAllowConnectionsWithoutCertificates --keyFile /tmp/mongo-keyfile --setParameter enableTestCommands=1 --setParameter shutdownTimeoutMillisForSignaledShutdown=250"
+   ],
+   "deploy": {
+    "placement": {},
+    "resources": {
+     "limits": {
+      "cpus": 1,
+      "memory": "805306368"
+     }
+    }
+   },
+   "entrypoint": [
+    "/bin/sh",
+    "-ceu"
+   ],
+   "image": "fixture-sample_c_test_mongo_image",
+   "networks": {
+    "authority": {
+     "aliases": [
+      "mongo3.test"
+     ]
+    }
+   },
+   "profiles": [
+    "mongodb"
+   ],
+   "pull_policy": "never",
+   "restart": "no",
+   "user": "0",
+   "volumes": [
+    {
+     "source": "mongo3-data",
+     "target": "/data/db",
+     "type": "volume",
+     "volume": {}
+    }
+   ]
+  },
+  "test-client": {
+   "command": [
+    "tail",
+    "-f",
+    "/dev/null"
+   ],
+   "deploy": {
+    "placement": {},
+    "resources": {
+     "limits": {
+      "cpus": 2,
+      "memory": "2147483648"
+     }
+    }
+   },
+   "entrypoint": null,
+   "environment": {
+    "DATABASE_BACKEND": "fixture-database_backend",
+    "DB_HOST": "127.0.0.1",
+    "DB_HOSTS": "",
+    "DB_NAME": "fixture-db_name",
+    "DB_PASSWORD": "fixture-password",
+    "DB_PORT": "5432",
+    "DB_REPLICA_SET": "",
+    "DB_TLS_CA": "fixture-db_tls_ca",
+    "DB_TLS_MODE": "verify-full",
+    "DB_USER": "fixture-db_user",
+    "LIFECYCLE_DB_PASSWORD": "fixture-password",
+    "LIFECYCLE_DB_USER": "fixture-lifecycle_db_user",
+    "MIGRATION_DB_PASSWORD": "fixture-password",
+    "MIGRATION_DB_USER": "fixture-migration_db_user",
+    "NODE_OPTIONS": "--max-old-space-size=1024"
+   },
+   "image": "fixture-sample_c_test_client_image",
+   "networks": {
+    "authority": null
+   },
+   "profiles": [
+    "postgres",
+    "mongodb"
+   ],
+   "pull_policy": "never",
+   "restart": "no",
+   "volumes": [
+    {
+     "bind": {},
+     "read_only": true,
+     "source": "$CHECKOUT/src",
+     "target": "/app/src",
+     "type": "bind"
+    },
+    {
+     "bind": {},
+     "read_only": true,
+     "source": "$CHECKOUT/tests",
+     "target": "/app/tests",
+     "type": "bind"
+    }
+   ]
+  }
+ },
+ "volumes": {
+  "mongo1-data": {
+   "name": "dtt-capture_mongo1-data"
+  },
+  "mongo2-data": {
+   "name": "dtt-capture_mongo2-data"
+  },
+  "mongo3-data": {
+   "name": "dtt-capture_mongo3-data"
+  }
+ }
+}

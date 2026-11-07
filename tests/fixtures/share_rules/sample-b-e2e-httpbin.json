@@ -1,0 +1,44 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "e2e-httpbin": {
+   "command": [
+    "/opt/httpbin/bin/gunicorn",
+    "-b",
+    "0.0.0.0:8080",
+    "httpbin:app"
+   ],
+   "cpus": 1,
+   "entrypoint": null,
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 10,
+    "test": [
+     "CMD-SHELL",
+     "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/get')\""
+    ],
+    "timeout": "5s"
+   },
+   "image": "ghcr.io/psf/httpbin:0.10.4@sha256:c0a0cc396b38d7083a3664076e6f728649e2b2a42ed3d493dbf9266ca55c461f",
+   "mem_limit": "134217728",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 8080
+    }
+   ],
+   "restart": "no"
+  }
+ }
+}

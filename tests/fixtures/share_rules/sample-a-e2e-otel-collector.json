@@ -1,0 +1,97 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "e2e-otel-collector": {
+   "command": [
+    "--config=/etc/otel-collector-config.yaml"
+   ],
+   "cpus": 1,
+   "depends_on": {
+    "jaeger": {
+     "condition": "service_healthy",
+     "required": true
+    }
+   },
+   "entrypoint": null,
+   "image": "otel/opentelemetry-collector-contrib:0.160.0@sha256:799dc6cf12c96192af37b5bdba804da8c10b3bc563b43cb90c3f3c58d9572ad6",
+   "mem_limit": "134217728",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 4318
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 8889
+    }
+   ],
+   "restart": "no",
+   "volumes": [
+    {
+     "bind": {},
+     "read_only": true,
+     "source": "$CHECKOUT/infra/otel-collector-config.yaml",
+     "target": "/etc/otel-collector-config.yaml",
+     "type": "bind"
+    }
+   ]
+  },
+  "jaeger": {
+   "command": null,
+   "cpus": 1,
+   "entrypoint": null,
+   "environment": {
+    "BADGER_DIRECTORY_KEY": "/badger/key",
+    "BADGER_DIRECTORY_VALUE": "/badger/data",
+    "BADGER_EPHEMERAL": "true",
+    "SPAN_STORAGE_TYPE": "badger"
+   },
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 10,
+    "start_period": "10s",
+    "test": [
+     "CMD-SHELL",
+     "wget --spider -q http://localhost:16686/ || exit 1"
+    ],
+    "timeout": "3s"
+   },
+   "image": "jaegertracing/jaeger:2.21.0@sha256:3d0ac795ff98aa04d1be04311d2dac6c25b4bfc8322dc02e53bc5b170c5018c3",
+   "mem_limit": "134217728",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 16686
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 4317
+    }
+   ],
+   "restart": "no",
+   "tmpfs": [
+    "/tmp:rw,noexec,nosuid,size=64m,mode=1777"
+   ]
+  }
+ }
+}

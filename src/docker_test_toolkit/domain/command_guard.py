@@ -86,7 +86,7 @@ _HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 def direct_docker_change(command: str) -> str | None:
     """Return the first direct Docker change in a shell command, such as ``docker run``, or None.
 
-    A command carrying the override marker ``docker-direct-ok`` returns None; only the owner's explicit go may add it.
+    A command carrying the override marker ``docker-direct-ok`` returns None; only the user's explicit go may add it.
     """
     if ("docker" not in command and "podman" not in command) or OVERRIDE_MARKER in command:
         return None

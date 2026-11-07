@@ -1,0 +1,100 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "e2e-opensearch": {
+   "command": null,
+   "cpus": 1,
+   "depends_on": {
+    "e2e-opensearch-snapshot-init": {
+     "condition": "service_completed_successfully",
+     "required": true
+    }
+   },
+   "entrypoint": null,
+   "environment": {
+    "OPENSEARCH_INITIAL_ADMIN_PASSWORD": "fixture-password",
+    "OPENSEARCH_JAVA_OPTS": "-Xms512m -Xmx512m",
+    "bootstrap.memory_lock": "false",
+    "discovery.type": "single-node",
+    "path.repo": "/usr/share/opensearch/snapshots"
+   },
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 36,
+    "start_period": "20s",
+    "test": [
+     "CMD-SHELL",
+     "curl -ksSf https://localhost:9200/_cluster/health >/dev/null || exit 1"
+    ],
+    "timeout": "5s"
+   },
+   "image": "opensearchproject/opensearch:3.8.0@sha256:bcc1797519726ceb6d651d4a3e60b7c30da91793914a8dfe75fd441d4f641509",
+   "mem_limit": "1610612736",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 9200
+    }
+   ],
+   "restart": "no",
+   "volumes": [
+    {
+     "source": "e2e-opensearch-data",
+     "target": "/usr/share/opensearch/data",
+     "type": "volume",
+     "volume": {}
+    },
+    {
+     "source": "e2e-opensearch-snapshots",
+     "target": "/usr/share/opensearch/snapshots",
+     "type": "volume",
+     "volume": {}
+    }
+   ]
+  },
+  "e2e-opensearch-snapshot-init": {
+   "command": [
+    "chown -R 1000:1000 /usr/share/opensearch/snapshots"
+   ],
+   "cpus": 1,
+   "entrypoint": [
+    "sh",
+    "-c"
+   ],
+   "image": "opensearchproject/opensearch:3.8.0@sha256:bcc1797519726ceb6d651d4a3e60b7c30da91793914a8dfe75fd441d4f641509",
+   "mem_limit": "67108864",
+   "networks": {
+    "default": null
+   },
+   "restart": "no",
+   "user": "0",
+   "volumes": [
+    {
+     "source": "e2e-opensearch-snapshots",
+     "target": "/usr/share/opensearch/snapshots",
+     "type": "volume",
+     "volume": {}
+    }
+   ]
+  }
+ },
+ "volumes": {
+  "e2e-opensearch-data": {
+   "name": "dtt-capture_e2e-opensearch-data"
+  },
+  "e2e-opensearch-snapshots": {
+   "name": "dtt-capture_e2e-opensearch-snapshots"
+  }
+ }
+}

@@ -22,7 +22,7 @@ def refusal_reason(change: str) -> str:
     return (
         f"`{change}` changes Docker state directly. Docker work goes through the Docker Test Toolkit: the repository's "
         "adapter or the `docker-test-toolkit` command. Reading state (ps, inspect, logs, info, buildx ls, compose ps) "
-        f"stays allowed. Only on the owner's explicit go add `# {OVERRIDE_MARKER}` to the command."
+        f"stays allowed. Only on the user's explicit go add `# {OVERRIDE_MARKER}` to the command."
     )
 
 

@@ -1,0 +1,54 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "e2e-jaeger": {
+   "command": null,
+   "cpus": 1,
+   "entrypoint": null,
+   "environment": {
+    "COLLECTOR_OTLP_ENABLED": "true"
+   },
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 10,
+    "test": [
+     "CMD-SHELL",
+     "wget -q --spider http://localhost:16686/ || exit 1"
+    ],
+    "timeout": "5s"
+   },
+   "image": "jaegertracing/jaeger:2.21.0@sha256:3d0ac795ff98aa04d1be04311d2dac6c25b4bfc8322dc02e53bc5b170c5018c3",
+   "mem_limit": "268435456",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 4317
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 4318
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 16686
+    }
+   ],
+   "restart": "no"
+  }
+ }
+}

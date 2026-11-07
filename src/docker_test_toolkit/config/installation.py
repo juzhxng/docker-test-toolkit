@@ -1,4 +1,4 @@
-"""Installation layout: versioned immutable folders, a ``current`` link and the state folder (design 2.2).
+"""Installation layout: versioned immutable folders, a ``current`` link and the state folder.
 
 Everything here is derived from paths alone, with ``lstat`` and ``readlink``; nothing is read or written.
 """

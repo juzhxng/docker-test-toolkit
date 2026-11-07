@@ -1,0 +1,59 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "e2e-postgres": {
+   "command": [
+    "postgres",
+    "-c",
+    "shared_preload_libraries=pg_textsearch,pg_cron",
+    "-c",
+    "cron.database_name=sample_b_test"
+   ],
+   "cpus": 1,
+   "entrypoint": null,
+   "environment": {
+    "POSTGRES_DB": "sample_b_test",
+    "POSTGRES_PASSWORD": "fixture-password",
+    "POSTGRES_USER": "sample_b_test"
+   },
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 5,
+    "test": [
+     "CMD-SHELL",
+     "pg_isready -U sample_b_test"
+    ],
+    "timeout": "5s"
+   },
+   "image": "sample-b-postgres:00000000-0000-4000-8000-0000000000aa",
+   "mem_limit": "268435456",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 5432
+    }
+   ],
+   "restart": "no",
+   "volumes": [
+    {
+     "bind": {},
+     "read_only": true,
+     "source": "$CHECKOUT/docker/e2e-postgres-init/02-create-sample-a-test-db.sql",
+     "target": "/docker-entrypoint-initdb.d/02-create-sample-a-test-db.sql",
+     "type": "bind"
+    }
+   ]
+  }
+ }
+}

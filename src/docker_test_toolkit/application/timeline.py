@@ -1,4 +1,4 @@
-"""Read-only hold timeline of a project's runs (design 3.3): queue, admission window, phases, builds and release.
+"""Read-only hold timeline of a project's runs: queue, admission window, phases, builds and release.
 
 The reader works on run record files only. It takes no lock, loads no queue and writes
 nothing, so it can never block or change admission (DF15). Attribution scans every record file under the
@@ -79,7 +79,7 @@ def _builds(record: dict) -> list[dict]:
 
 
 def timeline_entry(record: dict, *, indexed: bool) -> dict:
-    """Derive one run's timeline entry from its loaded record (design 3.3).
+    """Derive one run's timeline entry from its loaded record.
 
     Facts an older record lacks are ``None`` with a note naming why; nothing is estimated from file times.
     """
@@ -153,7 +153,7 @@ def _indexed_runs(registry: Path, project_id: str) -> frozenset[str]:
 
 
 def project_timeline(registry: Path, root: Path) -> dict:
-    """List the hold timeline of every run record attributed to one project (design 3.3).
+    """List the hold timeline of every run record attributed to one project.
 
     Every record file under ``registry/runs`` is read once; a file naming this project is loaded under the identity it
     records for itself (never under the caller's path), and one that does not load is listed by cell id only. Files
@@ -185,7 +185,7 @@ def project_timeline(registry: Path, root: Path) -> dict:
     return {
         "project_id": project_id,
         "project_root": str(root),
-        "repository": repository,  # the key of the project's share verdicts (design 2.2)
+        "repository": repository,  # the key of the project's share verdicts
         "verdict_scope": "origin" if repository is not None else "no-repository-origin",
         "runs": runs,
         "unreadable": unreadable,

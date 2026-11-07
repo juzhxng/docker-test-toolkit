@@ -21,10 +21,10 @@ def _private_account_directory(_test_state: Path) -> Path:
 
 
 def _check_real_account_format() -> None:
-    """Derive the real account and refuse a newer state format (the start check, design 3.4).
+    """Derive the real account and refuse a newer state format (the start check).
 
     Deriving refuses outside an installation (``toolkit-not-installed``) and through ``current``
-    (``toolkit-load-unresolved``), so ``open_retained_run`` is gated like ``open_run`` (invariants I2, I3).
+    (``toolkit-load-unresolved``), so ``open_retained_run`` is gated like ``open_run`` (invariants I2).
     """
     check_account_format(account_directory())
 

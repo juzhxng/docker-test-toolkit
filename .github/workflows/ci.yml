@@ -1,0 +1,158 @@
+name: CI
+
+# Every push to main and every pull request runs the four required jobs on GitHub-hosted arm64 runners. A release is
+# published only from a commit whose run of this workflow passed all four (scripts/publish_release.py).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # A pull request's superseded run is cancelled. Every other run has a group of its own, so a run on main is never
+  # cancelled, not even while pending: a release needs its commit's green run.
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+
+  scan:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: &install-gitleaks |
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_arm64.tar.gz
+          echo "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Scan every commit
+        timeout-minutes: 10
+        env:
+          # The maintainer's private terms; absent for a fork's pull request, which then scans with the repository rules.
+          CLEANLINESS_TERMS: ${{ secrets.CLEANLINESS_TERMS }}
+        run: |
+          cat .gitleaks.toml > "$RUNNER_TEMP/gitleaks.toml"
+          if [ -n "$CLEANLINESS_TERMS" ]; then
+            printf '\n%s\n' "$CLEANLINESS_TERMS" >> "$RUNNER_TEMP/gitleaks.toml"
+          elif [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "::error::the CLEANLINESS_TERMS secret is missing; only a fork's pull request scans without it"; exit 1
+          fi
+          gitleaks git --config "$RUNNER_TEMP/gitleaks.toml" --log-opts=--all --no-banner --redact .
+
+  quality:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - &setup-uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: "0.13.6"
+          python-version: "3.12"
+
+      - &install
+        name: Install dependencies
+        run: uv sync
+
+      - &close-search-directory
+        name: Close the search directory
+        # The hosted image leaves /usr/local/bin mode 777; the toolkit refuses a writable directory on its safe PATH.
+        run: sudo chmod go-w /usr/local/bin
+
+      - name: Install gitleaks
+        run: *install-gitleaks
+
+      - name: Lint and Format Check
+        run: uv run poe static
+
+      - name: Type Check
+        run: uv run poe typecheck
+
+      - name: Run Tests
+        timeout-minutes: 15
+        run: uv run poe unit --durations=0 --durations-min=0 -ra --no-fold-skipped
+
+      - name: Run Integration Tests
+        timeout-minutes: 30
+        run: uv run poe int --durations=0 --durations-min=0 -ra --no-fold-skipped
+
+  e2e:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - *setup-uv
+      - *install
+      - *close-search-directory
+
+      - &containerd-image-store
+        name: Use the containerd image store
+        # The hosted daemon uses the classic store; the toolkit's image export supports only containerd's.
+        run: |
+          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '.features["containerd-snapshotter"]=true' > "$RUNNER_TEMP/daemon.json"
+          sudo cp "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          sudo systemctl restart docker
+
+      - &free-disk
+        name: Check the free disk
+        run: |
+          free=$(df -Pk . | awk 'NR==2 {print int($4/1048576)}')
+          echo "free disk: ${free} GiB; machine up $(cut -d' ' -f1 /proc/uptime) s"
+          [ "$free" -ge 15 ] || { echo "::error::the runner has ${free} GiB free; 15 GiB are needed"; exit 1; }
+
+      - &build
+        name: Build the archive
+        run: uv run python scripts/build_zipapp.py build --repository . --output-directory dist/final
+
+      - name: Run the e2e suite
+        timeout-minutes: 55
+        env: &e2e-env
+          DOCKER_TEST_TOOLKIT_E2E_ARTIFACT: dist/final/docker-test-toolkit.pyz
+          DOCKER_TEST_TOOLKIT_TEST_HOST_RESERVE_BYTES: "1073741824"
+        run: >-
+          uv run pytest --basetemp=.pytest-tmp/ci-e2e -m e2e tests/e2e --ignore=tests/e2e/test_shared_runs.py
+          -v --durations=0 --durations-min=0 -ra --no-fold-skipped
+
+  shared-runs:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - *setup-uv
+      - *install
+      - *close-search-directory
+      - *containerd-image-store
+      - *free-disk
+      - *build
+
+      - name: Run the shared-runs suite
+        timeout-minutes: 50
+        env: *e2e-env
+        # The deselected scenarios run in the CI-host qualification (scripts/qualify_candidate.sh), not on this 8 GB,
+        # 2 CPU runner: the host decline needs about 6 GiB of headroom plus a 5 GiB hog, and the two image hand-offs
+        # hold a 2-CPU builder budget beside a 1-CPU user at once.
+        run: >-
+          uv run pytest --basetemp=.pytest-tmp/ci-shared-runs -m e2e tests/e2e/test_shared_runs.py
+          -v --durations=0 --durations-min=0 -ra --no-fold-skipped
+          --deselect tests/e2e/test_shared_runs.py::test_a_host_decline_others_caused_fails_no_granted_run
+          --deselect tests/e2e/test_shared_runs.py::test_owner_leave_hands_off_and_the_last_user_drains
+          --deselect tests/e2e/test_shared_runs.py::test_owner_image_rm_hands_off_and_non_owner_rm_is_refused

@@ -1,4 +1,4 @@
-"""Pure build-cache policy: switch, bounds, export-slot key, generation names, outcomes (design 3.5 to 3.9)."""
+"""Pure build-cache policy: switch, bounds, export-slot key, generation names, outcomes."""
 
 from __future__ import annotations
 
@@ -16,14 +16,14 @@ N_MAX = 16
 MARGIN_BYTES = 2 * 1024**3
 SHARED_LOCK_SECONDS = 5
 EXCLUSIVE_LOCK_SECONDS = 10
-# NOTE: probe-derived bounds (design 3.8, 5); ceiling: one value for every project and machine; upgrade path:
+# NOTE: probe-derived bounds; ceiling: one value for every project and machine; upgrade path:
 # an account setting when projects need different values.
 C_RET_BYTES = 4 * 1024**3
 CACHE_BLOB_COUNT_MAX = 4096
 CACHE_METADATA_MAX = 16 * 1024**2
 # The probe saw BuildKit import a tampered blob without checking its digest, so the import verifies every blob.
 DIGEST_VERIFICATION = True
-# The index.json manifest entry annotation the probe observed (evidence/shorten-slot-hold/probe/summary.md).
+# The index.json manifest entry annotation the probe observed.
 CACHE_INDEX_ANNOTATION = ("org.opencontainers.image.ref.name", "latest")
 SKIPPED_REASONS = (
     "disabled", "disabled-invalid-value", "lock-busy", "cache-root-unsafe", "disk-space", "error", "not-promoted",
@@ -60,14 +60,14 @@ _KEY_DROPPED_VALUE_OPTIONS = frozenset({"--tag", "-t", "--label", "--progress"})
 
 
 def switch_verdict(value: str | None) -> str | None:
-    """Return ``None`` when the per-run switch leaves the cache on, else the ``skipped:…`` outcome (design 3.5)."""
+    """Return ``None`` when the per-run switch leaves the cache on, else the ``skipped:…`` outcome."""
     if value is None or value == "on":
         return None
     return "skipped:disabled" if value == "off" else "skipped:disabled-invalid-value"
 
 
 def build_key(caller_argv: Sequence[str], *, private_root: str, project_root: str) -> str:
-    """Return the export-slot key of one build: SHA-256 of the normalized caller argv (design 3.6, DD1).
+    """Return the export-slot key of one build: SHA-256 of the normalized caller argv.
 
     Run-scoped tags, labels and output options never change the key; the private and project roots are replaced by
     placeholders so a run-specific private root keeps the key stable.
@@ -94,7 +94,7 @@ def build_key(caller_argv: Sequence[str], *, private_root: str, project_root: st
 
 
 def generation_name(wall_ns: int, run_id: str, operation_id: str) -> str:
-    """Return the directory name of one cache generation (design 3.7)."""
+    """Return the directory name of one cache generation."""
     return f"{wall_ns}-{run_id}-{operation_id}"
 
 
@@ -118,7 +118,7 @@ class CheckedPaths:
 
 @dataclass(frozen=True)
 class BuildFacts:
-    """The facts the eligibility verdict reads; the application resolves the private-root check (design 3.5)."""
+    """The facts the eligibility verdict reads; the application resolves the private-root check."""
 
     switch: str | None  # the raw DOCKER_TEST_TOOLKIT_BUILD_CACHE value
     daemon_platform: Mapping[str, str] | None  # the receipt's plan["daemon_platform"]
@@ -135,7 +135,7 @@ def _owned_name(name: str) -> bool:
 
 
 def is_toolkit_owned(name: str) -> bool:
-    """Return whether a first path component below the private root is a toolkit-owned name (design 3.5, I8).
+    """Return whether a first path component below the private root is a toolkit-owned name.
 
     An atomic-write temporary (``.<target>.<8 characters>``) is owned when its target is; never recursively.
     """
@@ -212,7 +212,7 @@ def private_root_verdict(resolved: Sequence[str], private_root: str) -> bool:
 
 
 def eligibility(facts: BuildFacts) -> str | None:
-    """Return ``None`` for an eligible build, else the first failing ``not-eligible:`` or switch verdict (design 3.5).
+    """Return ``None`` for an eligible build, else the first failing ``not-eligible:`` or switch verdict.
 
     The switch is read before every build fact, so a disabled run reports only ``skipped:disabled``.
     """
@@ -234,7 +234,7 @@ def eligibility(facts: BuildFacts) -> str | None:
 
 @dataclass(frozen=True)
 class GenerationFacts:
-    """One published generation as the store reads it; ``valid`` is structural validity only (design 3.8, T6)."""
+    """One published generation as the store reads it; ``valid`` is structural validity only."""
 
     key: str
     name: str
@@ -246,7 +246,7 @@ class GenerationFacts:
 
 @dataclass(frozen=True)
 class ReconcilePlan:
-    """What one reconcile removes, in its order: staging, invalid, superseded, then evicted oldest first (C1)."""
+    """What one reconcile removes, in its order: staging, invalid, superseded, then evicted oldest first."""
 
     staging: tuple[str, ...]
     invalid: tuple[tuple[str, str], ...]
@@ -280,7 +280,7 @@ def reconcile_plan(generations: Sequence[GenerationFacts], *, staging: Sequence[
     """Plan one reconcile: keep the newest valid generation per key, then evict the oldest kept until within caps.
 
     Postconditions after the plan is applied: at most ``N_MAX`` generations, at most ``C_RET_BYTES`` bytes, one
-    generation per key, all structurally valid (design 3.8, I9).
+    generation per key, all structurally valid.
     """
     invalid = [generation for generation in generations if not generation.valid]
     newest: dict[str, GenerationFacts] = {}
@@ -297,7 +297,7 @@ def reconcile_plan(generations: Sequence[GenerationFacts], *, staging: Sequence[
 def publication_plan(
     kept: Sequence[GenerationFacts], *, key: str, run_id: str, new_bytes: int
 ) -> PublicationPlan | None:
-    """Plan one publication into a reconciled store, or return ``None`` when it is over-cap (design 3.8, X23).
+    """Plan one publication into a reconciled store, or return ``None`` when it is over-cap.
 
     The key's current generation is superseded; the oldest generations of other runs are marked until the new one
     fits. A generation of the publishing run is never evicted to make room.

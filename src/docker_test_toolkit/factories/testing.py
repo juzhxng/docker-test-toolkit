@@ -99,14 +99,14 @@ def install_lock_observer(observer: Callable[[str, str, bool, bool, bool], None]
 
 _DEFAULT_TEST_POLL_NS = 50_000_000
 # Every private root this process composed, mapped to its registry's resolved path at build; kept for the whole session
-# so the teardown and the session census can find a test's runs (TK-121, I-W1/I-W2).
+# so the teardown and the session census can find a test's runs.
 _BUILT_ROOTS: dict[Path, Path] = {}
 
 
 def build_test_services(state_root: Path) -> _TestServices:
     """Construct the sole test-only composition at a caller-owned private root.
 
-    The private admission domain gets a 50 ms leave poll unless a binding already exists (design 2.3).
+    The private admission domain gets a 50 ms leave poll unless a binding already exists.
     """
     root = Path(state_root).resolve()
     canonical = canonical_account()
@@ -131,7 +131,7 @@ def build_test_services(state_root: Path) -> _TestServices:
 def end_test_runs(within: Path) -> list[str]:
     """Withdraw the runs left active under every private root built inside ``within``; return their ids.
 
-    The teardown of one test (TK-121, ruling W): each root this process composed at or below ``within`` goes through
+    The teardown of one test: each root this process composed at or below ``within`` goes through
     ``lifecycle.withdraw_test_runs`` with the registry path recorded at build, so a re-pointed registry is refused.
     Roots built elsewhere (module- or session-scoped) are untouched. Test composition only.
     """
@@ -199,7 +199,7 @@ def _guardian_record(argv: list[str] | str) -> Path | None:
 def surviving_test_guardians(*, parent: int, roots: Iterable[Path], excluded: Iterable[Path] = ()) -> list[str]:
     """Name every live toolkit guardian that is a child of ``parent`` or whose run record lies under one of ``roots``.
 
-    The session census (TK-121, I-W2): parentage finds the guardians the test process started, the ``--context``
+    The session census: parentage finds the guardians the test process started, the ``--context``
     record finds orphans re-parented elsewhere; a guardian whose record lies under one of ``excluded`` is left out.
     Both sides of every path comparison are resolved. Each returned line names the pid, parent pid and record. Test
     composition only; it reads the process table and signals nothing.

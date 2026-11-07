@@ -10,6 +10,7 @@ from docker_test_toolkit.application.api import (
 from docker_test_toolkit.application.batch import BatchCoordinator
 from docker_test_toolkit.domain.errors import ToolkitError
 from docker_test_toolkit.domain.models import (
+    TOOLKIT_VERSION,
     ArtifactIdentity,
     BatchAggregate,
     BatchExecutionReport,
@@ -27,6 +28,8 @@ from docker_test_toolkit.domain.models import (
     SegmentResult,
 )
 from docker_test_toolkit.factories.api import open_retained_run, open_run
+
+__version__ = TOOLKIT_VERSION
 
 __all__ = [
     "ArtifactIdentity",

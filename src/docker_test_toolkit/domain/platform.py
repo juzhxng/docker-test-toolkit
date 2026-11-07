@@ -1,4 +1,4 @@
-"""Image and daemon platforms as pure values (design 4.1)."""
+"""Image and daemon platforms as pure values."""
 
 from __future__ import annotations
 

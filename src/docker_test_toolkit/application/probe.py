@@ -153,7 +153,7 @@ class DaemonProbe:
         """Return the cached reading of this daemon when it is younger than ``PROBE_CACHE_NS``, else probe once.
 
         The container's name and daemon are recorded in ``<account>/probes/<name>`` before it starts and the record
-        is removed once it is gone, so retention can remove a probe a killed process left (design 2.7). A failed or
+        is removed once it is gone, so retention can remove a probe a killed process left. A failed or
         late probe yields a reading with no figures; it never raises for the probe's own failure.
         """
         cached = self.cached(daemon_id, clock)
@@ -242,7 +242,7 @@ def ensure_probe_image(
 ) -> str:
     """Make the probe image present on this daemon; return ``present``, ``pulled``, ``backoff``, ``busy`` or ``failed``.
 
-    Called before a run queues and at install, never inside an admission pass (DD9). The daemon is inspected first;
+    Called before a run queues and at install, never inside an admission pass. The daemon is inspected first;
     only an absent image is pulled, under the image lock K and bounded by ``PROBE_PULL_BOUND_S``. A failed pull is
     stamped per daemon and not retried for ``PROBE_PULL_BACKOFF_NS``, so an offline host does not pay the bound on
     every run; another daemon's stamp never suppresses this daemon's pull.

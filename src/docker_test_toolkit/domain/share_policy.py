@@ -1,4 +1,4 @@
-"""Share rules: which rendered runs may hold the Docker daemon beside other runs (design 2.3).
+"""Share rules: which rendered runs may hold the Docker daemon beside other runs.
 
 Pure predicates over a ``docker compose config --format json`` document, or over the facts of one direct command. A
 verdict names the first violated rule and its JSON path; the caller decides what a violation means (a negative verdict
@@ -220,7 +220,7 @@ def started_service_limits(
     services: Sequence[str],
     no_deps: bool,
 ) -> dict[str, int]:
-    """Return the rendered memory limit of every service the Compose command creates or starts (design 2.3, Q7).
+    """Return the rendered memory limit of every service the Compose command creates or starts.
 
     Named services with their ``depends_on`` closure (the named ones alone under ``--no-deps`` and for ``run``);
     every rendered service when none is named.

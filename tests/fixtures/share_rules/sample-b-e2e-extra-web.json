@@ -1,0 +1,67 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "extra": {
+   "internal": true,
+   "ipam": {
+    "config": [
+     {
+      "subnet": "11.0.0.0/24"
+     }
+    ]
+   },
+   "name": "dtt-capture_extra"
+  }
+ },
+ "services": {
+  "e2e-extra-web": {
+   "command": [
+    ".venv/bin/python",
+    "-m",
+    "tests.support.native_app",
+    "web",
+    "--port=80",
+    "--control-token-file=/run/extra/control-token"
+   ],
+   "cpus": 1,
+   "entrypoint": null,
+   "healthcheck": {
+    "interval": "3s",
+    "retries": 40,
+    "test": [
+     "CMD-SHELL",
+     "python3 -c \"import socket; socket.create_connection(('127.0.0.1', 80), 2)\""
+    ],
+    "timeout": "3s"
+   },
+   "image": "sample-b-e2e-extra-sample-b:00000000-0000-4000-8000-0000000000aa",
+   "mem_limit": "134217728",
+   "networks": {
+    "extra": {
+     "aliases": [
+      "pages.fixture.test",
+      "sink.fixture.test",
+      "search.fixture.test"
+     ]
+    }
+   },
+   "restart": "no",
+   "volumes": [
+    {
+     "bind": {},
+     "read_only": true,
+     "source": "$PRIVATE_ROOT/archive/tests",
+     "target": "/app/tests",
+     "type": "bind"
+    },
+    {
+     "bind": {},
+     "read_only": true,
+     "source": "$PRIVATE_ROOT/extra",
+     "target": "/run/extra",
+     "type": "bind"
+    }
+   ]
+  }
+ }
+}

@@ -1,0 +1,88 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  },
+  "net-b": {
+   "internal": true,
+   "ipam": {},
+   "name": "dtt-capture_net-b"
+  }
+ },
+ "services": {
+  "e2e-toxiproxy": {
+   "command": [
+    "-host=0.0.0.0",
+    "-config=/config/toxiproxy.json"
+   ],
+   "cpus": 1,
+   "entrypoint": null,
+   "healthcheck": {
+    "interval": "3s",
+    "retries": 40,
+    "test": [
+     "CMD",
+     "/toxiproxy-cli",
+     "list"
+    ],
+    "timeout": "3s"
+   },
+   "image": "ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e",
+   "mem_limit": "67108864",
+   "networks": {
+    "default": null,
+    "net-b": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 8474
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 18555
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 18556
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 18557
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 18558
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 18559
+    }
+   ],
+   "restart": "no",
+   "volumes": [
+    {
+     "bind": {},
+     "read_only": true,
+     "source": "$CHECKOUT/tests/fixtures/toxiproxy/toxiproxy.json",
+     "target": "/config/toxiproxy.json",
+     "type": "bind"
+    }
+   ]
+  }
+ }
+}

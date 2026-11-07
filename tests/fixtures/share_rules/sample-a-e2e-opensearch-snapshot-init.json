@@ -1,0 +1,41 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "e2e-opensearch-snapshot-init": {
+   "command": [
+    "chown -R 1000:1000 /usr/share/opensearch/snapshots"
+   ],
+   "cpus": 1,
+   "entrypoint": [
+    "sh",
+    "-c"
+   ],
+   "image": "opensearchproject/opensearch:3.8.0@sha256:bcc1797519726ceb6d651d4a3e60b7c30da91793914a8dfe75fd441d4f641509",
+   "mem_limit": "67108864",
+   "networks": {
+    "default": null
+   },
+   "restart": "no",
+   "user": "0",
+   "volumes": [
+    {
+     "source": "e2e-opensearch-snapshots",
+     "target": "/usr/share/opensearch/snapshots",
+     "type": "volume",
+     "volume": {}
+    }
+   ]
+  }
+ },
+ "volumes": {
+  "e2e-opensearch-snapshots": {
+   "name": "dtt-capture_e2e-opensearch-snapshots"
+  }
+ }
+}

@@ -1,4 +1,4 @@
-"""Read the account's Podman machines through the ``podman`` CLI (design 2026-11-03-podman-runtime, PD3)."""
+"""Read the account's Podman machines through the ``podman`` CLI."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ _IMAGE_DIRS: dict[str, Path] = {}  # binary path -> Host.MachineImageDir, read o
 def darwin_user_temp(environment: Mapping[str, str]) -> str:
     """Return the account's Darwin user temporary folder (``getconf DARWIN_USER_TEMP_DIR``) verbatim, once per process.
 
-    ``podman`` derives a machine's API socket path from ``TMPDIR`` (W0), and the user's shell starts machines with this
+    ``podman`` derives a machine's API socket path from ``TMPDIR``, and the user's shell starts machines with this
     folder; the toolkit's private ``TMPDIR`` would report another path. On another platform ``TMPDIR`` passes through.
     """
     if sys.platform != "darwin":

@@ -53,7 +53,7 @@ _CREATION_PREFIX_VALUES: tuple[tuple[str, object], ...] = (
 def known_fields(
     value: object, required: Iterable[str], optional: Iterable[str] = (), *, invalid: ToolkitError
 ) -> dict[str, Any]:
-    """Return a request object's known fields; fields a newer peer adds are ignored (design E3).
+    """Return a request object's known fields; fields a newer peer adds are ignored.
 
     Raises:
         ToolkitError: ``invalid``, when ``value`` is no object or lacks a required field.
@@ -66,7 +66,7 @@ def known_fields(
 
 
 class AdmissionMode(StrEnum):
-    """How a run holds the account (design 2.4): beside other shared holders, or alone. Records store the value."""
+    """How a run holds the account: beside other shared holders, or alone. Records store the value."""
 
     SHARED = "shared"
     EXCLUSIVE = "exclusive"
@@ -90,7 +90,7 @@ class QueueEntryView:
     blocked: bool
     guardian_state: str | None  # observe_process vocabulary (absent, replaced, zombie, executing), None if unknown
     mode: str | None = None  # an AdmissionMode value from the entry's record; None when the record is unreadable
-    version_ok: bool = True  # whether the entry's record names a version that reads multi-holder queues (M1)
+    version_ok: bool = True  # whether the entry's record names a version that reads multi-holder queues
 
 
 @dataclass(frozen=True)
@@ -128,12 +128,12 @@ def fifo_head(entries: Sequence[QueueEntryView]) -> str | None:
 
 
 def reservation_verdict(entries: Sequence[QueueEntryView], *, head_mode: str, limit: int | None) -> ReservationVerdict:
-    """Return which run may reserve next under the machine limit (design 2.4, rules 0-5), without the fit.
+    """Return which run may reserve next under the machine limit, without the fit.
 
     Rule 0: at limit 1 today's ``next_grantable`` decides, with today's reason ``queue-position``. Above it, only the
     FIFO head (lowest live, unblocked queued ticket) may reserve: alone when no entry holds; beside admitting and
     granted holders only when the head (``head_mode``) and every holder are shared, holders stay below ``limit``
-    (``None`` = no cap) and every queue entry passes the version gate (M1). The caller compares the returned run with
+    (``None`` = no cap) and every queue entry passes the version gate. The caller compares the returned run with
     itself and then checks the fit; the reasons are positional waiting reasons, never error reasons.
     """
     if limit == 1:
@@ -157,7 +157,7 @@ def reservation_verdict(entries: Sequence[QueueEntryView], *, head_mode: str, li
 def publication_verdict(
     entries: Sequence[QueueEntryView], *, publisher: str, publisher_mode: str, limit: int | None
 ) -> str | None:
-    """Return None when ``publisher`` may publish its grant, else the waiting reason (design 2.4, R3-2).
+    """Return None when ``publisher`` may publish its grant, else the waiting reason.
 
     Checks in order: an earlier live, unblocked admitting entry publishes first (grant order; admitting entries never
     count toward the limit); with no granted co-holder the publisher publishes alone; at limit 1 it waits
@@ -210,7 +210,7 @@ def version_at_least(version: object, minimum: str) -> bool:
 def admission_gate(
     *, test_composition: bool, release_helper: bool, loaded: Path | None, current: Path | None
 ) -> str | None:
-    """Return the version gate's refusal reason for a new test run, or None to admit it (design 3.2, invariant I4).
+    """Return the version gate's refusal reason for a new test run, or None to admit it.
 
     The release helper is cleanup, not a new test run, and is admitted first. A test composition without a bound
     installation (``loaded is None``) admits, as private compositions skip the real account. Otherwise code that does
@@ -353,7 +353,7 @@ def admits_builder(phases: Mapping[str, "PhaseBudget"]) -> bool:
 
 
 def effective_reservation(phases: Mapping[str, "PhaseBudget"], *, builder_removed: bool = False) -> PhaseReservation:
-    """Return ``E(r)``: the run's reservation plus the builder's memory while it may still run a builder (design N2b).
+    """Return ``E(r)``: the run's reservation plus the builder's memory while it may still run a builder.
 
     A run that removed its builder holds no builder reserve: a shared run may not create another (share rule R16), so
     the 2 GiB would stand empty beside its co-holders (two such runs did not fit together on a 24 GB CI host).
@@ -397,11 +397,11 @@ def memory_limit(container: Mapping[str, Any]) -> int | None:
 
 
 def attributed_ids(containers: Sequence[Mapping[str, Any]], holder: HolderFacts, *, run_label: str) -> frozenset[str]:
-    """Return the running containers that count against a holder's reservation instead of as foreign (design 2.4).
+    """Return the running containers that count against a holder's reservation instead of as foreign.
 
     A container is the holder's when it carries the holder's Compose project label or its ``run_label`` value, or is
     its BuildKit worker. Each needs a hard memory limit. The worker is attributed within the builder reserve; the
-    others, in ID order, within the reservation minus that reserve when the run admits a builder (R3-9). A container
+    others, in ID order, within the reservation minus that reserve when the run admits a builder. A container
     beyond the bound, or without a limit, stays external. Attribution is accounting only, never authority.
     """
     builder_bound = BUILDER_MEMORY_BYTES if holder.builder_worker is not None else 0
@@ -526,7 +526,7 @@ _TERMINAL_RUN_STATES = frozenset({"complete", "failed"})
 
 @dataclass(frozen=True)
 class InterestView:
-    """What the image interest decision reads from one run record (design 2.7).
+    """What the image interest decision reads from one run record.
 
     ``state`` and ``images`` are None for an unreadable record, which counts as using every image and never ended.
     """
@@ -561,7 +561,7 @@ def image_in_use(image_id: str, views: Sequence[InterestView], *, actor_run: str
 
 @dataclass(frozen=True)
 class Grant:
-    """One entry of the account's grants log: a run granted while another held (design 2.5).
+    """One entry of the account's grants log: a run granted while another held.
 
     ``budget_bytes`` is the run's effective container plus host-process reservation.
     """
@@ -601,7 +601,7 @@ def has_shared(
     origin: str,
     admission_baseline_ns: int,
 ) -> bool:
-    """Return whether a run has shared in its current generation (design 2.5).
+    """Return whether a run has shared in its current generation.
 
     True for a granted co-holder seen in this observation, the run's own current grant in the log (it was granted
     beside a co-holder), or another run's grant after its admission baseline. An admitting peer that never published
@@ -622,7 +622,7 @@ _MIB = 1024**2
 
 
 def cache_cap_bytes(fs_total: int) -> int:
-    """Return the build-cache store's total cap: 1/64 of its filesystem, clamped to 4..32 GiB (design DD7).
+    """Return the build-cache store's total cap: 1/64 of its filesystem, clamped to 4..32 GiB.
 
     NOTE: fixed fraction and clamps; ceiling: a store larger than 32 GiB is never kept; upgrade path: an install
     setting beside the disk reserve.
@@ -631,7 +631,7 @@ def cache_cap_bytes(fs_total: int) -> int:
 
 
 def archive_cap_bytes(fs_total: int) -> int:
-    """Return the run-archive store's total cap: 1/1024 of its filesystem, clamped to 64 MiB..1 GiB (design DD7).
+    """Return the run-archive store's total cap: 1/1024 of its filesystem, clamped to 64 MiB..1 GiB.
 
     NOTE: fixed fraction and clamps; archives are small records, so the clamp, not the disk, decides in practice.
     """
@@ -642,13 +642,13 @@ ARCHIVE_AGE_NS = 90 * 86_400 * 1_000_000_000  # NOTE: fixed age of an archived r
 SESSION_FOLDER_AGE_NS = 86_400 * 1_000_000_000  # NOTE: an empty recorded session folder older than a day
 PROBE_FILE_AGE_NS = 60 * 1_000_000_000  # NOTE: a probe record older than a minute outlived its probe
 
-# (guest reserve, host side) per runtime; a runtime without an entry is not qualified and is refused (design 2.5)
+# (guest reserve, host side) per runtime; a runtime without an entry is not qualified and is refused
 RUNTIME_OVERHEADS: dict[str, tuple[int, int]] = {
     "docker-desktop": (512 * _MIB, 256 * _MIB),
-    # Colima 0.10.3, vz, 8 GiB VM (2026-11-04 window): in-guest use beside the runs 349-368 MiB; its own host
+    # Colima 0.10.3, vz, 8 GiB VM: in-guest use beside the runs 349-368 MiB; its own host
     # processes 140 MiB (the VZ process's resident size cannot isolate its overhead: macOS compresses guest pages)
     "colima": (512 * _MIB, 256 * _MIB),
-    # Podman 6.1.4, applehv (2026-11-04 W0): in-guest use 440-485 MiB idle (485 on a 2048 MiB machine), 447 MiB beside
+    # Podman 6.1.4, applehv: in-guest use 440-485 MiB idle (485 on a 2048 MiB machine), 447 MiB beside
     # a held 1.5 GiB allocation; vfkit + gvproxy 34-53 MiB
     "podman": (640 * _MIB, 256 * _MIB),
     "docker-engine": (512 * _MIB, 0),
@@ -660,7 +660,7 @@ UNSUPPORTED_RUNTIME_TEXT = (
 )
 PODMAN_ENGINE_COMPONENT = "Podman Engine"
 PODMAN_HELPER_ENDPOINT = "unix:///var/run/docker.sock"
-# NOTE: below every measured guest share of configured memory (0.938-0.965, W0); upgrade: a per-size table
+# NOTE: below every measured guest share of configured memory (0.938-0.965); upgrade: a per-size table
 PODMAN_GUEST_SHARE = 0.93
 PODMAN_MEMORY_STEP_MIB = 256  # NOTE: the granularity the size hint rounds `podman machine set --memory` to
 PODMAN_HELPER_TEXT = (
@@ -686,7 +686,7 @@ def parse_version_components(output: str) -> tuple[str, str]:
     """Return ``(client version, engine)`` from ``version --format '{{.Client.Version}} {{json .Server.Components}}'``.
 
     The first word is the client version; the rest is JSON: ``null``, ``[]`` or a list of objects with a string
-    ``Name``. A component named ``Podman Engine`` anywhere selects ``podman``, anything else ``docker`` (design PD1).
+    ``Name``. A component named ``Podman Engine`` anywhere selects ``podman``, anything else ``docker``.
 
     Raises:
         ValueError: For any other shape (a deterministic client fault, never a late read).
@@ -706,7 +706,7 @@ def parse_version_components(output: str) -> tuple[str, str]:
 
 
 def podman_identity(machine: "MachineFacts") -> str:
-    """Return the NAME-shaped identity of a Podman machine: a hash of its name, ``Created`` and ``Rootful`` (PD4)."""
+    """Return the NAME-shaped identity of a Podman machine: a hash of its name, ``Created`` and ``Rootful``."""
     canonical = json.dumps(
         {"created": machine.created, "name": machine.name, "rootful": machine.rootful},
         sort_keys=True,
@@ -716,7 +716,7 @@ def podman_identity(machine: "MachineFacts") -> str:
 
 
 def match_machine(endpoint: str, machines: Sequence["MachineFacts"]) -> "MachineFacts | RuntimeRefusal":
-    """Return the one running machine whose API socket is the endpoint, compared as a string (PD5).
+    """Return the one running machine whose API socket is the endpoint, compared as a string.
 
     The Docker socket of ``podman-mac-helper`` is refused before any match; no or several matches name the running
     machine's socket only when exactly one machine runs.
@@ -763,7 +763,7 @@ def detect_runtime(
     rule recognises there (Docker Desktop) is, and any other stays remote (a tunnel to another host). A Mac VM daemon is
     only recognised from a ``darwin`` client, and Colima only through its own profile's socket, so no Mac VM is ever
     accounted as native Linux. A Podman machine is never classified here: its binding decides (``lifecycle.runtime_of``;
-    the adapter refuses a Podman engine it cannot bind, design 2.2).
+    the adapter refuses a Podman engine it cannot bind).
     """
     local_socket = endpoint.startswith("unix://")
     if not local_socket and not loopback_endpoint(endpoint):
@@ -815,14 +815,14 @@ COLIMA_GUEST_SHARE = 0.96
 
 def small_vm_memory_gib(container_bytes: int, guest_reserve: int) -> int:
     """Return the smallest whole GiB of Colima VM memory whose usable share admits ``container_bytes`` and the guest
-    reserve (design 2.5): the VM's kernel keeps part of the configured memory, so ``MemTotal`` is below it."""
+    reserve: the VM's kernel keeps part of the configured memory, so ``MemTotal`` is below it."""
     return math.ceil((container_bytes + guest_reserve) / (COLIMA_GUEST_SHARE * _GIB))
 
 
 def engine_stats(memory: Mapping[str, Any], hard_limit: object, engine: str) -> Mapping[str, Any]:
-    """Return one-shot memory stats in Docker's shape (design PD8): Docker's unchanged. Podman's compat stats carry no
+    """Return one-shot memory stats in Docker's shape: Docker's unchanged. Podman's compat stats carry no
     counter map (no OOM event; OOM is decided by ``State.OOMKilled``) and report the VM's memory as the limit of a
-    container whose hard limit exceeds it (W0 M6), so a limit in ``(0, hard_limit]`` reads as the hard limit."""
+    container whose hard limit exceeds it, so a limit in ``(0, hard_limit]`` reads as the hard limit."""
     if engine != "podman":
         return memory
     limit = memory.get("limit")
@@ -832,7 +832,7 @@ def engine_stats(memory: Mapping[str, Any], hard_limit: object, engine: str) -> 
 
 
 def podman_machine_size(container_bytes: int, guest_reserve: int, cpus: int, daemon_cpus: int) -> tuple[int, int]:
-    """Return ``(MiB, CPUs)`` of a Podman machine that admits the run (design 2.4).
+    """Return ``(MiB, CPUs)`` of a Podman machine that admits the run.
 
     The memory is the smallest 256 MiB step whose conservative guest share holds the container budget and the guest
     reserve; the CPUs are the larger of the machine's and the phase's.
@@ -851,7 +851,7 @@ def podman_size_hint(memory: int, cpu_count: int, memory_mib: int, name: str) ->
 
 
 def small_vm_hint(container_bytes: int, guest_reserve: int) -> str:
-    """Name the Colima VM size that admits a run whose guest side does not fit the VM (design 2.5)."""
+    """Name the Colima VM size that admits a run whose guest side does not fit the VM."""
     size = small_vm_memory_gib(container_bytes, guest_reserve)
     return f"raise the VM memory: colima stop && colima start --memory {size}"
 
@@ -875,7 +875,7 @@ class CapacityDecision:
     detail: str | None = None
 
 
-DISK_FLOOR_BYTES = 4 * _GIB  # NOTE: the per-run estimate without a previous run's image sizes (design DD8)
+DISK_FLOOR_BYTES = 4 * _GIB  # NOTE: the per-run estimate without a previous run's image sizes
 PRIVATE_ROOT_FLOOR_BYTES = _GIB  # NOTE: a run's private root needs this much free; it holds no images
 
 
@@ -893,7 +893,7 @@ class DiskFigure:
 def derive_reserve(fs_total: int, declared: int | None) -> int:
     """Return a place's reserve: the declared one, else 1/32 clamped to 2..8 GiB; never more than half the place.
 
-    NOTE: fixed fraction and clamps (design DD7); upgrade path: the declared `install --disk-reserve-bytes`.
+    NOTE: fixed fraction and clamps; upgrade path: the declared `install --disk-reserve-bytes`.
     """
     derived = min(max(fs_total // 32, 2 * _GIB), 8 * _GIB) if declared is None else declared
     return min(derived, fs_total // 2)
@@ -910,7 +910,7 @@ def disk_estimate(previous_sizes: Sequence[int] | None) -> tuple[int, str]:
 def disk_fit(figure: DiskFigure, other_leases: int, estimate: int) -> CapacityDecision:
     """Decide one leased place: refused when it can never fit, waiting while holders' leases leave too little room.
 
-    An unmeasured place admits: a measurement gap never blocks a run (design 2.6).
+    An unmeasured place admits: a measurement gap never blocks a run.
     """
     free, total, reserve = figure.free_bytes, figure.total_bytes, figure.reserve_bytes
     if figure.state != "measured" or free is None or total is None or reserve is None:
@@ -924,7 +924,7 @@ def disk_fit(figure: DiskFigure, other_leases: int, estimate: int) -> CapacityDe
 
 
 def private_root_fit(free: int) -> CapacityDecision:
-    """Wait while the run's private root has less than its floor free (design DD5)."""
+    """Wait while the run's private root has less than its floor free."""
     if free < PRIVATE_ROOT_FLOOR_BYTES:
         detail = f"private-root: free {free}, floor {PRIVATE_ROOT_FLOOR_BYTES} bytes"
         return CapacityDecision(CapacityState.WAITING, "disk-capacity", detail=detail)
@@ -937,7 +937,7 @@ TURN_GRACE_NS = 120_000_000_000  # NOTE: fixed; an operator setting is the upgra
 
 @dataclass(frozen=True)
 class Turn:
-    """A repository's turn: the run that left, on which daemon and clock, and when (design 2.4, DD1)."""
+    """A repository's turn: the run that left, on which daemon and clock, and when."""
 
     run_id: str
     daemon_id: str
@@ -963,7 +963,7 @@ class TurnDecision:
 
 
 def turn_current(turn: Turn, *, now_ns: int, clock_origin: str, grace_ns: int) -> bool:
-    """Whether a turn is still within its grace on this clock (design 2.4): the one rule that prunes and decides."""
+    """Whether a turn is still within its grace on this clock: the one rule that prunes and decides."""
     return turn.clock_origin == clock_origin and 0 <= now_ns - turn.released_ns < grace_ns
 
 

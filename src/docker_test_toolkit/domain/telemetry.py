@@ -1,4 +1,4 @@
-"""Closed telemetry categories and observers, and the pure mapping from a raised reason to a fault (design 4.2)."""
+"""Closed telemetry categories and observers, and the pure mapping from a raised reason to a fault."""
 
 from __future__ import annotations
 

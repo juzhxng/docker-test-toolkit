@@ -34,7 +34,7 @@ _DIGEST = re.compile(r"sha256:([0-9a-f]{64})\Z")
 _BLOB_NAME = re.compile(r"blobs/sha256/([0-9a-f]{64})\Z")
 _FIXED_FILES = frozenset({"oci-layout", "index.json", "manifest.json"})
 _DIRECTORIES = frozenset({"blobs", "blobs/sha256"})
-# The Docker archive format Podman's `image save` writes (design 2026-11-03-podman-runtime 2.7, measured W0d)
+# The Docker archive format Podman's `image save` writes
 _DOCKER_ID_DIR = re.compile(r"[0-9a-f]{64}\Z")
 _DOCKER_CONTENT = re.compile(r"([0-9a-f]{64})\.(?:tar|json)\Z")
 _DOCKER_LEGACY = re.compile(r"[0-9a-f]{64}/(?:VERSION|json)\Z")
@@ -77,7 +77,7 @@ def normalized_platform(os_name: object, architecture: object, variant: object =
 
 @dataclass(frozen=True)
 class ImageBinding:
-    """Bind an export to the exact image identity the daemon reported (Story B)."""
+    """Bind an export to the exact image identity the daemon reported."""
 
     image_id: str
     platform: Platform
@@ -492,7 +492,7 @@ def _verify(descriptor: int, binding: ImageBinding, max_bytes: int) -> ArchiveFa
 
 def _verify_docker_archive(walk: _Walk, binding: ImageBinding) -> ArchiveFacts:
     """Verify Podman's Docker-format archive: one image whose config is the binding's image and whose layers are the
-    config's ``diff_ids`` in order, every member named by its content (design 2.7)."""
+    config's ``diff_ids`` in order, every member named by its content."""
     entries = _json(walk.retained.get("manifest.json", b""))
     if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
         raise _reject("manifest.json must name exactly one image")
@@ -604,7 +604,7 @@ def _empty_directory(directory: int) -> None:
 
 
 def _remove_directory(exports: int, name: str, held: int) -> None:
-    """Empty and remove one operation directory under the identity rules of the design."""
+    """Empty and remove one operation directory under its identity rules."""
     _empty_directory(held)
     observed = lstat_at(name, exports)
     if observed is None:

@@ -1,0 +1,55 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "jaeger": {
+   "command": null,
+   "cpus": 1,
+   "entrypoint": null,
+   "environment": {
+    "BADGER_DIRECTORY_KEY": "/badger/key",
+    "BADGER_DIRECTORY_VALUE": "/badger/data",
+    "BADGER_EPHEMERAL": "true",
+    "SPAN_STORAGE_TYPE": "badger"
+   },
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 10,
+    "start_period": "10s",
+    "test": [
+     "CMD-SHELL",
+     "wget --spider -q http://localhost:16686/ || exit 1"
+    ],
+    "timeout": "3s"
+   },
+   "image": "jaegertracing/jaeger:2.21.0@sha256:3d0ac795ff98aa04d1be04311d2dac6c25b4bfc8322dc02e53bc5b170c5018c3",
+   "mem_limit": "134217728",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 16686
+    },
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 4317
+    }
+   ],
+   "restart": "no",
+   "tmpfs": [
+    "/tmp:rw,noexec,nosuid,size=64m,mode=1777"
+   ]
+  }
+ }
+}

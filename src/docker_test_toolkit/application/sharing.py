@@ -1,4 +1,4 @@
-"""Account settings and shared-run state files: pure codecs; every caller owns the lock it needs (design 2.2)."""
+"""Account settings and shared-run state files: pure codecs; every caller owns the lock it needs."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ LEASES_FILE = "disk-leases.json"
 
 
 def read_disk_reserve(account_directory: Path) -> int | None:
-    """Return the declared disk reserve, or ``None`` when undeclared (each place then derives its own, design 2.6).
+    """Return the declared disk reserve, or ``None`` when undeclared (each place then derives its own).
 
     Raises:
         ResourceError: If the declaration is not exactly ``{"schema": 1, "disk_reserve_bytes": n}`` with ``n`` at least
@@ -102,7 +102,7 @@ def read_disk_reserve(account_directory: Path) -> int | None:
 
 def declared_disk_reserve(account_directory: Path) -> int | None:
     """Return the declared disk reserve for an admission decision: an unreadable or invalid declaration counts as
-    undeclared, so each place derives its own (design 2.6) and no run is refused for a broken settings file."""
+    undeclared, so each place derives its own and no run is refused for a broken settings file."""
     try:
         return read_disk_reserve(account_directory)
     except (OSError, ResourceError):
@@ -122,7 +122,7 @@ def record_disk_reserve(account_directory: Path, value: int) -> None:
 
 @dataclass(frozen=True)
 class Lease:
-    """One holder's disk estimate, written at its reservation (design DD4): bytes, their source and when."""
+    """One holder's disk estimate, written at its reservation: bytes, their source and when."""
 
     bytes: int
     source: str
@@ -133,7 +133,7 @@ class Lease:
 def read_leases(account_directory: Path) -> dict[str, Lease]:
     """Return the account's disk leases by run ID; an absent or unreadable file reads empty.
 
-    Reading empty is the conservative failure: every holder without a lease counts the disk floor (design 2.6).
+    Reading empty is the conservative failure: every holder without a lease counts the disk floor.
     The caller holds the metadata lock M.
     """
     entries = _read_entries(account_directory / LEASES_FILE, "leases", ("bytes", "tick"), ("source", "clock_origin"))
@@ -187,7 +187,7 @@ TURNS_FILE = "turn.json"
 
 
 def read_turns(account_directory: Path) -> dict[str, Turn]:
-    """Return the repositories' turns (design 2.4, DD1); an absent or unreadable file reads empty: today's order.
+    """Return the repositories' turns; an absent or unreadable file reads empty: today's order.
 
     The caller holds the metadata lock M.
     """
@@ -458,7 +458,7 @@ def write_verdict(
     origin: str,
     tick_ns: int,
 ) -> None:
-    """Record one request's verdict; the caller holds the project's ``registry`` lock (design 2.3).
+    """Record one request's verdict; the caller holds the project's ``registry`` lock.
 
     A store that is absent, invalid or written under other rules starts fresh. A positive verdict never replaces a
     negative one: a request's render can vary between its runs (an environment-chosen bind source), so a clean run
@@ -492,7 +492,7 @@ _PENDING_FIELDS = ("image_id", "created", "references", "owner_run", "owner_proj
 
 @dataclass(frozen=True)
 class PendingImage:
-    """One owned image handed off because another run still used it when its owner left (design 2.7)."""
+    """One owned image handed off because another run still used it when its owner left."""
 
     image_id: str
     created: str
@@ -539,7 +539,7 @@ def read_pending(account_directory: Path) -> list[PendingImage]:
 def write_pending(account_directory: Path, entries: Sequence[PendingImage]) -> None:
     """Replace the account's pending image deletions atomically; the caller holds the image lock K.
 
-    An empty list removes the file, so a machine back at limit 1 takes K for nothing (design 3.4).
+    An empty list removes the file, so a machine back at limit 1 takes K for nothing.
     """
     _replace_or_remove(account_directory / PENDING_FILE, "entries", [asdict(entry) for entry in entries])
 
@@ -571,7 +571,7 @@ def drain_pending(
     An entry stays in the list when it is in use, another daemon's, still present after the removal, or reached
     without budget (``allows``, ``spend`` and ``timeout_s`` bound a retention pass; those are ``deferred``). With
     ``drop_retagged`` an image that carries a tag the entry does not record is dropped from the list and never deleted
-    (retention, design 2.7). An entry that is absent, or another image under the recorded ID, leaves the list without
+    (retention). An entry that is absent, or another image under the recorded ID, leaves the list without
     a deletion. The caller holds K and has checked that ``adapter`` reaches ``daemon_id``.
     """
     removed: list[PendingImage] = []
@@ -634,10 +634,10 @@ def _valid_grant(entry: object) -> bool:
 
 
 def read_grants(account_directory: Path) -> list[Grant]:
-    """Return the account's grants log (design 2.5); the caller holds the metadata lock M.
+    """Return the account's grants log; the caller holds the metadata lock M.
 
     An absent file is empty. Raises ResourceError for an unreadable or invalid file: one invalid entry invalidates the
-    whole log, and the observer then treats the run as having shared with no shared-only breach (R3-8).
+    whole log, and the observer then treats the run as having shared with no shared-only breach.
     """
     path = account_directory / GRANTS_FILE
     if _absent(path):

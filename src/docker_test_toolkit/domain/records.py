@@ -268,7 +268,7 @@ def _valid_waiting_item(item: object) -> bool:
 
 
 def validate_failure_evidence(value: object) -> None:
-    """Validate the shape of one ``failure_evidence`` record key; refuse anything else (design 4.3).
+    """Validate the shape of one ``failure_evidence`` record key; refuse anything else.
 
     The shape is validated and nothing more: the evidence names the first observed cause and may legitimately differ
     from the current ``infrastructure_failure``, which later recovery or cleanup writers overwrite.
@@ -332,7 +332,7 @@ _HOLD_RELEASES = frozenset({"leave", "recovery"})
 
 
 def validate_hold_timeline(value: object) -> None:
-    """Validate the shape of one ``hold_timeline`` record key (design 3.2); refuse anything else.
+    """Validate the shape of one ``hold_timeline`` record key; refuse anything else.
 
     The grant's ticks share ``origin``. The release carries its own origin, so its order against the grant is checked
     only when both origins are equal; a release recorded on a later boot is valid without an order.

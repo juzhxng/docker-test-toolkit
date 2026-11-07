@@ -3,27 +3,29 @@
 [project]
 name = "docker_test_toolkit"
 version = "0.7.5"
-description = "Private, workspace-agnostic lifecycle authority for local Docker-backed tests"
+description = "Let coding agents run Docker-backed tests from several projects on one machine"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{name = "juzhxng", email = "juzhxng@users.noreply.github.com"}]
 readme = "README.md"
 requires-python = ">=3.12,<4.0"
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/juzhxng/docker-test-toolkit"
 
 [project.scripts]
 docker-test-toolkit = "docker_test_toolkit.factories.cli:main"
 
 [dependency-groups]
 dev = [
-    "coverage[toml]>=7.16.0",
     "hypothesis>=6.168.0",
-    "mkdocs-material>=9.7.7",
-    "mkdocstrings[python]>=1.0.6",
     "mypy>=2.3.1",
-    "nbqa>=1.9.1",
     "poethepoet>=0.48.0",
     "pre-commit>=4.6.2",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
+    "pyyaml>=6.0",
     "ruff>=0.16.7",
 ]
 
@@ -48,9 +50,6 @@ exclude_lines = [
   "if typing.TYPE_CHECKING:"
 ]
 
-[tool.coverage.html]
-directory = "cov_html"
-
 [tool.pytest.ini_options]
 minversion = "6.0"
 testpaths = [
@@ -62,8 +61,6 @@ pythonpath = [
 markers = [
     "e2e: mark a real host end-to-end test",
     "integration: mark an integration test",
-    "unit: mark a unit test",
-    "extras: mark a test that needs extra dependencies",
     "previous_release: an e2e test that runs the previous release against the selected daemon (Docker Desktop or Linux only)"
 ]
 
@@ -78,14 +75,12 @@ follow_imports = "silent"
 src = ["src"]
 line-length = 120
 
-# Set python target version from cookiecutter
-target-version = "py312"  # noqa
+target-version = "py312"
 
 [tool.ruff.format]
 exclude = [
     ".pytest_cache",
     "build",
-    "joblib"
 ]
 
 [tool.ruff.lint]
@@ -105,7 +100,6 @@ select = [
     "SLF",  # flake8-self
     "RET",  # flake8-return
     "SIM",  # flake8-simplify
-    "PD",   # pandas-vet
     "PERF", # perflint
     "PGH",  # pygrep-hooks
     "RUF",  # ruff
@@ -122,60 +116,8 @@ ignore = [
     "SIM105", # Explicit exception boundaries document fail-open observation.
 ]
 
-fixable = [
-    "A",
-    "B",
-    "C",
-    "D",
-    "E",
-    "F",
-    "G",
-    "I",
-    "N",
-    "Q",
-    "S",
-    "T",
-    "W",
-    "ANN",
-    "ARG",
-    "BLE",
-    "COM",
-    "DJ",
-    "DTZ",
-    "EM",
-    "ERA",
-    "EXE",
-    "FBT",
-    "ICN",
-    "INP",
-    "ISC",
-    "NPY",
-    "PD",
-    "PGH",
-    "PIE",
-    "PL",
-    "PT",
-    "PTH",
-    "PYI",
-    "RET",
-    "RSE",
-    "RUF",
-    "SIM",
-    "SLF",
-    "TCH",
-    "TID",
-    "TRY",
-    "UP",
-    "YTT"
-]
-unfixable = []
-
 # Allow unused variables when underscore-prefixed.
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
-
-[tool.ruff.lint.mccabe]
-# Unlike Flake8, default to a complexity level of 10.
-max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["BLE001", "S101", "S603", "S607", "SLF001"]
@@ -193,17 +135,11 @@ required-environments = [
 unit = "pytest tests/unit tests/guard --cov -p no:warnings"
 int = "pytest --basetemp=.pytest-tmp/int -m 'integration and not e2e' tests/integration --cov -p no:warnings"
 e2e = "pytest --basetemp=.pytest-tmp/e2e -m 'e2e' tests/e2e -v"
-_cov_run = "coverage run -m pytest tests/unit tests/guard"
-_cov_report = "coverage html"
-cov = ["_cov_run", "_cov_report"]
 _static_ruff_format = "ruff format --check src scripts tests"
 _static_ruff_lint = "ruff check src scripts tests"
-_static_nbqa = "nbqa ruff src"
-static = ["_static_ruff_format", "_static_ruff_lint", "_static_nbqa"]
+static = ["_static_ruff_format", "_static_ruff_lint"]
 _fix_ruff_lint = "ruff check src scripts tests --fix"
-_fix_nbqa = "nbqa ruff src --fix"
 _fix_ruff_format = "ruff format src scripts tests"
-fix = ["_fix_ruff_format", "_fix_ruff_lint",  "_fix_nbqa"] # The order is important
+fix = ["_fix_ruff_format", "_fix_ruff_lint"]
 typecheck = "mypy --check-untyped-defs --no-implicit-optional --show-error-codes src"
 qa = ["typecheck", "static", "unit", "int"]
-docs = "mkdocs build --strict"

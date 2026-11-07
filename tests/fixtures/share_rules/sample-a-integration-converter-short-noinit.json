@@ -1,0 +1,57 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "integration-converter-short-noinit": {
+   "cap_drop": [
+    "ALL"
+   ],
+   "command": null,
+   "cpus": 1,
+   "entrypoint": null,
+   "environment": {
+    "CONVERTER_IMAGE_DIGEST": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 24,
+    "test": [
+     "CMD",
+     "/venv/bin/python3",
+     "-c",
+     "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2005/v1/status', timeout=3)"
+    ],
+    "timeout": "5s"
+   },
+   "image": "sample-a-converter-short:00000000-0000-4000-8000-0000000000aa",
+   "init": false,
+   "mem_limit": "805306368",
+   "networks": {
+    "default": null
+   },
+   "pids_limit": 256,
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 2005
+    }
+   ],
+   "read_only": true,
+   "restart": "no",
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "tmpfs": [
+    "/scratch:size=256m,mode=0700,uid=10001,gid=10001",
+    "/tmp:size=64m,mode=1777"
+   ]
+  }
+ }
+}

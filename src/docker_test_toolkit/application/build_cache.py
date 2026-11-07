@@ -1,4 +1,4 @@
-"""Project build-cache store: location, permanent anchors, structural validation, listing and staging (design 3.7, 3.8).
+"""Project build-cache store: location, permanent anchors, structural validation, listing and staging.
 
 The cache lives beside the account registry, one subtree per project and daemon platform:
 ``<registry>-build-cache/<project_id>/<os>-<architecture>/{generations/<key>/<generation>, staging/<run>-<operation>}``.
@@ -88,7 +88,7 @@ def platform_anchor(
     nonblocking: bool = False,
     deadline_ns: int | None = None,
 ):
-    """Hold the permanent ``<platform>.lock`` anchor of one project's platform cache (C15).
+    """Hold the permanent ``<platform>.lock`` anchor of one project's platform cache.
 
     Shared for a build that imports or stages; exclusive for reconcile, publication and removal. Raises
     ``ResourceBusy`` when ``nonblocking`` or the deadline refuses the wait.
@@ -320,14 +320,14 @@ def _fsync_directory(path: Path) -> None:
 
 
 def reconcile(platform_dir: Path, *, keep_staging: str | None = None) -> None:
-    """Restore the store's postconditions; the caller holds the platform anchor exclusively (design 3.8, C1).
+    """Restore the store's postconditions; the caller holds the platform anchor exclusively.
 
     Removes, in order and one whole directory at a time: every staging directory except ``keep_staging``, every
     invalid generation, every superseded generation, then the oldest generations until both caps hold; then empty key
     directories. Reads no layer content (T6), so a crash between deletions leaves only whole generations.
     """
     staging_root = platform_dir / "staging"
-    real_staging = staging_root.is_dir() and not staging_root.is_symlink()  # never follow out of the cache (3.10)
+    real_staging = staging_root.is_dir() and not staging_root.is_symlink()  # never follow out of the cache
     staging = sorted(path.name for path in staging_root.iterdir()) if real_staging else []
     plan = reconcile_plan(list_generations(platform_dir), staging=[name for name in staging if name != keep_staging])
     generations = platform_dir / "generations"
@@ -365,12 +365,12 @@ def publish(
     run_id: str,
     operation_id: str,
 ) -> dict[str, object]:
-    """Publish this build's staging as the newest generation of its key, or record why not (design 3.8).
+    """Publish this build's staging as the newest generation of its key, or record why not.
 
     Takes the anchor exclusively with a 10 s deadline, reconciles, validates the staging, plans evictions, renames
     the staging into ``generations/<key>/`` (the commit point) and then deletes superseded and marked generations.
     Returns ``{"published": <generation name or "not-published:<reason>">, "bytes": <int or None>}``. A reader sees
-    either the previous generations or the new one, never a partial one (I4).
+    either the previous generations or the new one, never a partial one.
     """
     staging, key = Path(str(plan["staging"])), str(plan["key"])
     deadline_ns = time.monotonic_ns() + EXCLUSIVE_LOCK_SECONDS * 1_000_000_000
@@ -413,7 +413,7 @@ def publish(
 
 
 def remove_platform(project_cache: Path, platform: str) -> int | str:
-    """Delete one platform's cache data in place without waiting, keeping its anchor (design 3.8, C2, DF1).
+    """Delete one platform's cache data in place without waiting, keeping its anchor.
 
     Returns the removed bytes, or ``"busy"`` when a build or another exclusive operation holds the anchor (nothing is
     removed then). Never renames to a tombstone: an interrupted removal leaves a partial subtree that the next
@@ -425,7 +425,7 @@ def remove_platform(project_cache: Path, platform: str) -> int | str:
             held.enter_context(platform_anchor(project_cache, platform, shared=False, nonblocking=True))
         except ResourceBusy:
             return "busy"
-        if not platform_dir.is_dir() or platform_dir.is_symlink():  # never follow out of the cache (3.10)
+        if not platform_dir.is_dir() or platform_dir.is_symlink():  # never follow out of the cache
             return 0
         reconcile(platform_dir)
         removed = _tree_bytes(platform_dir)
@@ -439,7 +439,7 @@ def remove_platform(project_cache: Path, platform: str) -> int | str:
 
 
 def switch_private_addition(environ: Mapping[str, str] = os.environ) -> dict[str, str]:
-    """Return the per-run cache switch as a private environment addition when this process carries it (DD3)."""
+    """Return the per-run cache switch as a private environment addition when this process carries it."""
     return {SWITCH_ENV: environ[SWITCH_ENV]} if SWITCH_ENV in environ else {}
 
 
@@ -470,7 +470,7 @@ def _build_facts(data: Mapping, command, caller_argv: Sequence[str], environment
         for value in (*paths.named_contexts, *paths.positional)
         if value != "-"
     ]
-    dockerfiles = paths.dockerfiles or tuple(  # both default spellings of each candidate context (council C-1)
+    dockerfiles = paths.dockerfiles or tuple(  # both default spellings of each candidate context
         os.path.join(value, name) for value in paths.positional if value != "-" for name in ("Dockerfile", "dockerfile")
     )
     resolved += [
@@ -514,9 +514,10 @@ def plan_build_cache(
 ):
     """Return the build command with the toolkit's cache flags, the held shared anchor and the planning object.
 
-    The returned ``ExitStack`` owns the shared lock only when planning completed: the lock lives in a local stack that
-    ``pop_all()`` hands over on success, so any failure after acquisition releases it before the exception leaves
-    (design 3.7, T5). Every other outcome returns an empty stack and the unchanged command.
+        The returned ``ExitStack`` owns the shared lock only when planning completed: the lock lives in a local stack
+        that ``pop_all()`` hands over on success, so any failure after acquisition releases it before the exception
+        leaves
+    . Every other outcome returns an empty stack and the unchanged command.
     """
     verdict = eligibility(_build_facts(data, command, caller_argv, environment))
     if verdict is not None:
@@ -525,7 +526,7 @@ def plan_build_cache(
     cache = project_cache(registry, data["project_id"])
     platform_dir = cache / platform
     try:
-        for level in (cache_root(registry), cache, platform_dir):  # top first: an unsafe root is never passed (P2)
+        for level in (cache_root(registry), cache, platform_dir):  # top first: an unsafe root is never passed
             require_safe_directory(level)
     except (ValueError, FileExistsError, NotADirectoryError):
         return command, ExitStack(), skipped("cache-root-unsafe")
@@ -582,7 +583,7 @@ def _finished(plan: Mapping[str, Any], outcome: str, published: str | None, size
 def complete_build_cache(
     plan: Mapping[str, Any], *, promoted: bool, native: bool, run_id: str, operation_id: str
 ) -> dict[str, object]:
-    """Return the closed cache outcome of a finished loaded build, publishing its export when allowed (design 3.8).
+    """Return the closed cache outcome of a finished loaded build, publishing its export when allowed.
 
     Publication requires a promoted build, an export and only native images; otherwise this build's staging is
     removed. The finish write adds ``finished_ns``.
@@ -633,7 +634,7 @@ def error_outcome(plan: Mapping[str, Any]) -> dict[str, object]:
 
 
 def real_directory(path: Path) -> bool:
-    """Return whether ``path`` is a directory by ``lstat``: a symlink is never followed out of the cache (3.10)."""
+    """Return whether ``path`` is a directory by ``lstat``: a symlink is never followed out of the cache."""
     return path.is_dir() and not path.is_symlink()
 
 
@@ -644,7 +645,7 @@ def platform_names(project_dir: Path) -> list[str]:
         for entry in entries:
             name = entry.name.removesuffix(".lock")
             if not _PLATFORM.fullmatch(name):
-                continue  # only platform-shaped names are cache data (council C-2)
+                continue  # only platform-shaped names are cache data
             anchor = entry.name.endswith(".lock") and entry.is_file(follow_symlinks=False)
             if anchor or (not entry.name.endswith(".lock") and entry.is_dir(follow_symlinks=False)):
                 names.add(name)
@@ -652,7 +653,7 @@ def platform_names(project_dir: Path) -> list[str]:
 
 
 def _busy(project_dir: Path, platform: str) -> bool:
-    """Probe an existing anchor without waiting and release it at once; a missing anchor is never created (C16)."""
+    """Probe an existing anchor without waiting and release it at once; a missing anchor is never created."""
     if not (project_dir / f"{platform}.lock").is_file():
         return False
     try:
@@ -712,7 +713,7 @@ def orphans(registry: Path) -> list[str]:
 
 
 def remove_caches(registry: Path, payload: object, *, execute: bool) -> dict[str, object]:
-    """List (dry run) or remove one project's or every orphan's build cache (design 3.10).
+    """List (dry run) or remove one project's or every orphan's build cache.
 
     The input selects ``{"project_root": <path>}`` or ``{"orphans": "all"}``; other fields are ignored. Orphans are
     re-derived at execute time, so a project whose root reappeared after the dry run is kept. A dry run creates nothing.

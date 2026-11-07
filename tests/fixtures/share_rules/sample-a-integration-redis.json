@@ -1,0 +1,43 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "default": {
+   "ipam": {},
+   "name": "dtt-capture_default"
+  }
+ },
+ "services": {
+  "integration-redis": {
+   "command": null,
+   "cpus": 1,
+   "entrypoint": null,
+   "healthcheck": {
+    "interval": "5s",
+    "retries": 24,
+    "start_period": "5s",
+    "test": [
+     "CMD-SHELL",
+     "redis-cli -p 6379 ping | grep -q PONG && redis-cli -p 6379 MODULE LIST | grep -q search || exit 1"
+    ],
+    "timeout": "5s"
+   },
+   "image": "redis:8.10.1-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576",
+   "mem_limit": "201326592",
+   "networks": {
+    "default": null
+   },
+   "ports": [
+    {
+     "host_ip": "127.0.0.1",
+     "mode": "ingress",
+     "protocol": "tcp",
+     "target": 6379
+    }
+   ],
+   "restart": "no",
+   "tmpfs": [
+    "/data"
+   ]
+  }
+ }
+}

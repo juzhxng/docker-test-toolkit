@@ -1,4 +1,4 @@
-"""Retention: keep toolkit-owned state within its caps without an operator command (design 2.7).
+"""Retention: keep toolkit-owned state within its caps without an operator command.
 
 One bounded, throttled pass removes only what the toolkit's records name, never under an account metadata or run lock:
 build-cache generations (the 0700 store is their record), archived run records, empty recorded session folders, the
@@ -145,7 +145,7 @@ def run_pass(
         return None
     wall = time.time_ns() if wall_ns is None else wall_ns
     total_of = _filesystem_total if fs_total is None else fs_total
-    if deadline is None:  # every pass is bounded, whoever calls it (design 2.7)
+    if deadline is None:  # every pass is bounded, whoever calls it
         from docker_test_toolkit.application.lifecycle import Deadline
 
         deadline = Deadline.after(clock, budget_s)
@@ -200,7 +200,7 @@ def read_report(account: Path) -> dict | None:
 
 
 def throttled(account: Path, clock: NativeClock) -> bool:
-    """Whether a pass of this clock origin younger than the interval deferred nothing (design 2.7)."""
+    """Whether a pass of this clock origin younger than the interval deferred nothing."""
     origin, now = clock.origin, clock.read()
     try:
         stamp = _read_private_json(account / STAMP_FILE)

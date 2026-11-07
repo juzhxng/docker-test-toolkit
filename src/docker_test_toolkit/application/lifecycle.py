@@ -742,7 +742,7 @@ def engine_get(docker, path: str, *, deadline: Deadline | None = None) -> Engine
             raise ControlError(
                 message,
                 result,
-                reason="unspecified" if cause is None else cause.reason,  # unclassified, as the design requires
+                reason="unspecified" if cause is None else cause.reason,  # unclassified
                 observer=None if cause is None else cause.observer,
             ) from error
         finally:
@@ -1924,7 +1924,7 @@ def _append_docker_receipt(
 
 def _record_image_lock_wait(data: dict, wait: tuple[str, int, int]) -> bool:
     """Merge one image-lock wait into ``hold_timeline.waiting`` (reason ``image-lock``), never into expiry or failure
-    evidence (design N9); return whether the record changed. A wait from another clock origin than the timeline's is
+    evidence; return whether the record changed. A wait from another clock origin than the timeline's is
     dropped."""
     origin, first, last = wait
     timeline = data.get("hold_timeline")
@@ -1942,7 +1942,7 @@ def _record_image_lock_wait(data: dict, wait: tuple[str, int, int]) -> bool:
 
 def _record_grants_unreadable(data: dict, tick: tuple[str, int]) -> None:
     """Record once in ``hold_timeline.waiting`` that the grants log was unreadable (reason
-    ``shared-grants-unreadable``, design 2.5, R3-8). A tick from another clock origin than the timeline's is dropped."""
+    ``shared-grants-unreadable``). A tick from another clock origin than the timeline's is dropped."""
     origin, now = tick
     timeline = data.get("hold_timeline")
     if not isinstance(timeline, dict) or timeline.get("origin") != origin:
@@ -2399,7 +2399,7 @@ def _restore_builder_memory_controller(adapter, builder: str, worker: str) -> No
 
 def _state_volume_identity(adapter, state_volume: object, worker: dict) -> dict | None:
     """Return the worker's state volume as ``{name, created_at}`` when the worker mounts it, for retention to remove
-    exactly that incarnation later (design 2.7); ``None`` when it cannot be proven (retention then only reports it)."""
+    exactly that incarnation later; ``None`` when it cannot be proven (retention then only reports it)."""
     if not isinstance(state_volume, str):
         return None
     mounts = worker.get("Mounts")
@@ -2414,7 +2414,7 @@ def _state_volume_identity(adapter, state_volume: object, worker: dict) -> dict 
 
 
 def _image_size(item: dict) -> int | None:
-    """Return an inspected image's size for the derived disk estimate (design DD8), or ``None`` when it is not one."""
+    """Return an inspected image's size for the derived disk estimate, or ``None`` when it is not one."""
     size = item.get("Size")
     return size if type(size) is int and size >= 0 else None
 
@@ -2694,7 +2694,7 @@ def _prepare_compose_receipt(
 
 
 def _private_root_trees(registry: Path) -> tuple[str, ...]:
-    """Return ``<T>/docker-test-toolkit`` for every temporary parent T the registry's sessions recorded (design 2.3).
+    """Return ``<T>/docker-test-toolkit`` for every temporary parent T the registry's sessions recorded.
 
     An unreadable project record raises: a tree it would name could otherwise pass as foreign-free.
     """
@@ -2751,12 +2751,12 @@ _UNBOUNDED_BYTES = 1 << 62  # a container without a hard limit: R12 refuses besi
 
 
 def _hard_limit_bytes(container: dict) -> int:
-    """Return an inspected container's hard memory limit, or unbounded when it has none (R12)."""
+    """Return an inspected container's hard memory limit, or unbounded when it has none."""
     return memory_limit(container) or _UNBOUNDED_BYTES
 
 
 def _own_running_bytes(adapter, data: dict, *, counted_elsewhere: Callable[[dict], bool]) -> int:
-    """Sum the hard memory limits of the run's own running containers (R12).
+    """Sum the hard memory limits of the run's own running containers.
 
     A container is the run's when it carries its Compose project or run label; the BuildKit worker carries neither
     (``buildx create`` sets no label), so it is never counted. One without a limit counts as unbounded, so R12
@@ -2791,7 +2791,7 @@ def _may_overtake(
     directory: Path,
     test_directory: Path | None = None,
 ) -> bool:
-    """Whether a queued run may reserve before the FIFO head under the ``repository`` share scope (design consultation
+    """Whether a queued run may reserve before the FIFO head under the ``repository`` share scope
     2026-11-02): runs of the holders' repository join them while other repositories wait for the whole repository.
 
     Only the earliest waiting run of the holders' repository qualifies, every run ahead of it is of another repository,
@@ -2844,7 +2844,7 @@ def _turn_outcome(
     daemon_id: str | None,
     test_directory: Path | None,
 ) -> TurnDecision | None:
-    """Decide the repository turn under M (design 2.4); ``None`` when no turn applies or a record cannot be read.
+    """Decide the repository turn under M; ``None`` when no turn applies or a record cannot be read.
 
     The candidates are the live queued runs with their repositories read through their records, as ``_may_overtake``
     reads them; an unreadable one leaves today's order in place.
@@ -2888,7 +2888,7 @@ def _turn_outcome(
 
 
 def _record_turn(directory: Path, data: dict, test_directory: Path | None) -> None:
-    """Write the leaving run's repository turn, in the section that removes its queue entry (design 2.4, DD1).
+    """Write the leaving run's repository turn, in the section that removes its queue entry.
 
     Only under repository scope above limit 1; under other settings the turn file is removed. The write prunes other
     turns with the grace that decides them (a private account's bound one in tests). The leave never fails for a turn:
@@ -2919,7 +2919,7 @@ def _record_turn(directory: Path, data: dict, test_directory: Path | None) -> No
 
 
 def _drop_lease(directory: Path, state: QueueState) -> None:
-    """Drop the leases of runs that no longer hold, in the section that removed a queue entry (design DD4). A failed
+    """Drop the leases of runs that no longer hold, in the section that removed a queue entry. A failed
     write only leaves a stale lease the next reservation's write drops; a holder without one counts the floor."""
     holders = {run_id for run_id, entry in state.entries.items() if entry.phase in HOLDER_PHASES}
     try:
@@ -2929,7 +2929,7 @@ def _drop_lease(directory: Path, state: QueueState) -> None:
 
 
 def _drop_turn(directory: Path, data: dict) -> None:
-    """Remove the recovered run's own turn; a turn another run of its repository earned stays (design 2.4)."""
+    """Remove the recovered run's own turn; a turn another run of its repository earned stays."""
     remove_turn(directory, repository_identity(data["project_root"]), data["run_id"])
 
 
@@ -2958,7 +2958,7 @@ def _builder_removed(data: dict) -> bool:
 
 
 def _evaluates_share_rules(command: ClassifiedDockerCommand) -> bool:
-    """Return whether a classified command is a row of the enforcement table (design 2.3): never teardown or I/O."""
+    """Return whether a classified command is a row of the enforcement table: never teardown or I/O."""
     subcommand = command.plan.get("subcommand")
     return (
         checked_mutation(command.kind, subcommand)
@@ -2970,7 +2970,7 @@ def _evaluates_share_rules(command: ClassifiedDockerCommand) -> bool:
 def _share_verdict(
     context: RunContext, data: dict, adapter, command: ClassifiedDockerCommand, argv: tuple[str, ...], config: dict
 ) -> ShareVerdict:
-    """Return the first share rule one creating or starting command breaks (design 2.3 enforcement table)."""
+    """Return the first share rule one creating or starting command breaks."""
     kind, budget = command.kind, _phase_container_bytes(data)
     if kind == "builder-create":
         return builder_verdict(removed=_builder_removed(data))
@@ -3076,7 +3076,7 @@ def _stopped_service_limits(adapter, project: str, services: set[str]) -> int:
 
 
 def _verdict_key(data: dict) -> str | None:
-    """Return the run request's verdict-store key, or ``None`` when its checkout has no Git origin (design 2.2): such a
+    """Return the run request's verdict-store key, or ``None`` when its checkout has no Git origin: such a
     run neither predicts nor teaches a verdict."""
     origin = repository_origin(data["project_root"])
     if origin is None:
@@ -3113,7 +3113,7 @@ def _record_negative_verdict(context: RunContext, data: dict, verdict: ShareVerd
 
 
 def _refuse_or_record(context: RunContext, data: dict, verdict: ShareVerdict) -> None:
-    """Record a violation; then refuse it when the run is shared (design D2: the verdict is durable first)."""
+    """Record a violation; then refuse it when the run is shared."""
     if verdict.shareable:
         return
     recorded = _record_negative_verdict(context, data, verdict)
@@ -3148,7 +3148,7 @@ def _mark_share_unknown(data: dict) -> None:
 
 
 def _bindable(facts: ComposeShareFacts) -> bool:
-    """Whether a Compose command's inputs can be bound (R15): every persistent option understood, explicit files, no
+    """Whether a Compose command's inputs can be bound: every persistent option understood, explicit files, no
     stdin, and no relative input under ``--project-directory`` (which file Compose then reads is not this process's cwd
     to decide)."""
     relative = any(not os.path.isabs(path) for path in (*facts.files, *facts.env_files))
@@ -3161,7 +3161,7 @@ def _bindable(facts: ComposeShareFacts) -> bool:
 
 
 def _compose_input_files(argv: tuple[str, ...]) -> list[dict] | None:
-    """Hash a shared run's Compose ``--file`` and ``--env-file`` inputs before the render (C8).
+    """Hash a shared run's Compose ``--file`` and ``--env-file`` inputs before the render.
 
     Each path is kept as the command names it, joined to this process's cwd when relative but neither normalized nor
     resolved (``link/../x`` stays a lookup through the link), so the checks after the render and before execution read
@@ -3200,7 +3200,7 @@ def _enforce_share_rules(
     config: dict | None,
     bound_inputs: list[dict] | None,
 ) -> ClassifiedDockerCommand:
-    """Evaluate the share rules on one creating or starting command before its receipt (design 2.3, N6).
+    """Evaluate the share rules on one creating or starting command before its receipt.
 
     Every run records a violation as a negative verdict; only a shared run refuses (``share-rule``), and a shared run
     whose rules cannot be evaluated refuses too. An exclusive run never fails here. ``bound_inputs`` (a shared Compose
@@ -3212,7 +3212,7 @@ def _enforce_share_rules(
     try:
         verdict = _share_verdict(context, data, adapter, command, argv, config or {})
     except _UNEVALUABLE as error:
-        # Exclusive runs never fail because of a share rule (design D2): an unevaluable rule (unreadable registry or
+        # Exclusive runs never fail because of a share rule: an unevaluable rule (unreadable registry or
         # engine answer, malformed render) marks the run unknown, so it teaches nothing. A shared run refuses instead.
         if shared:
             raise InvalidInput("Shared run's share rules could not be evaluated.", reason="share-rule") from error
@@ -3225,7 +3225,7 @@ def _enforce_share_rules(
 
 
 def _receipt_daemon_platform(adapter) -> Platform | None:
-    """Read the daemon's platform once for a receipt (design 4.1); ``None`` when it cannot be known.
+    """Read the daemon's platform once for a receipt; ``None`` when it cannot be known.
 
     Platform recording never refuses a mutation: a late, failed or unmapped read is only an unknown platform. The
     read goes through the observation-read seam, bounded by its own short deadline.
@@ -3428,8 +3428,8 @@ def _build_promotion(
         return "unresolved", []
     metadata_record, metadata_bytes = loaded
     metadata_digest = metadata_record.get("containerimage.digest")
-    # On Podman the image ID is the config digest and its repository digests carry a digest of their own (measured
-    # 2026-11-04): the build binds through the config digest, the repository digests through their repositories.
+    # On Podman the image ID is the config digest and its repository digests carry a digest of their own: the build
+    # binds through the config digest, the repository digests through their repositories.
     podman = adapter.engine == "podman"
     config_digest = metadata_record.get("containerimage.config.digest") if podman else None
     tag_identities = [_build_tag_identity(tag) for tag in receipt["plan"]["tags"]]
@@ -3523,7 +3523,7 @@ def _platform_from_dict(record: dict | None) -> Platform | None:
 
 
 def _image_platform_facts(receipt: dict, image: Platform | None, data: dict) -> dict:
-    """Return the promoted image's platform and whether it runs natively on the daemon (design 4.1).
+    """Return the promoted image's platform and whether it runs natively on the daemon.
 
     The image platform wins over the request because it is what executes; a malformed or absent image platform falls
     back to the request, and an unknown daemon makes the answer ``unknown``.
@@ -3564,7 +3564,7 @@ def _image_pull_promotion(
 
     ``by_presence`` (a shared run, decided under K): a failed or unknown client exit still promotes the image when it
     is present, because under K it was absent at dispatch and no other run could pull it since, so it is this pull's
-    own output, owned and later deleted instead of leaked (design 2.8 re-reconcile, C11).
+    own output, owned and later deleted instead of leaked.
     """
     reference = receipt["plan"]["reference"]
     repository_digest = _repository_digest(reference)
@@ -3686,7 +3686,7 @@ def _finish_docker_receipt(
     """Publish one receipt result under the run lock; the receipt must still equal the pending one.
 
     ``archive`` is the validated ``plan["archive"]`` record of an export receipt, written in the same locked write.
-    ``cache`` is a build's cache outcome; the finish tick is added to it here (design 3.2, 3.9).
+    ``cache`` is a build's cache outcome; the finish tick is added to it here.
     ``precheck`` runs under the lock after the pending check and may refuse the finish.
     """
     with _locked_run(context, deadline_ns):
@@ -3721,7 +3721,7 @@ def _finish_receipt_locked(
             image_id=receipt["plan"].get("image_id"),
         )
         current["plan"]["archive"] = archive
-    if cache is not None:  # after the pending check: the in-memory pending receipt is never mutated (DD8)
+    if cache is not None:  # after the pending check: the in-memory pending receipt is never mutated
         current["plan"]["cache"] = {**cache, "finished_ns": NativeClock().read()}
     for resource in resources:
         plural = "builders" if resource["kind"] == "builder" else f"{resource['kind']}s"
@@ -3899,7 +3899,7 @@ _CACHE_FAILURES = (OSError, ValueError, ResourceError, InvalidInput, RecursionEr
 
 
 def _cache_fail_open(function: Callable[..., dict], plan: dict, *arguments: object, **keywords: object) -> dict:
-    """Run one cache outcome step; a cache failure becomes ``skipped:error`` and never fails the build (I5)."""
+    """Run one cache outcome step; a cache failure becomes ``skipped:error`` and never fails the build."""
     try:
         return function(plan, *arguments, **keywords)
     except _CACHE_FAILURES:
@@ -3945,7 +3945,7 @@ def _failed_build_cache(plan: dict | None) -> dict | None:
 def _complete_cache_fail_open(
     plan: dict, state: str, resources: list[dict], released: bool, run_id: str, operation_id: str
 ) -> dict:
-    """Complete one finished loaded build's cache: publish a promoted native export, else remove it (design 3.8)."""
+    """Complete one finished loaded build's cache: publish a promoted native export, else remove it."""
     if not released:
         return _cache_fail_open(build_cache.error_outcome, plan)
     images = [resource for resource in resources if resource["kind"] == "image"]
@@ -4002,7 +4002,7 @@ def dispatch_docker(
     if command.kind not in _IMAGE_LOCK_SECONDS or _record_mode(data) != AdmissionMode.SHARED:
         return _dispatch_classified(context, descriptor, adapter, argv, data, command, operation_id, test_seams)
     # A shared run's image operation holds the account image lock K from before its preparation until its receipt is
-    # finished, and its Docker child inherits K (design 2.6); exclusive runs never take K for their own operations.
+    # finished, and its Docker child inherits K; exclusive runs never take K for their own operations.
     clock = NativeClock()
     first = clock.read()
     account = Path(data["account_directory"])
@@ -4015,7 +4015,7 @@ def dispatch_docker(
         )
 
 
-# K waits within each image operation's own bound (design 2.6 table); expiry is ResourceBusy lock-deadline.
+# K waits within each image operation's own bound; expiry is ResourceBusy lock-deadline.
 _IMAGE_LOCK_SECONDS = {"build": 1200, "image-pull": 1200, "builder-create": 30, "image-rm": 30}
 IMAGE_LOCK_WAIT = "image-lock"
 SHARED_GRANTS_UNREADABLE = "shared-grants-unreadable"
@@ -4037,12 +4037,12 @@ def _dispatch_classified(
 
     ``hold_fd`` is the image lock a shared run's image operation holds; every Docker child launched here inherits it.
     """
-    held, cache_plan = ExitStack(), None  # the build's shared cache anchor and planning object (design 3.7)
+    held, cache_plan = ExitStack(), None  # the build's shared cache anchor and planning object
     config, bound_inputs = None, None
     if command.kind in {"compose", "compose-io", "compose-run"}:
         if _binds_compose_inputs(data, command):
             try:
-                bound_inputs = _compose_input_files(argv)  # hashed before the render, verified after it (C8)
+                bound_inputs = _compose_input_files(argv)  # hashed before the render, verified after it
             except InvalidInput as error:  # a missing or unreadable input is an R15 violation: verdict first
                 _refuse_or_record(context, data, ShareVerdict("R15", str(error).rstrip(".")))
                 raise
@@ -4065,7 +4065,7 @@ def _dispatch_classified(
         if hold_fd is not None and _hand_off_if_in_use(
             context, data, removed_id, resource, None, image_lock_wait=image_lock_wait
         ):
-            return DockerResult(0, "", "")  # a shared owner's rm of an image another run uses hands it off (2.7)
+            return DockerResult(0, "", "")  # a shared owner's rm of an image another run uses hands it off
         argv, plan = _image_removal(resource)
         command = ClassifiedDockerCommand(command.kind, argv, {**command.plan, **plan})
     command = _enforce_share_rules(context, data, adapter, command, argv, config, bound_inputs)
@@ -4146,7 +4146,7 @@ def _dispatch_classified(
                 command.argv, timeout_seconds=timeout, stream_output=command.blocking, hold_fd=hold_fd
             )
         elif command.kind == "build":
-            try:  # the shared cache anchor is held until the build child returns (lever AC5)
+            try:  # the shared cache anchor is held until the build child returns
                 builder_resource = data["owned_resources"]["builders"].get(command.plan["builder"])
                 if builder_resource is None or not _validate_owned_identity(adapter, builder_resource):
                     raise InvalidInput("Build requires the exact live owned builder.")
@@ -4202,7 +4202,7 @@ def _dispatch_classified(
     if command.kind == "builder-create" and state == "promoted" and not invalid_builder:
         _restore_builder_memory_controller(adapter, receipt["plan"]["name"], receipt["plan"]["buildkit_name"])
     # A loaded build finished by its dispatcher records its cache outcome and when it finished; an unresolved one is
-    # finished later by reconciliation, which records no cache facts (design 3.2, 3.9).
+    # finished later by reconciliation, which records no cache facts.
     cache = None
     if cache_plan is not None and state != "unresolved":
         cache = _complete_cache_fail_open(cache_plan, state, resources, released, data["run_id"], operation_id)
@@ -4298,7 +4298,7 @@ def _reconcile_docker_receipt(context: RunContext, deadline_ns: int | None = Non
         _reconcile_receipt(context, data, receipt, deadline_ns)
         return
     # A shared run's image receipt is reconciled under K, taken first: acquiring it proves the operation's Docker
-    # child (which inherited K) has exited, so nothing it does can land after the decision (design 2.6, C1).
+    # child (which inherited K) has exited, so nothing it does can land after the decision.
     account = Path(data["account_directory"])
     with image_lock(Context(account, account), deadline_ns=deadline_ns) as hold_fd:
         _reconcile_receipt(context, _load_run(context), receipt, deadline_ns, hold_fd)
@@ -4334,7 +4334,7 @@ def _reconcile_receipt(
             and exists
             and _hand_off_if_in_use(context, data, identity, resource, deadline_ns)
         ):
-            # Another run bound the image after the owner journaled its removal: hand it off, never delete (2.7).
+            # Another run bound the image after the owner journaled its removal: hand it off, never delete.
             _finish_docker_receipt(context, receipt, "removed", DockerResult(0, "", ""), [], deadline_ns)
             return
         if kind == "image":
@@ -4351,9 +4351,9 @@ def _reconcile_receipt(
         raise ResourceError("Docker mutation remains unresolved after exact reconciliation.")
 
 
-# --- Archive export: ``image-save`` (Story B) -------------------------------------------------------------------------
+# --- Archive export: ``image-save`` -------------------------------------------------------------------------
 #
-# The normative protocol is docs/superpowers/specs/2026-10-07-owned-image-export-and-buildx-archive-design.md. In short:
+# In short:
 # the dispatcher exports into a fresh private staging directory, verifies the archive through a held descriptor,
 # links it under the run lock without replacing anything, and records success last. A reconciler never promotes; it
 # fails the receipt and deletes only what it can prove belongs to the operation.
@@ -4457,7 +4457,7 @@ def _prepare_image_export(
     if not _validate_owned_identity(adapter, data["owned_resources"]["images"][image_id]):
         raise InvalidInput("Owned image disappeared before export.")
     item = adapter.inspect_exact(ExactInspection("image", image_id)).attributes
-    if adapter.engine == "podman":  # Podman reports no descriptor; its archive binds the config digest (design 2.7)
+    if adapter.engine == "podman":  # Podman reports no descriptor; its archive binds the config digest
         if item.get("Id") != image_id:
             raise ResourceError("The image is inconsistent with its ID.", reason="unsupported-image-store")
     else:
@@ -4780,7 +4780,7 @@ def _resolve_publication(
     deadline: Deadline,
     seams: _ArchiveSeams,
 ) -> ToolkitError:
-    """Decide the outcome of a V8 that raised, after re-reading the record under the lock (design 3.3)."""
+    """Decide the outcome of a V8 that raised, after re-reading the record under the lock."""
     with _locked_run(context):
         current = _load_run(context)["docker_receipts"].get(receipt["id"])
     if current is not None and current["state"] == "promoted" and current["plan"].get("archive") == record:
@@ -5124,7 +5124,7 @@ def _cleanup_owned_docker_resources(context: RunContext, deadline_ns: int | None
     """Remove only exact promoted resources, journaling each mutation first.
 
     Images last: a shared run, or any run while handed-off images are pending, runs the image step under the image lock
-    K (design 2.7); an exclusive run with nothing pending removes its images exactly as today.
+    K; an exclusive run with nothing pending removes its images exactly as today.
     """
     operations = (
         ("builders", "builder"),
@@ -5148,13 +5148,13 @@ _RELEASE_SECONDS = 180
 
 def _owned_cleanup_needed(data: dict) -> bool:
     """Whether a leave, release or recovery runs the owned cleanup: something owned remains, or handed-off images are
-    pending, which the last user drains even when it owns nothing (design 2.7)."""
+    pending, which the last user drains even when it owns nothing."""
     return not _owned_docker_removed(data) or not pending_absent(Path(data["account_directory"]))
 
 
 def _image_step_locked(data: dict) -> bool:
     """Whether the image step runs under K: a shared record, or handed-off images pending; an exclusive run with
-    nothing pending removes its images exactly as before shared runs (design 2.7)."""
+    nothing pending removes its images exactly as before shared runs."""
     return _record_mode(data) == AdmissionMode.SHARED or not pending_absent(Path(data["account_directory"]))
 
 
@@ -5187,14 +5187,14 @@ def _interest_views(context: RunContext, data: dict, deadline_ns: int | None) ->
 def operator_image_interest(account: Path, registry: Path) -> Callable[[str], bool]:
     """Return the in-use decision operator cleanup applies to each image; the caller evaluates it under K.
 
-    It applies at every limit: an image a live holder or an indexed retained run uses is kept (design 2.7). At limit 1
+    It applies at every limit: an image a live holder or an indexed retained run uses is kept. At limit 1
     this keeps more than before shared runs existed, never less.
     """
     return lambda image_id: image_in_use(image_id, _account_interest_views(account, registry, None), actor_run="")
 
 
 def _account_interest_views(account: Path, registry: Path, deadline_ns: int | None) -> list[InterestView]:
-    """Read who may still use images (design 2.7): every holder entry's record and every indexed stopped-retained run.
+    """Read who may still use images: every holder entry's record and every indexed stopped-retained run.
 
     Queued entries never protect an image. An unreadable record, or a project index whose runs cannot be enumerated,
     counts as using every image.
@@ -5254,7 +5254,7 @@ def _interest_view(run_id: str, record: dict) -> InterestView:
 
 
 def _image_step(context: RunContext, deadline_ns: int | None, hold_fd: int) -> None:
-    """Decide and delete owned images under K, then drain handed-off images nobody uses any more (design 2.7).
+    """Decide and delete owned images under K, then drain handed-off images nobody uses any more.
 
     A shared run hands an image still in use to the pending list instead of deleting it; an exclusive run deletes as
     today. An unreadable pending list hands nothing off and drains nothing: the cleanup stays incomplete.
@@ -5262,7 +5262,7 @@ def _image_step(context: RunContext, deadline_ns: int | None, hold_fd: int) -> N
     data = _load_run(context)
     account = Path(data["account_directory"])
     try:
-        read_pending(account)  # an unreadable list hands nothing off and drains nothing (R3-8)
+        read_pending(account)  # an unreadable list hands nothing off and drains nothing
     except ResourceError as error:
         raise IncompleteCleanup("The pending image deletion list is unreadable; images are kept.") from error
     if _record_mode(data) != AdmissionMode.SHARED:
@@ -5288,7 +5288,7 @@ def _hand_off_if_in_use(
     """Under K, hand one owned image another live run uses to the pending list; return whether it was handed off.
 
     The entry is appended once (a re-run after a crash finds it and only marks), then the resource is marked removed
-    with ``pending_deletion`` evidence; a dispatch's K wait is merged into that write (N9). Raises IncompleteCleanup
+    with ``pending_deletion`` evidence; a dispatch's K wait is merged into that write. Raises IncompleteCleanup
     when the pending list is unreadable.
     """
     if not image_in_use(identity, _interest_views(context, data, deadline_ns), actor_run=data["run_id"]):
@@ -5399,7 +5399,7 @@ def _finalize_upgraded_preparation(context: RunContext) -> None:
     """Finish a never-granted run its guardian revoked at the version gate, as ``cancel_run``'s tail does.
 
     ``revoke_ungranted`` leaves the private root and the registry index to a live requester; this requester removes
-    them, so nothing remains even when the project never cancels (design 3.2). Idempotent.
+    them, so nothing remains even when the project never cancels. Idempotent.
     """
     project = context.project
     with lock(project, project.project_id, shared=True), lock(project, f"run-{context.run_id}"):
@@ -5456,7 +5456,7 @@ def prepare_resume(
         origin = {key: json.loads(json.dumps(data.get(key))) for key in _RESUME_ORIGIN_FIELDS}
         own = toolkit_identity_record()
         data.update(
-            source_identity=own["sha256"],  # rebinding: the resumer's version now owns the run (design 3.3)
+            source_identity=own["sha256"],  # rebinding: the resumer's version now owns the run
             artifact=own,
             state="prepared",
             admission="never-granted",
@@ -5507,8 +5507,8 @@ def _restore_stopped_retained(data: dict) -> None:
         resume_origin=None,
         pending_operation=None,
     )
-    data.pop("failure_evidence", None)  # a resumed generation's evidence is not the retained run's (design 4.3, rule 5)
-    data.pop("hold_timeline", None)  # dropped at resume preparation; never restored by the rollback (design 3.2)
+    data.pop("failure_evidence", None)  # a resumed generation's evidence is not the retained run's
+    data.pop("hold_timeline", None)  # dropped at resume preparation; never restored by the rollback
 
 
 def _valid_clock_origin(origin) -> bool:
@@ -6052,29 +6052,6 @@ def completed_run_is_quiescent(data: dict) -> bool:
     return not quiescence_blockers(data)
 
 
-def finalization_pending_shape(data: dict) -> bool:
-    """Return whether a run record is exactly the legacy finalization-pending shape.
-
-    The old resource-grant recovery writer finished a withdrawn run whose requester died before acknowledging with
-    ``cleanup_outcome`` still ``pending``. Every other quiescence clause holds in that shape: the run is complete,
-    revoked, non-retained, recovered by a third actor (``recovery_actor``) without any ``leave_ack``, nothing is
-    pending, open or present, and the private root is gone. Anything else, including a retained or acknowledged run,
-    is not it.
-    """
-    root = Path(data["private_root"])
-    return (
-        data["admission"] == "revoked"
-        and data["generation"] >= 1
-        and data["retain"] is False
-        and data["cleanup_outcome"] == "pending"
-        and data["withdrawal"] is not None
-        and data["recovery_actor"] is not None
-        and data["leave_ack"] is None
-        and quiescence_blockers(data) == ("run-cleanup-pending",)
-        and not (root.exists() or root.is_symlink())
-    )
-
-
 def _is_release_shape(data: dict) -> bool:
     """Return whether a record is an interrupted retained release: the target's resources are removed, not stopped."""
     return (
@@ -6089,7 +6066,7 @@ def _is_release_shape(data: dict) -> bool:
 
 
 def derive_recovery_phase(data: dict) -> str | None:
-    """Return the last recovery phase (design 3.6) a run record proves complete, or None before any recovery write.
+    """Return the last recovery phase a run record proves complete, or None before any recovery write.
 
     ``authorize`` leaves no durable trace, so it is never derived. A retained run keeps its private root and its
     resources only need to be quiescent, so its resources phase is judged by quiescence and the root is not examined.
@@ -6125,7 +6102,7 @@ def _load_run(context: RunContext) -> dict:
         return _validated_run(context, data)
     except (TypeError, AttributeError, KeyError) as error:
         # Valid JSON of the wrong shape: the validators hash, match and index fields before every one is type-checked.
-        # An unreadable field means an invalid record, never a crash of the reader (design D-ISO).
+        # An unreadable field means an invalid record, never a crash of the reader.
         raise ResourceError("Run record has a field of the wrong type.") from error
 
 
@@ -6140,7 +6117,7 @@ def _validated_run(context: RunContext, data: dict) -> dict:
     if "sharing" in data:
         if data["sharing"] != {"mode": AdmissionMode.SHARED}:
             raise ResourceError("Run record carries an invalid sharing key.")
-        fields.discard("sharing")  # only shared generations carry it; never injected when absent (S10)
+        fields.discard("sharing")  # only shared generations carry it; never injected when absent
     if fields == _RUN_FIELDS - {"release_authority"}:
         data["release_authority"] = None
     elif fields != _RUN_FIELDS:
@@ -6239,7 +6216,7 @@ def _validated_run(context: RunContext, data: dict) -> dict:
         raise ResourceError("Unsupported or contradictory admission history.")
     if data["generation"] != 0 and not resuming:
         _validate_published_grant(data)
-    elif "hold_timeline" in data:  # the key exists only beside a published grant (design 3.2, I11)
+    elif "hold_timeline" in data:  # the key exists only beside a published grant
         raise ResourceError("Run record hold timeline is invalid.")
     attempt = data.get("guardian_attempt")
     if attempt is None:
@@ -6502,7 +6479,7 @@ def _validate_published_grant(data: dict) -> None:
         raise ResourceError("Stopping execution lacks its root's withdrawal.")
     if data["state"] in ("complete", "stopped-retained"):
         if data["state"] == "complete":
-            if not completed_run_is_quiescent(data) and not finalization_pending_shape(data):
+            if not completed_run_is_quiescent(data):
                 raise ResourceError("Completed grant lacks verified quiescence.")
         else:
             if (
@@ -6600,7 +6577,7 @@ def _requester_poll_ns(data: dict) -> int:
 
 
 def _finish_acknowledged_leave(context: RunContext, revision: int, deadline_ns: int | None) -> RunStatus:
-    """Return the status of an acknowledged leave once its retirement is verified (I-LR1, I-LR2).
+    """Return the status of an acknowledged leave once its retirement is verified.
 
     The only path that returns a status after an acknowledgment. The barrier: the project and run locks, taken once,
     end the guardian's retirement section; under them the acknowledgment is required (a malformed one raises
@@ -6757,7 +6734,7 @@ def leave_run(lease: RunLease, outcome: str) -> RunStatus:
 
 
 def _record_hold_release(data: dict, release: str) -> bool:
-    """Write the release into ``hold_timeline`` once; return whether the record changed (design 3.2).
+    """Write the release into ``hold_timeline`` once; return whether the record changed.
 
     A record without the key (finalization, 0.3.12 and earlier, a rolled-back resume) is released as before and never
     gains the key. The first release wins: a retry never overwrites an earlier one. The release carries the current
@@ -6772,7 +6749,7 @@ def _record_hold_release(data: dict, release: str) -> bool:
 
 
 def _record_positive_verdict(context: RunContext, data: dict) -> None:
-    """Teach the request's positive verdict at leave when the run performed a checked mutation (design 2.3).
+    """Teach the request's positive verdict at leave when the run performed a checked mutation.
 
     The caller holds the project's ``registry`` lock. A run without a creating or starting receipt teaches nothing.
     A negative verdict of the request stays (``write_verdict``): some run of it broke a rule. No-raise contract: a
@@ -6979,7 +6956,7 @@ LOCATOR_FIELDS = frozenset({"project_root", "project_state", "run_id", "session_
 
 
 def locator_fields(value: object, invalid: ToolkitError) -> dict[str, str]:
-    """Return a run locator's six string fields; fields a newer peer adds are ignored (design E3).
+    """Return a run locator's six string fields; fields a newer peer adds are ignored.
 
     Raises:
         ToolkitError: ``invalid``, when a field is missing or not a string.
@@ -7212,7 +7189,7 @@ def enter_run(context: RunContext, *, _test_directory: Path | None = None) -> Ru
 def retention_after_release(
     context: RunContext, test_directory: Path | None, trigger: str
 ) -> retention.RetentionReport | None:
-    """Run one retention pass when this release left no run holding the account (design 2.7, triggers 1 and 2).
+    """Run one retention pass when this release left no run holding the account.
 
     Called only where the caller holds no lock (the guardian after its leave, the operator's ``run recover``). The
     queue is read under the metadata lock without waiting for it, which is released before the pass; a busy lock skips
@@ -7258,7 +7235,7 @@ def retention_image_interest(account: Path, registry: Path) -> Callable[[], Call
 
 
 def _ensure_probe_image(topology: str) -> None:
-    """Make the daemon probe's image present before a fresh run queues, holding no account lock (design DD9).
+    """Make the daemon probe's image present before a fresh run queues, holding no account lock.
 
     Admission never pulls: a pass without the image reads no figures (joins on a Mac VM then wait on CPU pressure).
     Every outcome is accepted here; a failed pull is stamped per daemon and retried after its backoff.
@@ -7291,7 +7268,7 @@ def _disk_refusal_detail(context: RunContext, data: dict, test_directory: Path |
 def _small_vm_detail(data: dict, test_directory: Path | None) -> str:
     """Name the VM size that admits a run refused for its base capacity or its CPUs, read again by the requester.
 
-    The runtime is not recorded (design 2.5), so the requester detects it again; any failure to do so names nothing.
+    The runtime is not recorded, so the requester detects it again; any failure to do so names nothing.
     Colima names a size for a base-capacity refusal. Podman names a resize only when one changes something (design
     2.4): a machine that already meets the computed size was refused on the host side, which resizing cannot fix.
     """
@@ -7407,7 +7384,7 @@ _FAULT_REASON_MAX = 240  # bounded: the evidence names the failure, it does not 
 
 
 def _fault_reason(fault: TelemetryFault, error: BaseException) -> str:
-    """Return the evidence ``reason`` for one classified fault (design 4.3).
+    """Return the evidence ``reason`` for one classified fault.
 
     An unclassified fault has no category of its own, so its evidence carries the error's own text, whitespace collapsed
     and bounded, which names what actually failed (for example the failed Docker command). A client exit keeps its
@@ -7428,7 +7405,7 @@ def _observation_evidence(
     first_tick: tuple[str, int],
     detail: str | None = None,
 ) -> dict:
-    """Build the observation-kind ``failure_evidence`` value from the record being written (design 4.3)."""
+    """Build the observation-kind ``failure_evidence`` value from the record being written."""
     grant = data.get("grant")
     origin, tick_ns = first_tick
     return {
@@ -7465,7 +7442,7 @@ def _publish_first_failure(current: dict, reason: str, evidence: dict) -> bool:
 
 @dataclass
 class _LateAttempts:
-    """Guardian-memory count of consecutive late observation attempts since the last complete pass (design 4.2).
+    """Guardian-memory count of consecutive late observation attempts since the last complete pass.
 
     The state is lost when the guardian restarts, like the admission accounting; recovery records ``guardian-lost``.
     """
@@ -7478,12 +7455,12 @@ _LATE_ATTEMPTS_TO_FAIL = 3
 # Admission passes whose Docker client read exited non-zero, with no completed read between them, before the run is
 # revoked with that client
 # exit's own message. A busy daemon's exit clears within a few 1 s passes; one that persists (a runner without a usable
-# Docker context, 2026-11-01) would otherwise wait out the whole queue budget without saying why.
+# Docker context) would otherwise wait out the whole queue budget without saying why.
 _CLIENT_EXIT_PASSES_TO_FAIL = 30
 
 
 def _set_container_oom(current: dict) -> None:
-    """Record a container OOM on the run; the first failure of the run also carries its evidence (design 4.3).
+    """Record a container OOM on the run; the first failure of the run also carries its evidence.
 
     An earlier failure keeps its own evidence and today's overwrite semantics stay. Evidence is attached only in the
     states the loader accepts, so a record in any other state is never made unloadable by it.
@@ -7594,7 +7571,7 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
     observations: dict[str, ContainerObservation] = {}
     owned_observations = None
     oom = False
-    reserve = read_host_reserve(Path(data["account_directory"]))  # the account's setting, read each pass (D8)
+    reserve = read_host_reserve(Path(data["account_directory"]))  # the account's setting, read each pass
     try:
         docker = _docker()
         mutation_plan = data["resources"].get("compose") if mutation_pending else None
@@ -7867,9 +7844,9 @@ _HOST_SAMPLES_FILE = "test-host-samples.json"
 
 
 def _validate_host_samples(document: object) -> list[dict]:
-    """Return the entries of a private test host-sample script (design 3.11, T8); refuse any other shape.
+    """Return the entries of a private test host-sample script; refuse any other shape.
 
-    Shape and types only: decreasing offsets or swap-out values are allowed, so tests can provoke the W0 fallback.
+    Shape and types only: decreasing offsets or swap-out values are allowed, so tests can provoke the fallback.
 
     Raises:
         ResourceError: If the document is not exactly the closed script shape.
@@ -7905,7 +7882,7 @@ def bind_test_host_samples(directory: Path, samples: Sequence[dict]) -> None:
     """Script a private account's host-memory reads for the admission window (non-exported test composition).
 
     The guardian child reads the script once, so the samples cross the process boundary that an in-process reader
-    binding cannot (design 3.11, T8). Production never looks for the file.
+    binding cannot. Production never looks for the file.
     """
     root = _private_test_root(directory, "host-sample")
     document = {"schema": 1, "samples": list(samples)}
@@ -7920,9 +7897,9 @@ _TEST_WINDOW_FILE = "test-window.json"
 def bind_test_window(directory: Path, seconds: int) -> None:
     """Bind a shorter admission window for one private test domain (non-exported test composition).
 
-    The guardian of a private run reads it once at start and uses it for selection, its passes and publication
-    (design 2.2, I-D1). Only a shorter integral window, ``1 <= seconds < 30``, is accepted; the real account domain is
-    refused before anything is written. Production never looks for the file.
+        The guardian of a private run reads it once at start and uses it for selection, its passes and publication
+    . Only a shorter integral window, ``1 <= seconds < 30``, is accepted; the real account domain is
+        refused before anything is written. Production never looks for the file.
     """
     root = _private_test_root(directory, "window")
     if type(seconds) is not int or not 1 <= seconds < _WINDOW_NS // 1_000_000_000:
@@ -7948,7 +7925,7 @@ def bind_test_installation(directory: Path, *, root: Path, loaded: Path) -> None
 
 
 def _gate_inputs(test_directory: Path | None) -> tuple[bool, Path | None, Path | None]:
-    """Return ``(test composition, loaded version folder, resolved current)`` for the version gate (design 3.2)."""
+    """Return ``(test composition, loaded version folder, resolved current)`` for the version gate."""
     if test_directory is None:
         installation = installation_of(_ARCHIVE_PATH) if _ARCHIVE_PATH is not None else None
         if installation is None:
@@ -7988,7 +7965,7 @@ def _gate_error(reason: str, test_directory: Path | None) -> IncompatibleState:
 def withdraw_test_runs(registry: Path, *, recorded: Path) -> list[str]:
     """Withdraw the runs a private test registry still holds active, as each run's requester would; return their ids.
 
-    Non-exported test composition: the teardown of a test that never left its runs (TK-121, ruling W). Nothing is
+    Non-exported test composition: the teardown of a test that never left its runs. Nothing is
     signalled; each live guardian then cleans up under its own authority, acknowledges and exits. Refusals come before
     any read or write of a record: the real account domain (also for an absent path), a ``registry`` that is a symlink
     or no longer resolves to ``recorded`` (the resolved path recorded when its root was built), and a ``runs``
@@ -8148,7 +8125,7 @@ def _test_capacity_inputs(
     """Build the private account's synthetic observation, overridden by ``bind_test_capacity`` when it was called.
 
     Without a host-sample script the window is the synthetic complete pair (``now - 30 s``, ``now``). With one, the
-    current sample is the script's next entry and the start is ``baseline`` or that sample, as in production (3.11).
+    current sample is the script's next entry and the start is ``baseline`` or that sample, as in production.
     """
     gib = 1024**3
     clock = NativeClock()
@@ -8201,7 +8178,7 @@ _FAULT_REASONS = {
 
 
 class _AdmissionFault(ResourceError):
-    """An observation read of an admission pass failed; ``fault`` is its classification (design 4.2 and 4.4).
+    """An observation read of an admission pass failed; ``fault`` is its classification.
 
     It is a ``ResourceError`` carrying the cause's reason and observer, so a caller that does not classify admission
     faults keeps today's behaviour. The guardian's admission loops turn it into a wait or a classified revoke.
@@ -8248,7 +8225,7 @@ def _admission_inputs(
         inputs = _capacity_inputs(data, test_directory, baseline, host_script=host_script)
     except (ResourceError, OSError) as error:
         raise _admission_fault(error) from error
-    reserve = read_host_reserve(Path(data["account_directory"]))  # the account's setting, read per decision (D8)
+    reserve = read_host_reserve(Path(data["account_directory"]))  # the account's setting, read per decision
     return replace(inputs, snapshot=replace(inputs.snapshot, host_reserve_bytes=reserve))
 
 
@@ -8309,7 +8286,7 @@ def _join_pressure(
     *,
     host_psi: Path = Path("/proc/pressure/cpu"),
 ) -> float | None:
-    """Return the CPU pressure a join decides on: the host's PSI, or on a Mac VM topology the VM's (design 2.3).
+    """Return the CPU pressure a join decides on: the host's PSI, or on a Mac VM topology the VM's.
 
     A Linux host keeps its own figure (or none, on a kernel without PSI). Where the host publishes none and the daemon
     runs in a VM, the containers compete for the VM's CPUs, so the daemon probe reads the VM's PSI; a probe without a
@@ -8325,7 +8302,7 @@ def _join_pressure(
 def _probe_reading(account: str, docker, daemon_id: str, deadline: object, clock: NativeClock) -> ProbeResult:
     """Return the daemon probe's reading, cached per account; without a data root only the disk figure is unknown.
 
-    A probe ends by ``min(now + PROBE_RUN_BOUND_S, deadline - 2 s)`` (design 2.3), whatever its caller's deadline.
+    A probe ends by ``min(now + PROBE_RUN_BOUND_S, deadline - 2 s)``, whatever its caller's deadline.
     """
     if isinstance(deadline, Deadline):
         deadline.remaining_ns(clock)  # a deadline of another clock origin is an error, as everywhere
@@ -8349,7 +8326,7 @@ def _probe_reading(account: str, docker, daemon_id: str, deadline: object, clock
 
 @dataclass(frozen=True)
 class DiskInputs:
-    """One pass's disk figures, read outside every account lock (design 2.6): the leased places, the private root's
+    """One pass's disk figures, read outside every account lock: the leased places, the private root's
     free bytes (``None`` when unmeasured) and the run's estimate with its source."""
 
     figures: tuple[DiskFigure, ...]
@@ -8361,11 +8338,11 @@ class DiskInputs:
     clock_origin: str | None = None
 
 
-DISK_FIGURES_MAX_AGE_NS = 10_000_000_000  # design 3.1 (7): a decision uses disk figures at most 10 s old
+DISK_FIGURES_MAX_AGE_NS = 10_000_000_000  #: a decision uses disk figures at most 10 s old
 
 
 def disk_figures_fresh(disk: DiskInputs, clock: NativeClock) -> bool:
-    """Whether a reading is young enough to decide on (design 3.1 (7)); one of unknown time or origin is not."""
+    """Whether a reading is young enough to decide on; one of unknown time or origin is not."""
     return (
         disk.read_ns is not None
         and disk.clock_origin == clock.origin
@@ -8409,7 +8386,7 @@ def _daemon_endpoint(docker, daemon_id: str, deadline: Deadline | None) -> str:
 
 @dataclass(frozen=True)
 class RuntimeFacts:
-    """What the bound daemon's runtime decides beyond admission (design section 12): its runtime (``None`` when
+    """What the bound daemon's runtime decides beyond admission: its runtime (``None`` when
     remote or refused), its VM disk's host folder and, on Podman, the machine whose size a refusal may name."""
 
     runtime: str | None
@@ -8421,7 +8398,7 @@ _DAEMON_RUNTIMES: dict[str, RuntimeFacts] = {}  # daemon ID -> its runtime facts
 
 
 def runtime_of(binding: PodmanBinding | None, info: Mapping[str, object], endpoint: str) -> str | RuntimeRefusal | None:
-    """The one runtime rule (design 2.3, section 12): a Podman-bound adapter is ``podman`` (its compat ``/info`` never
+    """The one runtime rule: a Podman-bound adapter is ``podman`` (its compat ``/info`` never
     decides); any other daemon is classified by ``detect_runtime``."""
     if binding is not None:
         return "podman"
@@ -8429,7 +8406,7 @@ def runtime_of(binding: PodmanBinding | None, info: Mapping[str, object], endpoi
 
 
 def _runtime_facts(docker, daemon_id: str, deadline: Deadline) -> RuntimeFacts:
-    """Return the bound daemon's runtime facts, decided once per daemon and process (design 2.5, section 12)."""
+    """Return the bound daemon's runtime facts, decided once per daemon and process."""
     binding = docker.binding
     if binding is not None:
         return RuntimeFacts("podman", vm_disk_place("podman", binding.machine.name, binding.image_dir), binding.machine)
@@ -8486,12 +8463,12 @@ def _disk_inputs(context: RunContext, data: dict, test_directory: Path | None) -
 
 
 def measured_figure(place: str, free: int, total: int, declared: int | None) -> DiskFigure:
-    """Return a measured place's figure with the reserve derived from its total and the declaration (design 2.6)."""
+    """Return a measured place's figure with the reserve derived from its total and the declaration."""
     return DiskFigure(place, free, total, derive_reserve(total, declared), "measured")
 
 
 def measure_folder(place: str, path: Path | None, declared: int | None) -> DiskFigure:
-    """Measure a client-side folder with ``statvfs``; a missing one is ``unknown`` (a moved disk image, design 2.6)."""
+    """Measure a client-side folder with ``statvfs``; a missing one is ``unknown`` (a moved disk image)."""
     if path is None:
         return DiskFigure(place, None, None, None, "unknown")
     try:
@@ -8536,7 +8513,7 @@ _IMAGE_SIZES: dict[str, tuple[int, list[int] | None]] = {}  # run ID -> (runs fo
 
 
 def _previous_image_sizes(context: RunContext, data: dict) -> list[int] | None:
-    """Return the owned image sizes of the newest complete run of the same request (design DD8), or ``None``.
+    """Return the owned image sizes of the newest complete run of the same request, or ``None``.
 
     A waiting guardian asks on every pass: the answer is kept until the runs folder changes (every record write
     renames a file into it), so an idle wait reads no run record again.
@@ -8612,7 +8589,7 @@ def _disk_decision(disk: DiskInputs, other_leases: int, declared: int | None) ->
 def _disk_gate(
     disk: DiskInputs, directory: Path, state: QueueState, run_id: str, clock_origin: str
 ) -> tuple[CapacityDecision, dict[str, Lease]]:
-    """Decide this pass's disk figures under M against every other holder's lease of this boot (design 2.6).
+    """Decide this pass's disk figures under M against every other holder's lease of this boot.
 
     A holder without a lease of this clock origin counts the floor. The declared reserve is read here, under M, with
     the decision it serves; an invalid declaration is treated as undeclared (each place derives its own). Returns the
@@ -8633,7 +8610,7 @@ def _queued_host_sample(
     """Take a capacity-one run's host sample on one queued pass, or None in a private domain without a script.
 
     Production reads the host with the same 30 s deadline as an admission read; a private domain with a script takes
-    its next entry (design 3.11). The read is a capacity read, so the failpoint stage is the admission read's.
+    its next entry. The read is a capacity read, so the failpoint stage is the admission read's.
     """
     if test_directory is None:
         failpoint("admission-capacity-read")
@@ -8660,7 +8637,7 @@ _TEST_POLL_FILE = "test-poll.json"
 def bind_test_poll_interval(directory: Path, interval_ns: int) -> None:
     """Bind a faster leave poll for one private test domain (non-exported test composition).
 
-    The guardian's active loop and the requester's acknowledgment poll of a private run use it (design 2.3, I-D2); the
+    The guardian's active loop and the requester's acknowledgment poll of a private run use it; the
     admission passes keep their 1 s. ``10 ms <= interval_ns <= 1 s``; the real account domain is refused before
     anything is written.
     """
@@ -8756,7 +8733,7 @@ def _attribute_pass(spans: dict[str, _WaitSpan], start: int, reasons: set[str], 
 
 
 class _AdmissionWaits:
-    """Guardian-memory account of why an admission kept waiting, over both admission loops (design 4.4).
+    """Guardian-memory account of why an admission kept waiting, over both admission loops.
 
     Each pass names the reasons that held during it; a pass lasts from its start to the start of the next (or to the
     expiry), so the durations of different reasons overlap and are not additive. The account is lost if the guardian
@@ -8764,7 +8741,7 @@ class _AdmissionWaits:
     """
 
     def __init__(self) -> None:
-        self.first_tick_ns: int | None = None  # the first pass's start: waiting is complete from here (design 3.2)
+        self.first_tick_ns: int | None = None  # the first pass's start: waiting is complete from here
         self._spans: dict[str, _WaitSpan] = {}
         self._pass: tuple[int, set[str]] | None = None
         self._last_reasons: set[str] = set()
@@ -8922,10 +8899,10 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
         ExitStack() as capacity_stack,
     ):
         enroll_guardian(context, attempt, _test_directory=test_directory)
-        # Outside the per-pass handling: an unreadable or invalid test script fails the guardian loudly (design 3.11).
+        # Outside the per-pass handling: an unreadable or invalid test script fails the guardian loudly.
         host_script = _HostScript.load(test_directory)
-        window_ns = _test_window_ns(test_directory)  # one window for selection, passes and publication (I-D1)
-        # The active loop's poll only; the admission passes keep their 1 s (I-D2).
+        window_ns = _test_window_ns(test_directory)  # one window for selection, passes and publication
+        # The active loop's poll only; the admission passes keep their 1 s.
         active_poll_ns = (
             _PRODUCTION_POLL_NS
             if test_directory is None
@@ -8935,7 +8912,7 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
         baseline = None
         waits = _AdmissionWaits()
         # Guardian memory only, never written to the record: every guardian process (a resumed generation included)
-        # starts with an empty buffer, which is W0 (design 3.11, AC6). Keep it that way.
+        # starts with an empty buffer, the fallback. Keep it that way.
         queued = _SampleWindow()
         while capacity is None:
             data = _load_run(context)
@@ -8950,7 +8927,7 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
             waits.begin(clock.read())
             pass_sample: HostMemoryObservation | None = None
             try:
-                # A joiner's fit is decided on a sample taken after it saw holders (design 2.4, Q5): never on one taken
+                # A joiner's fit is decided on a sample taken after it saw holders: never on one taken
                 # while no holder existed. A run predicted shareable also samples, to learn whether E(self) can fit the
                 # machine at all. At limit 1 only the limit itself is read (lock-free; decided again under M).
                 sharing_possible = read_parallel_runs(Path(data["account_directory"])) != 1
@@ -8966,18 +8943,18 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                 try:
                     pass_sample = _queued_host_sample(test_directory, host_script, clock)
                 except (ResourceError, OSError):
-                    pass_sample = None  # a failed queued read is dropped; the run keeps waiting (design 3.11)
+                    pass_sample = None  # a failed queued read is dropped; the run keeps waiting
                 failpoint("admission-sample-taken")
-                disk = (  # outside every account lock (design 2.6); freeing disk never waits for disk
+                disk = (  # outside every account lock; freeing disk never waits for disk
                     None if data["purpose"] == RELEASE_PURPOSE else _disk_inputs(context, data, test_directory)
                 )
                 never = None if disk is None else _never_fits(disk, data)
                 if never is not None:
-                    # refused before any Docker mutation of this pass, another run's takeover included (C-AC2)
+                    # refused before any Docker mutation of this pass, another run's takeover included
                     return revoke_ungranted(
                         context, capacity_stack, _test_directory=test_directory, _failure_reason=never
                     )
-                # detection is part of every admission pass, whether or not this pass can reserve (design 3.10)
+                # detection is part of every admission pass, whether or not this pass can reserve
                 reconcile_account(context, _test_directory=test_directory)
                 reserved = reserve_capacity(
                     context,
@@ -8996,15 +8973,15 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                     )
                 capacity = reserved.descriptor
                 if capacity is not None:
-                    reserved_ns = NativeClock().read()  # the reservation tick, read before the window (design 3.2)
+                    reserved_ns = NativeClock().read()  # the reservation tick, read before the window
                 if reserved.waiting is not None:
                     waits.note(reserved.waiting)
                 if pass_sample is None:
                     queued.clear()  # a pass that yields no sample clears the buffer, whether or not it reserved
                 elif capacity is None:
-                    queued.add(pass_sample)  # only a pass that did not reserve contributes queued history (P3)
+                    queued.add(pass_sample)  # only a pass that did not reserve contributes queued history
             except _AdmissionFault as error:
-                queued.clear()  # the faulted pass yields no sample; today's classification follows unchanged (P7)
+                queued.clear()  # the faulted pass yields no sample; today's classification follows unchanged
                 settled = _settle_admission_fault(
                     context,
                     capacity_stack,
@@ -9056,7 +9033,7 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                 baseline = inputs.baseline  # the first post-reservation sample (a fresh synthetic start, unscripted)
                 snapshot, current, daemon_id = inputs.snapshot, inputs.current, inputs.daemon_id
                 post.add(current)
-                # W1 (design 3.11): queued samples count towards the window. A private domain without a script keeps
+                # queued samples count towards the window. A private domain without a script keeps
                 # today's synthetic complete pair, and the pressure rule itself is unchanged.
                 unscripted = test_directory is not None and host_script is None
                 window_start = (
@@ -9074,7 +9051,7 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                         _failure_reason=reason,
                     )
                 # The first post-reservation sample stays a continuity baseline: a counter that goes backwards after the
-                # reservation is still refused, whichever sample starts the window (design 3.11).
+                # reservation is still refused, whichever sample starts the window.
                 continuity = None if unscripted else baseline
                 pressure = assess_pressure(current, window_start, admission_baseline=continuity, window_ns=window_ns)
                 if pressure.state == CapacityState.REFUSED:
@@ -9172,7 +9149,7 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                     next_observation = NativeClock().read() + 5_000_000_000
                 time.sleep(active_poll_ns / 1_000_000_000)
             elif data["state"] == "stopping":
-                # Waits for K end with the leave's own budget (design 2.6); the exclusive leave without pending images
+                # Waits for K end with the leave's own budget; the exclusive leave without pending images
                 # takes no K and keeps today's unbounded steps.
                 image_deadline = (
                     _leave_deadline_ns(data["withdrawal"])
@@ -9212,7 +9189,7 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                     capacity,
                     _test_directory=test_directory,
                 )
-                retention_after_release(context, test_directory, "leave")  # after every lock section (design 2.7)
+                retention_after_release(context, test_directory, "leave")  # after every lock section
                 return status
             else:
                 return run_status(context)
@@ -9510,7 +9487,7 @@ def transition_phase(lease: RunLease, phase: str) -> RunStatus:
         if running_bytes > budget.container_bytes:
             raise ResourceError("Running container limits exceed the target phase commitment.")
         if _record_mode(data) == AdmissionMode.SHARED and data["docker_authority"] is not None:
-            # R12 (design 2.3): every own running container counts, Compose and dispatcher-created, not the worker
+            # R12: every own running container counts, Compose and dispatcher-created, not the worker
             own = _own_running_bytes(_bound_docker(data), data, counted_elsewhere=lambda _item: False)
             _refuse_or_record(
                 context,
@@ -11350,7 +11327,7 @@ def _verify_interrupted_release(context: RunContext, data: dict, deadline_ns: in
     ):
         raise ResourceError("Interrupted retained release authority changed identity.")
     # The matched helper's own guardian, never the loop's last candidate: a release still in its guardian's tail is
-    # live (I-LR3).
+    # live.
     _require_actor_gone(matched[0]["guardian"], "guardian of the interrupted release")
     with lock(context.project, "registry", deadline_ns=deadline_ns):
         if load(context.project)["runs"].get(release_context.run_id) is not None:
@@ -11510,8 +11487,6 @@ def _recover_run(
         if _deadline_ns is not None
         else time.monotonic_ns() + int((_leave_budget_seconds(data) + 60) * 1_000_000_000)
     )
-    if finalization_pending_shape(data):
-        return _finalize_legacy_run(context, _test_directory=_test_directory, deadline_ns=deadline_ns)
     if data.get("retained_grant") is not None:
         _require_ungranted(data)
         if observe_process(_identity_from_json(data["requester"])) == "executing":
@@ -11605,7 +11580,7 @@ def _recover_run(
 
 
 def _last_recovery_phase(context: RunContext, test_directory: Path | None) -> str:
-    """Return the later (design 3.6 order) of the entry's stored phase and the record's derived phase, else ``none``.
+    """Return the later of the entry's stored phase and the record's derived phase, else ``none``.
 
     Reads without locks and writes nothing; a read or parse failure contributes nothing. The stored value can be stale
     (only a worker updates it) and the derived one can lag a phase in flight, so the later of the two is reported.
@@ -11666,7 +11641,7 @@ def _claim_observation(takeover: dict | None) -> str | None:
 
 
 def _require_claim_eligible(entry: QueueEntry | None, takeover_attempt: str | None) -> None:
-    """Refuse ``claim-held`` unless the entry's takeover claim is free for this recoverer (design 3.9)."""
+    """Refuse ``claim-held`` unless the entry's takeover claim is free for this recoverer."""
     if entry is None:
         return
     clock = NativeClock()
@@ -11699,7 +11674,7 @@ def _require_own_claim(entry: QueueEntry | None, actor: dict, takeover_attempt: 
 
 
 def _require_actor_gone(raw: dict | None, label: str) -> None:
-    """Refuse unless the recorded actor is proven dead: absent or replaced (design 3.9; a zombie is not yet reaped).
+    """Refuse unless the recorded actor is proven dead: absent or replaced.
 
     ``actor-live`` for an actor that may run or has not been reaped, ``actor-unverifiable`` if it cannot be observed.
     """
@@ -11758,74 +11733,6 @@ def _repair_creation_prefix(context: RunContext, data: dict, deadline_ns: int | 
     return _load_run(context)
 
 
-def _prove_legacy_actors_dead(data: dict) -> None:
-    """Require every actor of a legacy run to be proven gone: requester, guardian, consumers and recovery actor."""
-    raw_identities = [
-        data["requester"],
-        data["guardian"],
-        data["recovery_actor"],
-        *(item["identity"] for item in data["consumers"].values()),
-    ]
-    for raw in raw_identities:
-        try:
-            observed = observe_process(_identity_from_json(raw))
-        except ResourceError as error:
-            raise ResourceError(
-                "An actor of the legacy run cannot be observed.", reason="actor-unverifiable"
-            ) from error
-        if not actors_dead([observed]):
-            raise ResourceBusy("An actor of the legacy run is still live.", reason="actor-live")
-
-
-def _require_exact_legacy_references(
-    context: RunContext, directory: Path, data: dict, deadline_ns: int | None = None
-) -> None:
-    """Refuse unless every account and project reference of the run is absent or exactly the original one.
-
-    A queue entry must match the run (attempt, ticket, record, registry, project root) with the record's guardian as the
-    slot holder; a project index entry must be exactly this record. Nothing is written.
-    """
-    project = context.project
-    expected = _queue_reference(context, data["guardian_attempt"], data["ticket"])
-    with lock(project, "registry", deadline_ns=deadline_ns):
-        location = load(project)["runs"].get(context.run_id)
-        if location not in (None, str(context.record)):
-            raise ResourceError("The legacy run's project index entry changed identity.", reason="record-changed")
-        with lock(Context(directory, directory), "metadata", deadline_ns=deadline_ns) as anchor:
-            entry = _load_queue(directory, anchor).entries.get(context.run_id)
-            if entry is not None and (account_queue.reference(entry) != expected or entry.holder != data["guardian"]):
-                raise ResourceError("The legacy run's queue entry changed identity.", reason="record-changed")
-
-
-def _finalize_legacy_run(
-    context: RunContext, *, _test_directory: Path | None = None, deadline_ns: int | None = None
-) -> RunStatus:
-    """Finalize the legacy finalization-pending shape: prove it, write ``cleanup_outcome complete``, retire references.
-
-    One locked section (project shared non-blocking, run exclusive) re-validates the shape, proves every actor gone and
-    checks the references; only then is the record written (revision plus one), keeping ``recovery_actor`` and the null
-    ``leave_ack`` as the evidence that toolkit recovery, not the requester, ended the run. The queue entry and the index
-    entry then leave through the same idempotent path as any completed grant, so a crash between the steps resumes by
-    repeating the recovery.
-    """
-    directory = account_directory() if _test_directory is None else _test_directory.resolve()
-    project = context.project
-    with (
-        lock(project, project.project_id, shared=True, nonblocking=True),
-        lock(project, f"run-{context.run_id}", deadline_ns=deadline_ns),
-    ):
-        data = _load_run(context)
-        if not finalization_pending_shape(data) or data["account_directory"] != str(directory):
-            raise ResourceError("Run is not the legacy finalization shape of this account.")
-        _prove_legacy_actors_dead(data)
-        _require_exact_legacy_references(context, directory, data, deadline_ns)
-        data.update(cleanup_outcome="complete")
-        data["revision"] += 1
-        atomic_json(context.record, data)
-        failpoint("finalization-record-written")
-        return _retire_completed_resource_grant(context, directory, data, deadline_ns)
-
-
 def _retire_completed_resource_grant(
     context: RunContext,
     directory: Path,
@@ -11841,7 +11748,7 @@ def _retire_completed_resource_grant(
     if prior is not None and prior != asdict(current_process(NativeClock())):
         _require_actor_gone(prior, "recovery actor of this run")
     # The original guardian retires its own references in its leave section; while it may still run (live or an
-    # unreaped zombie) recovery refuses as actor-live and writes nothing (I-LR3).
+    # unreaped zombie) recovery refuses as actor-live and writes nothing.
     _require_actor_gone(data["guardian"], "guardian of this run")
     project = context.project
     account = Context(directory, directory)
@@ -11923,7 +11830,7 @@ def _begin_recovery_record(data: dict, actor: dict, release_recovery: bool, rele
 
 
 def _hold_capacity_fence(held: ExitStack, account: Context, *, shared: bool = False) -> None:
-    """Hold ``capacity.lock`` non-blocking for the rest of a recovery, in the dead run's mode (design 2.8).
+    """Hold ``capacity.lock`` non-blocking for the rest of a recovery, in the dead run's mode.
 
     A dead shared holder is recovered under a shared fence, so live co-holders keep running; every other recovery
     holds it exclusively.
@@ -11949,7 +11856,7 @@ def _recover_resource_grant(
 ) -> RunStatus:
     """Drain an ended guardian's exact recorded consumers/resources and publish the terminal record.
 
-    The first locked section checks everything before it writes anything (design 3.9): the prior recoverer is gone,
+    The first locked section checks everything before it writes anything: the prior recoverer is gone,
     the pending operation and open receipts are reconcilable, a worker's registered consumers are not running, and the
     entry's takeover claim is free for this recoverer. Only then, in one metadata section nested inside the run lock,
     the record gets ``recovery_actor`` and the claimant is bound. The slot holder's capacity lock is held for the whole
@@ -12152,7 +12059,7 @@ def _drain_after_recovery(context: RunContext, deadline_ns: int | None) -> None:
     """Drain handed-off images after an empty grant's recovery, holding no other lock while it waits for K.
 
     A run that only declared ``use_image`` can be the last user of a handed-off image; its recovery owns nothing to
-    clean, so without this the image and its pending entry would stay (design 2.7, the last user drains). The recovery
+    clean, so without this the image and its pending entry would stay. The recovery
     is already durable: a busy K, an unreadable pending list or a failed Docker call (``InfrastructureFailure``) leaves
     every entry in the list for the next image step and never fails the recovery.
     """
@@ -12428,7 +12335,7 @@ class EntryFacts:
     blocked: bool
     guardian_state: str | None
     mode: str | None = AdmissionMode.EXCLUSIVE  # from the record's ``sharing`` key; None when the record is untrusted
-    version_ok: bool = True  # the record's artifact reads multi-holder queues (M1)
+    version_ok: bool = True  # the record's artifact reads multi-holder queues
 
 
 def _record_mode(data: dict) -> AdmissionMode:
@@ -12501,7 +12408,7 @@ def admission_decision(
     *,
     shared: bool = False,
 ) -> "CapacityDecision":
-    """Decide whether a run fits beside its co-holders by declared budgets (design 2.4 fit, §5.5 C9).
+    """Decide whether a run fits beside its co-holders by declared budgets.
 
     Each own phase must fit alone first (today's rule; a REFUSED stays REFUSED, ``insufficient-cpu`` included). With
     co-holders, ``E(self) + Σ E(co-holders)`` plus the reserves (counted once, by ``assess_capacity``) must fit too;
@@ -12552,7 +12459,7 @@ class CoholderRead:
 
 @dataclass(frozen=True)
 class SharedPressure:
-    """The pressure terms of one shared observation: whether the run has shared, and its allowance (design 2.5)."""
+    """The pressure terms of one shared observation: whether the run has shared, and its allowance."""
 
     shared: bool
     allowance_bytes: int
@@ -12567,7 +12474,7 @@ def _shared_pressure_terms(
     The allowance is the budgets granted beside the run after its admission baseline (kept after those runs leave),
     plus every co-holder holding during this pass (``held``, one budget per grant identity), whenever it was granted: an
     incumbent that ramps within its own budget after this run joined is a neighbour, not this run's breach. An
-    unreadable grants log (``None``) means the run has shared with no shared-only breach for this pass (R3-8): the
+    unreadable grants log (``None``) means the run has shared with no shared-only breach for this pass: the
     allowance is unbounded, and the caller records it once.
     """
     if grants is None:
@@ -12608,7 +12515,7 @@ def _gather_coholders(read_once: Callable[[], CoholderRead], attempts: int = 3) 
 def _read_coholders(context: RunContext, directory: Path, deadline: "Deadline") -> CoholderRead:
     """Read the co-holders' queue entries and records and the host reserve under one short metadata section.
 
-    The limit is not read: it governs future admissions, never an incumbent's observation (design 2.2).
+    The limit is not read: it governs future admissions, never an incumbent's observation.
     """
     deadline_ns = time.monotonic_ns() + deadline.remaining_ns(NativeClock())
     with lock(Context(directory, directory), "metadata", deadline_ns=deadline_ns) as anchor:
@@ -12628,12 +12535,12 @@ def _read_coholders(context: RunContext, directory: Path, deadline: "Deadline") 
             holders.append(_holder_facts(run_id, entry, record))
             revisions.append((run_id, record["revision"]))
             held.append(_grant_of(record, _phase_budgets(record["phases"], record["initial_phase"])))
-        try:  # after the co-holder records, in the same section (R3-3)
+        try:  # after the co-holder records, in the same section
             logged = read_grants(directory)
         except (ResourceError, OSError):
             grants: tuple[Grant, ...] | None = None
         else:
-            # A granted co-holder counts from its own record too: a publisher that died before its log append (C4) is
+            # A granted co-holder counts from its own record too: a publisher that died before its log append is
             # in the allowance before its recovery repairs the log. One grant identity counts once.
             identities = {(grant.run_id, grant.generation, grant.origin) for grant in logged}
             grants = (*logged, *(g for g in held if (g.run_id, g.generation, g.origin) not in identities))
@@ -12754,7 +12661,7 @@ def _holders_present(data: dict) -> bool:
 
 
 def _static_exclusive(data: dict) -> bool:
-    """Return whether a run is exclusive whatever its verdict (design N8): a release helper or a declared connection."""
+    """Return whether a run is exclusive whatever its verdict: a release helper or a declared connection."""
     return data["purpose"] == RELEASE_PURPOSE or any(
         item["relationship"] == "connect_owned_container" for item in data["external_resources"]
     )
@@ -12801,12 +12708,12 @@ def reserve_capacity(
     ``machine`` is any capacity snapshot of this pass: a run predicted shareable whose ``E(self)`` it REFUSES is
     admitted exclusive. ``inputs`` is only a sample taken after holders were seen (a joiner's fit).
 
-    Under the account metadata lock (design 2.4, in today's order): the machine settings, the run's mode (shared only
+    Under the account metadata lock: the machine settings, the run's mode (shared only
     above limit 1 with a positive verdict), the reservation verdict, and for a shared joiner beside holders the fit over
     ``inputs`` (the queued pass's sample; without one it waits ``coholder-capacity``); then ``capacity.lock`` in the
     run's mode without waiting; then the queue entry; then the record with ``sharing`` set or removed.
     ``disk`` (this pass's figures, read outside the locks) is decided once the run is chosen, against the leases of
-    every other holder; a fitting run's lease is written in the same section (design 2.6). The release helper is never
+    every other holder; a fitting run's lease is written in the same section. The release helper is never
     disk-gated: freeing disk never waits for disk.
     """
     record = _load_run(context)
@@ -12834,7 +12741,7 @@ def reserve_capacity(
             own = state.entries.get(context.run_id)
             if own is None or not _is_own_reference(own, context, attempt, data["ticket"]):
                 raise ResourceError("Queued run lost its account ticket identity.")
-            settings = read_admission_settings(directory)  # read under M with the decision it serves (D8)
+            settings = read_admission_settings(directory)  # read under M with the decision it serves
             mode = AdmissionMode.SHARED if settings.limit != 1 and predicted else AdmissionMode.EXCLUSIVE
             if mode == AdmissionMode.SHARED and machine is not None and _never_fits_shared(data, machine, settings):
                 mode = (
@@ -12916,7 +12823,7 @@ def reserve_capacity(
             if mode == AdmissionMode.SHARED:
                 data["sharing"] = {"mode": AdmissionMode.SHARED.value}
             else:
-                data.pop("sharing", None)  # an exclusive generation never carries the key (S10)
+                data.pop("sharing", None)  # an exclusive generation never carries the key
             atomic_json(context.record, data)
             return ReserveOutcome(descriptor, None)
 
@@ -12959,7 +12866,7 @@ def _publish_grant(
     unlocked = _load_run(context)
     deadline_ns = _queue_budget_ns(unlocked)  # the waits below end with the run's queue budget
     inventory: Sequence[dict] = containers  # replaced by the refreshed snapshot's own inventory in production
-    # The CPU pressure may need a probe run: taken before the run lock, never under it (design 3.1 (5), 3.2)
+    # The CPU pressure may need a probe run: taken before the run lock, never under it
     if _test_directory is not None:
         join_pressure = _test_capacity_record(_test_directory).get("cpu_pressure")
     else:
@@ -13033,7 +12940,7 @@ def _publish_grant(
             failpoint("publish-gate-checked")  # gate point 4: under the lock the installer's switch also takes
             if refusal is not None:
                 return _Refused(refusal)
-            settings = read_admission_settings(directory)  # read under M with the decision it serves (D8)
+            settings = read_admission_settings(directory)  # read under M with the decision it serves
             mode = _record_mode(data)
             views = [
                 _entry_view(run_id, entry, EntryFacts(False, "executing", mode, True))
@@ -13043,14 +12950,14 @@ def _publish_grant(
             ]
             waiting = publication_verdict(views, publisher=context.run_id, publisher_mode=mode, limit=settings.limit)
             if waiting is not None:
-                return _Waiting(waiting)  # keeps its admitting slot and retries on the next pass (R3-2)
+                return _Waiting(waiting)  # keeps its admitting slot and retries on the next pass
             decided = replace(snapshot, host_reserve_bytes=settings.host_reserve_bytes)
             holders: list[HolderFacts] = []
             baselines: dict[str, tuple[str, int]] = {}
             if mode != AdmissionMode.SHARED:
                 if any(assess_capacity(budget, decided).state != CapacityState.READY for budget in budgets.values()):
                     raise ResourceError("Not every declared phase passed capacity admission.")
-            else:  # E(self) + Σ E(co-holders), on the snapshot's own inventory, co-holders attributed (design 2.4)
+            else:  # E(self) + Σ E(co-holders), on the snapshot's own inventory, co-holders attributed
                 for run_id, entry in state.entries.items():
                     if entry.phase != "granted" or run_id == context.run_id:
                         continue
@@ -13151,7 +13058,7 @@ def _publish_grant(
                 "requirements_identity": _requirements_identity(data),
             }
             data["admission_observation"] = {
-                # the detected runtime is never recorded (design 2.5): the record keeps 0.6.20's capacity keys
+                # the detected runtime is never recorded: the record keeps 0.6.20's capacity keys
                 "capacity": {key: value for key, value in asdict(snapshot).items() if key != "runtime"},
                 "memory": asdict(current),
                 "window_start": asdict(window_start),
@@ -13174,11 +13081,11 @@ def _publish_grant(
                 "released_ns": None,
             }
             validate_hold_timeline(timeline)  # an impossible value raises before anything is written
-            data["hold_timeline"] = timeline  # written in the grant's own atomic write (design 3.2, C5)
+            data["hold_timeline"] = timeline  # written in the grant's own atomic write
             atomic_json(context.record, data)
             account_queue.grant(state, context.run_id, guardian)
             _save_queue(directory, state, anchor)
-            if holders:  # granted beside a co-holder: log it so co-holders' allowances remember it (design 2.5)
+            if holders:  # granted beside a co-holder: log it so co-holders' allowances remember it
                 failpoint("grant-published")
                 _log_grant(
                     directory,
@@ -13191,7 +13098,7 @@ def _publish_grant(
 
 
 def _repair_grant_log(directory: Path, state: QueueState, entry: QueueEntry, data: dict) -> None:
-    """Upsert a granted shared generation's grant before recovery removes its entry; the caller holds M (C4).
+    """Upsert a granted shared generation's grant before recovery removes its entry; the caller holds M.
 
     A publisher that died between its grant write and its log append left no entry; the upsert is idempotent, so a
     recoverer that dies after it and its successor count the grant once. Only a grant some current holder can count
@@ -13221,7 +13128,7 @@ def _holder_baselines(state: QueueState, directory: Path, *, exclude: str) -> di
 
 
 def _grant_of(data: dict, budgets: Mapping[str, PhaseBudget]) -> Grant:
-    """Return the grant a granted record's current generation counts as in co-holders' allowances (design 2.5)."""
+    """Return the grant a granted record's current generation counts as in co-holders' allowances."""
     reserved = effective_reservation(budgets)
     return Grant(
         data["run_id"],
@@ -13240,10 +13147,10 @@ def _log_grant(
     *,
     strict: bool,
 ) -> None:
-    """Upsert the granted generation of ``data`` in the grants log; the caller holds M (design 2.5, C4).
+    """Upsert the granted generation of ``data`` in the grants log; the caller holds M.
 
     An unreadable or invalid log is left as it is: every shared observer then counts as having shared with no
-    shared-only breach (R3-8), and rewriting it would drop other runs' entries. A failed write of a readable log is
+    shared-only breach, and rewriting it would drop other runs' entries. A failed write of a readable log is
     ignored at publication (the grant is already written, and the run's leave or recovery repairs the log before its
     entry goes) and raised when ``strict`` (that repair), so the entry stays until the log holds the grant.
     """
@@ -13599,7 +13506,7 @@ class CapacitySnapshot:
     external_limits: tuple[int | None, ...]
     job_limits: tuple[JobMemoryLimit, ...] | None = ()
     host_reserve_bytes: int = HOST_RESERVE_DEFAULT
-    runtime: str | None = field(kw_only=True)  # the detected runtime (design 2.5); ``None`` for a remote daemon
+    runtime: str | None = field(kw_only=True)  # the detected runtime; ``None`` for a remote daemon
 
 
 def _cgroup_path(pid: int) -> PurePosixPath:
@@ -13783,7 +13690,7 @@ def passwd_home() -> Path:
 def _observed_runtime(
     info: Mapping[str, object], endpoint: str, topology: str, binding: PodmanBinding | None = None
 ) -> str | None:
-    """Detect the daemon's runtime before any accounting and require it to match the declared topology (design 2.5).
+    """Detect the daemon's runtime before any accounting and require it to match the declared topology.
 
     A remote endpoint (``None``) is accounted as remote whatever was declared, and a declared ``remote`` accepts any
     daemon, as before. Otherwise the runtime's topology must be the declared one (a Mac VM is ``desktop``, Docker
@@ -13805,7 +13712,7 @@ def _observed_runtime(
 
 
 def _identified_info(docker, deadline: Deadline | None, expected: str | None = None) -> tuple[object, dict]:
-    """Read the daemon's ``/info`` and decide whose it is (design 2.2, section 12): on Docker the body's ``ID``; on
+    """Read the daemon's ``/info`` and decide whose it is: on Docker the body's ``ID``; on
     Podman, whose compat ``ID`` changes per call, a fresh verification of the bound machine before the read (the
     engine read's ``dial-stdio`` verifies nothing by itself) and the machine's identity. A machine other than
     ``expected`` is returned before any engine read, with an empty body."""
@@ -13863,7 +13770,7 @@ def observe_capacity(
     endpoint = docker.binding.endpoint if podman else _daemon_endpoint(docker, daemon_id, deadline)
     runtime = _observed_runtime(body, endpoint, topology, docker.binding)
     if runtime is None:
-        topology = "remote"  # a remote endpoint is accounted as remote from any client (design 2.5)
+        topology = "remote"  # a remote endpoint is accounted as remote from any client
     containers = docker.objects("container", deadline=deadline) if inventory is None else inventory
     capacity_owned_ids = set(owned_ids)
     if mutation_plan is not None and mutation_limits is not None:
@@ -14168,7 +14075,7 @@ class _SampleWindow:
 
     Retention assumes ascending ticks, which native reads guarantee. A test script with decreasing offsets can add an
     out-of-order tick; retention may then keep one extra sample or drop an older one, which only changes which
-    continuous candidate ``select_window_start`` finds (P23).
+    continuous candidate ``select_window_start`` finds.
     """
 
     def __init__(self) -> None:
@@ -14198,12 +14105,12 @@ def select_window_start(
     *,
     window_ns: int = _WINDOW_NS,
 ) -> HostMemoryObservation | None:
-    """Return the newest candidate at least ``window_ns`` (30 s) older than ``current`` (design 3.11, DD6), or None.
+    """Return the newest candidate at least ``window_ns`` (30 s) older than ``current``, or None.
 
     Candidates are the post-reservation samples plus the queued samples that form a continuous chain back from the
     first post-reservation sample: walking from the newest queued sample to the oldest, each must have the same origin
-    and physical size as the newer one and a tick and swap-out not after it (pairwise, P17). The first break ends the
-    chain, so a queued anomaly, and everything before it, can only fall back to W0. The pressure rule itself
+    and physical size as the newer one and a tick and swap-out not after it (pairwise). The first break ends the
+    chain, so a queued anomaly, and everything before it, can only fall back. The pressure rule itself
     (``assess_pressure``) is unchanged.
     """
     if not post:
@@ -14243,10 +14150,10 @@ def assess_pressure(
     history survives phase transitions. RSS is checked in its own metric, never added to H.
 
     A granted run that has shared (``shared_gate``) is not failed by the headroom floor or the swap-out rate, which
-    keep gating joiners' admission; its swap-growth threshold grows by the allowance (design 2.5). The defaults are a
+    keep gating joiners' admission; its swap-growth threshold grows by the allowance. The defaults are a
     run that never shared.
 
-    A decline of the host's headroom since a granted run's phase began is not a breach (owner, 2026-11-01): it makes
+    A decline of the host's headroom since a granted run's phase began is not a breach: it makes
     later runs wait (the headroom floor gates every admission). A granted run ends for its own overuse (its process
     envelope here, its containers' limits elsewhere) and for host-wide pressure, whoever caused it: the floor and the
     swap-out rate unless it has shared, and swap growth from its admission.
@@ -14425,10 +14332,10 @@ def _run_takeover_worker(
     attempt: str,
     test_directory: Path | None,
 ) -> int:
-    """Run one takeover worker (design 3.3): validate, confirm its attempt, wait out the grace, recover or back off.
+    """Run one takeover worker: validate, confirm its attempt, wait out the grace, recover or back off.
 
     The context is checked for shape only, so a blocked or legacy record yields a named refusal instead of a loader
-    error. Any installed version of the account's state format may recover a run (installed-once design I5). The own
+    error. Any installed version of the account's state format may recover a run. The own
     intent may have lapsed while the host slept: it is renewed once, and only a claim that is no longer this worker's
     refuses. A wait that no longer holds exits 0 with nothing but the own intent withdrawn.
     """

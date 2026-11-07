@@ -15,10 +15,8 @@ from docker_test_toolkit.domain.policy import NAME, VERSION, require_name
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 TOOLKIT_VERSION = "0.7.5"
-BUILDER_RELEASE_MIN_VERSION = (
-    "0.6.17"  # the first release whose shared runs refuse a builder after their first phase (R16)
-)
-SHARED_QUEUE_MIN_VERSION = "0.6.0"  # the first release whose queue readers accept more than one holder (M1)
+BUILDER_RELEASE_MIN_VERSION = "0.6.17"  # the first release whose shared runs refuse a builder after their first phase
+SHARED_QUEUE_MIN_VERSION = "0.6.0"  # the first release whose queue readers accept more than one holder
 SUPPORTED_PROTOCOLS = MappingProxyType(
     {
         "batch": 2,
@@ -466,7 +464,7 @@ class DockerDaemonObservation:
     cpus: int
     memory_bytes: int
     architecture: str
-    name: str | None = None  # the daemon's ``Name``, which names a Colima profile (design 2.5)
+    name: str | None = None  # the daemon's ``Name``, which names a Colima profile
     endpoint: str | None = None  # the client endpoint, resolved in memory; never recorded
 
 
@@ -501,10 +499,10 @@ class ReadinessCheck:
 class ReadinessReport:
     """Carry the complete versioned six-check readiness result (``readiness/4``).
 
-    Version 2 adds the daemon check's ``architecture`` fact and the capacity check's ``host_swap_total_bytes`` (zero on
-    a host without swap). Version 3 adds the capacity check's machine settings ``parallel_runs`` (an integer or
-    ``"auto"``) and ``host_reserve_bytes``. Version 4 adds the capacity check's CPU pressure and daemon probe facts
-    (design 2.8); readiness itself never runs a container, so VM figures are the guardians' latest probe reading.
+        Version 2 adds the daemon check's ``architecture`` fact and the capacity check's ``host_swap_total_bytes`` (zero
+        on a host without swap). Version 3 adds the capacity check's machine settings ``parallel_runs`` (an integer or
+        ``"auto"``) and ``host_reserve_bytes``. Version 4 adds the capacity check's CPU pressure and daemon probe facts
+    ; readiness itself never runs a container, so VM figures are the guardians' latest probe reading.
     """
 
     checks: tuple[ReadinessCheck, ...]
@@ -529,7 +527,7 @@ class DaemonIdentity:
 
 @dataclass(frozen=True)
 class MachineFacts:
-    """One running ``podman machine`` as ``podman machine inspect`` reports it (design PD3).
+    """One running ``podman machine`` as ``podman machine inspect`` reports it.
 
     ``created`` is the JSON ``Created`` string exactly as returned (hashed, never parsed); ``socket_path`` is
     ``ConnectionInfo.PodmanSocket.Path``, compared as a string and never resolved.
@@ -545,7 +543,7 @@ class MachineFacts:
 
 @dataclass(frozen=True)
 class PodmanBinding:
-    """The Podman machine a Docker adapter is bound to, held in memory only and never written (design PD2)."""
+    """The Podman machine a Docker adapter is bound to, held in memory only and never written."""
 
     identity: str
     endpoint: str
@@ -573,44 +571,11 @@ class DockerObservation:
 
 
 @dataclass(frozen=True)
-class ExactInspectionOutcome:
-    """Carry one identity's verified observation or its bounded failure text; exactly one of the two is set."""
-
-    request: ExactInspection
-    observation: DockerObservation | None
-    failure: str | None
-
-    def __post_init__(self) -> None:
-        if (self.observation is None) == (self.failure is None):
-            raise ValueError("An exact inspection outcome carries exactly one of observation and failure.")
-
-
-@dataclass(frozen=True)
 class ComposeMutation:
     """Carry a journal-authorized Compose argv and finite deadline."""
 
     operation_id: str
     argv: tuple[str, ...]
-    deadline_ns: int
-
-
-@dataclass(frozen=True)
-class ContainerMutation:
-    """Carry one exact start or stop intent."""
-
-    operation_id: str
-    action: str
-    container_id: str
-    deadline_ns: int
-
-
-@dataclass(frozen=True)
-class CleanupMutation:
-    """Carry one exact owned cleanup intent."""
-
-    operation_id: str
-    kind: str
-    identifier: str
     deadline_ns: int
 
 

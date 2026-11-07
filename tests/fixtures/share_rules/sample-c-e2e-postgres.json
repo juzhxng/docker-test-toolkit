@@ -1,0 +1,198 @@
+{
+ "name": "dtt-capture",
+ "networks": {
+  "authority": {
+   "ipam": {},
+   "name": "dtt-capture_authority"
+  }
+ },
+ "services": {
+  "keycloak": {
+   "command": [
+    "mkdir -p /opt/keycloak/data/import; cp /opt/keycloak/data/realm.json /opt/keycloak/data/import/realm.json; cp /opt/keycloak/data/realm-2.json /opt/keycloak/data/import/realm-2.json; exec /opt/keycloak/bin/kc.sh start-dev --import-realm"
+   ],
+   "deploy": {
+    "placement": {},
+    "resources": {
+     "limits": {
+      "cpus": 2,
+      "memory": "1073741824"
+     }
+    }
+   },
+   "entrypoint": [
+    "/bin/sh",
+    "-ceu"
+   ],
+   "environment": {
+    "JAVA_OPTS_KC_HEAP": "-Xms128m -Xmx1024m",
+    "KC_BOOTSTRAP_ADMIN_PASSWORD": "fixture-password",
+    "KC_BOOTSTRAP_ADMIN_USERNAME": "fixture-kc_bootstrap_admin_username",
+    "KC_CLIENT_CERTIFICATE": "fixture-kc_client_certificate",
+    "KC_FRONTEND_URL": "fixture-kc_frontend_url",
+    "KC_PROXY_HEADERS": "fixture-kc_proxy_headers",
+    "KC_REDIRECT_URI": "fixture-kc_redirect_uri",
+    "KC_TEST_PASSWORD": "fixture-password",
+    "KC_TEST_PASSWORD_R2": "fixture-password",
+    "KC_TEST_PASSWORD_S2": "fixture-password"
+   },
+   "image": "fixture-sample_c_test_keycloak_image",
+   "networks": {
+    "authority": {
+     "aliases": [
+      "keycloak.test"
+     ]
+    }
+   },
+   "profiles": [
+    "postgres",
+    "mongodb"
+   ],
+   "pull_policy": "never",
+   "restart": "no"
+  },
+  "postgres": {
+   "command": [
+    "bash",
+    "-ceu",
+    "install -o postgres -g postgres -m 600 /run/secrets/postgres.key /tmp/server.key; install -o postgres -g postgres -m 644 /run/secrets/postgres.crt /tmp/server.crt; exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key"
+   ],
+   "deploy": {
+    "placement": {},
+    "resources": {
+     "limits": {
+      "cpus": 1,
+      "memory": "1073741824"
+     }
+    }
+   },
+   "entrypoint": null,
+   "environment": {
+    "POSTGRES_DB": "fixture",
+    "POSTGRES_PASSWORD_FILE": "/run/secrets/postgres-admin-password"
+   },
+   "image": "fixture-sample_c_test_postgres_image",
+   "networks": {
+    "authority": {
+     "aliases": [
+      "postgres.test"
+     ]
+    }
+   },
+   "profiles": [
+    "postgres"
+   ],
+   "pull_policy": "never",
+   "restart": "no",
+   "volumes": [
+    {
+     "source": "postgres-data",
+     "target": "/var/lib/postgresql",
+     "type": "volume",
+     "volume": {}
+    }
+   ]
+  },
+  "runtime": {
+   "command": [
+    "node",
+    "dist/factories/browser.js"
+   ],
+   "deploy": {
+    "placement": {},
+    "resources": {
+     "limits": {
+      "cpus": 1,
+      "memory": "268435456"
+     }
+    }
+   },
+   "entrypoint": null,
+   "environment": {
+    "BROWSER_ORIGIN": "https://runtime.test",
+    "DATABASE_BACKEND": "fixture-database_backend",
+    "DB_HOST": "127.0.0.1",
+    "DB_HOSTS": "",
+    "DB_NAME": "fixture-db_name",
+    "DB_PASSWORD": "fixture-password",
+    "DB_PORT": "5432",
+    "DB_REPLICA_SET": "",
+    "DB_TLS_CA": "fixture-db_tls_ca",
+    "DB_TLS_MODE": "verify-full",
+    "DB_USER": "fixture-db_user",
+    "IDENTITY_PROVIDER": "auth0",
+    "OIDC_CLIENT_AUTH": "client_secret_basic",
+    "OIDC_CLIENT_ID": "synthetic-client",
+    "OIDC_CLIENT_SECRET": "fixture-password",
+    "OIDC_CONFIG_VERSION": "synthetic-v1",
+    "OIDC_ISSUER": "https://identity.example/",
+    "OIDC_REDIRECT_URI": "https://runtime.test/auth/callback",
+    "SESSION_KEYS_JSON": "fixture-password",
+    "SESSION_KEY_CURRENT": "fixture-password"
+   },
+   "image": "fixture-sample_c_test_runtime_image",
+   "networks": {
+    "authority": {
+     "aliases": [
+      "runtime.test"
+     ]
+    }
+   },
+   "profiles": [
+    "postgres",
+    "mongodb"
+   ],
+   "pull_policy": "never",
+   "restart": "no"
+  },
+  "test-client": {
+   "command": [
+    "tail",
+    "-f",
+    "/dev/null"
+   ],
+   "deploy": {
+    "placement": {},
+    "resources": {
+     "limits": {
+      "cpus": 2,
+      "memory": "2147483648"
+     }
+    }
+   },
+   "entrypoint": null,
+   "environment": {
+    "DATABASE_BACKEND": "fixture-database_backend",
+    "DB_HOST": "127.0.0.1",
+    "DB_HOSTS": "",
+    "DB_NAME": "fixture-db_name",
+    "DB_PASSWORD": "fixture-password",
+    "DB_PORT": "5432",
+    "DB_REPLICA_SET": "",
+    "DB_TLS_CA": "fixture-db_tls_ca",
+    "DB_TLS_MODE": "verify-full",
+    "DB_USER": "fixture-db_user",
+    "LIFECYCLE_DB_PASSWORD": "fixture-password",
+    "LIFECYCLE_DB_USER": "fixture-lifecycle_db_user",
+    "MIGRATION_DB_PASSWORD": "fixture-password",
+    "MIGRATION_DB_USER": "fixture-migration_db_user",
+    "NODE_OPTIONS": "--max-old-space-size=1024"
+   },
+   "image": "fixture-sample_c_test_client_image",
+   "networks": {
+    "authority": null
+   },
+   "profiles": [
+    "postgres",
+    "mongodb"
+   ],
+   "pull_policy": "never",
+   "restart": "no"
+  }
+ },
+ "volumes": {
+  "postgres-data": {
+   "name": "dtt-capture_postgres-data"
+  }
+ }
+}

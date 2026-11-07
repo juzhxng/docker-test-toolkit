@@ -19,9 +19,7 @@ from docker_test_toolkit.application.ports.docker import DockerPort
 from docker_test_toolkit.application.ports.podman import MachineFactory, PodmanMachinePort
 from docker_test_toolkit.domain.errors import InfrastructureFailure, ResourceError
 from docker_test_toolkit.domain.models import (
-    CleanupMutation,
     ComposeMutation,
-    ContainerMutation,
     DaemonIdentity,
     DockerClientObservation,
     DockerDaemonObservation,
@@ -29,7 +27,6 @@ from docker_test_toolkit.domain.models import (
     DockerReadinessObservation,
     DockerResult,
     ExactInspection,
-    ExactInspectionOutcome,
     PodmanBinding,
     ProbeRun,
     ReadinessCode,
@@ -223,7 +220,7 @@ class DockerCliAdapter(DockerPort):
             self.__dict__.update(discovered.__dict__)
             return
         self.identity = identity
-        self._engine = engine  # "docker" or "podman" (design PD1); None until a recovered adapter's first verification
+        self._engine = engine  # "docker" or "podman"; None until a recovered adapter's first verification
         self._binding = binding  # the bound Podman machine, in memory only
         self._machines = machines  # the bound machine's port (Podman)
         self._machine_factory = machine_factory  # builds the port for a recovered adapter that learns it is on Podman
@@ -252,7 +249,7 @@ class DockerCliAdapter(DockerPort):
         """Read one identity value for ``_verify``, retrying a failed client exit twice after a short pause.
 
         Every Docker command re-reads ``version`` and ``info`` first, so a busy CI host makes thousands of these reads
-        a minute, and one that exits non-zero once (seen on 2026-10-31 with eight parallel jobs) must not revoke every
+        a minute, and one that exits non-zero once (seen with eight parallel jobs) must not revoke every
         queued run. Only a failed exit is retried: a timeout is not, and a value that differs is a real identity change
         for the caller. The last failure names the command, never its output, which can carry secrets.
         """
@@ -314,7 +311,7 @@ class DockerCliAdapter(DockerPort):
         """Resolve and bind one canonical client, version, context, and daemon.
 
         On a Podman engine the daemon is the running machine whose API socket is the context's endpoint, identified
-        by ``podman_identity`` (design 2.2); ``machines`` builds the machine port for the child environment. An
+        by ``podman_identity``; ``machines`` builds the machine port for the child environment. An
         unsupported Podman setup raises ``InfrastructureFailure`` with its named reason and fix.
         """
         if environment is None:
@@ -417,7 +414,7 @@ class DockerCliAdapter(DockerPort):
     ) -> "DockerCliAdapter":
         """Reconstruct an adapter only from a previously durable exact identity.
 
-        The engine is learned on the first verification (design PD1): one combined version read, and on Podman the
+        The engine is learned on the first verification: one combined version read, and on Podman the
         endpoint's machine, which must hash to the recorded identity.
         """
         if environment is None:
@@ -429,7 +426,7 @@ class DockerCliAdapter(DockerPort):
 
     @property
     def engine(self) -> str:
-        """``docker`` or ``podman``; a recovered adapter learns it on its first verification (design PD1)."""
+        """``docker`` or ``podman``; a recovered adapter learns it on its first verification."""
         if self._engine is None:
             self._verify()
         return cast(str, self._engine)
@@ -446,8 +443,8 @@ class DockerCliAdapter(DockerPort):
 
         The client is the same program when its content is (SHA-256 and size at the bound path): another runner
         container's copy has its own device, inode and mtime, and must still act for a run bound on the same daemon,
-        or a run whose job was cancelled could never be recovered from another runner (2026-11-01). On Podman the
-        daemon is the bound machine, read again every time (design PD6); a recovered adapter first learns the engine
+        or a run whose job was cancelled could never be recovered from another runner. On Podman the
+        daemon is the bound machine, read again every time; a recovered adapter first learns the engine
         from discovery's combined version read, once.
         """
         self._check_client_file()
@@ -457,7 +454,7 @@ class DockerCliAdapter(DockerPort):
         self._check_identity(lambda argv: self._identity_read([*self.prefix, *argv], self.env), deadline)
 
     def _check_identity(self, read: Callable[[tuple[str, ...]], str], deadline: Deadline | None) -> None:
-        """Compare the client version and the daemon (on Podman the bound machine, PD6) with the bound identity.
+        """Compare the client version and the daemon (on Podman the bound machine) with the bound identity.
 
         ``read`` runs one client command: ``_verify``'s retried read or ``run_probe``'s one-deadline read. The engine
         is already learned.
@@ -505,7 +502,7 @@ class DockerCliAdapter(DockerPort):
         self._engine, self._binding, self._machines = engine, binding, port
 
     def _verify_machine(self, deadline: object | None) -> None:
-        """Read the endpoint and the bound machine again; another one is ``daemon-identity-changed`` (design PD6).
+        """Read the endpoint and the bound machine again; another one is ``daemon-identity-changed``.
 
         A failing or late ``podman`` call, and a machine that is not running, are the port's ``client-exit``.
         """
@@ -533,7 +530,7 @@ class DockerCliAdapter(DockerPort):
 
         ``execute`` retries identity reads with their own 30 second bounds; a probe answers inside an admission pass,
         so here each read and the run take only what remains of ``deadline``, and the single removal at a timeout
-        does too (design 2.3).
+        does too.
         """
         self._check_client_file()
         bounded = cast("Deadline", deadline)  # the port types it ``object``; admission passes its ``Deadline``
@@ -565,7 +562,7 @@ class DockerCliAdapter(DockerPort):
                     stream_output=False,
                 )
             except InfrastructureFailure:
-                pass  # the caller's record of the name lets retention remove it later (design 2.7)
+                pass  # the caller's record of the name lets retention remove it later
             return ProbeRun("", None, True)
         return ProbeRun(result.stdout, result.exit_code, False)
 
@@ -581,7 +578,7 @@ class DockerCliAdapter(DockerPort):
         """Execute bounded argv; main-thread streaming forwards SIGINT and SIGTERM.
 
         ``hold_fd`` (the image lock's descriptor) is inherited by the Docker child, so the lock stays held until the
-        child exits even when this process dies or unwinds first (design 2.6).
+        child exits even when this process dies or unwinds first.
         """
         if (
             not argv
@@ -796,7 +793,7 @@ class DockerCliAdapter(DockerPort):
         return self.identity
 
     def endpoint(self, deadline: Deadline | None = None) -> str:
-        """Return the client's endpoint: ``DOCKER_HOST``, else the bound context's Docker endpoint (design 2.5).
+        """Return the client's endpoint: ``DOCKER_HOST``, else the bound context's Docker endpoint.
 
         Resolved per call and kept in memory only; it is never part of the recorded identity.
         """
@@ -991,38 +988,9 @@ class DockerCliAdapter(DockerPort):
         item = _familiar_image(rows[0]) if request.kind == "image" and self.engine == "podman" else rows[0]
         return DockerObservation(request.kind, request.identifier, True, item)
 
-    def inspect_exact_many(self, requests: tuple[ExactInspection, ...]) -> tuple[ExactInspectionOutcome, ...]:
-        """Verify once, inspect every identity without per-call verification, verify again.
-
-        A per-identity failure is carried by that identity's outcome (its exception text only); the two verifications
-        are not caught, so a daemon or client change between them discards every outcome.
-        """
-        self._verify()
-        outcomes: list[ExactInspectionOutcome] = []
-        for request in requests:
-            try:
-                outcomes.append(ExactInspectionOutcome(request, self._inspect(request, verify=False), None))
-            except InfrastructureFailure as error:
-                outcomes.append(ExactInspectionOutcome(request, None, str(error)))
-        self._verify()
-        return tuple(outcomes)
-
     def compose(self, request: ComposeMutation) -> DockerResult:
         """Perform one journal-authorized bounded Compose mutation."""
         return self.execute(request.argv, timeout_seconds=self._seconds_until(request.deadline_ns))
-
-    def control_container(self, request: ContainerMutation) -> DockerResult:
-        """Start or stop one exact owned container generation."""
-        return self.execute(
-            ("container", request.action, request.container_id),
-            timeout_seconds=self._seconds_until(request.deadline_ns),
-        )
-
-    def cleanup_exact(self, request: CleanupMutation) -> DockerResult:
-        """Remove one exact journal-owned resource."""
-        return self.execute(
-            (request.kind, "rm", request.identifier), timeout_seconds=self._seconds_until(request.deadline_ns)
-        )
 
     @staticmethod
     def _seconds_until(deadline_ns: int) -> float:
@@ -1037,7 +1005,7 @@ def _identity_changed(message: str = "Docker client changed after authority was 
 
 
 def _familiar_name(name: str) -> str:
-    """Return Docker's familiar spelling of an image name Podman qualified (measured W0e, design 2.6)."""
+    """Return Docker's familiar spelling of an image name Podman qualified."""
     for prefix in ("localhost/", "docker.io/library/", "docker.io/"):
         if name.startswith(prefix):
             return name[len(prefix) :]
@@ -1058,7 +1026,7 @@ def _familiar_image(item: dict) -> dict:
 def _bind_podman(
     machines: MachineFactory | None, prefix: list[str], environment: Mapping[str, str], deadline: Deadline | None
 ) -> tuple[PodmanBinding, PodmanMachinePort]:
-    """Build the machine port for the client's environment and bind the endpoint's running machine (design 2.2)."""
+    """Build the machine port for the client's environment and bind the endpoint's running machine."""
     if machines is None:
         raise InfrastructureFailure("Podman machine port is unavailable.")
     port = machines(environment)
@@ -1068,7 +1036,7 @@ def _bind_podman(
 def resolve_podman_identity(
     prefix: list[str], environment: Mapping[str, str], machines: PodmanMachinePort, deadline: Deadline | None
 ) -> PodmanBinding:
-    """Bind the running Podman machine whose API socket is the client's endpoint (design 2.2, in order).
+    """Bind the running Podman machine whose API socket is the client's endpoint.
 
     A non-``darwin`` client, the ``podman-mac-helper`` socket, a missing ``podman`` and an endpoint that is no running
     machine's socket are refusals with their named reasons; a failing or late ``podman`` call is ``client-exit``.
@@ -1089,7 +1057,7 @@ def _absence_line(kind: str, identifier: str, engine: str = "docker") -> str | N
     """Return the engine's exact not-found diagnostic for one identity of ``kind``, or None for an unknown kind.
 
     Docker reports an omitted image tag as ``:latest``; only that diagnostic identity is normalized. Podman's compat
-    API words them differently (measured 2026-11-04, design W4); its volume line names no volume.
+    API words them differently; its volume line names no volume.
     """
     if kind == "builder":
         return f'ERROR: no builder "{identifier}" found'

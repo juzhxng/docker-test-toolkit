@@ -1,4 +1,4 @@
-"""Install one archive into a toolkit installation: version folder, launcher, format check, switch (design 2.3)."""
+"""Install one archive into a toolkit installation: version folder, launcher, format check, switch."""
 
 from __future__ import annotations
 
@@ -136,6 +136,13 @@ def _place_version(archive: Path, root: Path, version: str) -> None:
     folder.chmod(0o555)  # also completes a folder an earlier install placed but crashed before closing
 
 
+def command_link_path(home: Path, platform: str, *, system_bin: Path = Path("/usr/local/bin")) -> Path | None:
+    """Return where ``install`` links the command: the user's folder on macOS, the system's on Linux if writable."""
+    if platform == "darwin":
+        return home / ".local/bin/docker-test-toolkit"
+    return system_bin / "docker-test-toolkit" if os.access(system_bin, os.W_OK) else None
+
+
 def _write_launcher(root: Path, python: Path, command_link: Path | None) -> Path:
     """Write ``root/bin/docker-test-toolkit`` through a temporary file and refresh the platform command link."""
     directory = root / "bin"
@@ -190,7 +197,7 @@ def install(
     machine settings (host and disk reserves, then the parallel-runs limit) that admission reads under the same lock.
     A crash before the switch leaves the previous version current; a rerun after any crash writes the settings again.
     An omitted setting keeps the account's existing value. With ``docker_factory``, the daemon probe's image is then
-    made present outside every lock (design DD9); its outcome is reported, never an install failure.
+    made present outside every lock; its outcome is reported, never an install failure.
 
     Raises:
         InvalidInput: An unsuitable interpreter, a non-archive, a host or disk reserve below the 1 GiB floor, or a
@@ -262,7 +269,7 @@ def install(
 
 
 def _retention_at_install(docker: DockerPort | None, account: Path, registry: Path) -> dict[str, object] | None:
-    """Run one forced retention pass after the settings (design 2.7, trigger 3); its report, or ``None`` on failure.
+    """Run one forced retention pass after the settings; its report, or ``None`` on failure.
 
     Outside every install lock; without a daemon (``None``) only the file kinds are retained.
     """

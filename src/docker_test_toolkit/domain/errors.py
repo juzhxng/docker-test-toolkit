@@ -1,6 +1,6 @@
 """Stable public error categories and the closed reason vocabulary."""
 
-# Machine-readable refusal reasons carried by `context.reason` of the CLI envelope (design 3.5 and 3.6). A code outside
+# Machine-readable refusal reasons carried by `context.reason` of the CLI envelope. A code outside
 # this set reaches callers as "unspecified"; the category set stays closed and separate.
 REASONS = frozenset(
     {

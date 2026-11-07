@@ -5,15 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Mapping, Protocol
 
 from docker_test_toolkit.domain.models import (
-    CleanupMutation,
     ComposeMutation,
-    ContainerMutation,
     DaemonIdentity,
     DockerObservation,
     DockerReadinessObservation,
     DockerResult,
     ExactInspection,
-    ExactInspectionOutcome,
     PodmanBinding,
     ProbeRun,
 )
@@ -29,7 +26,7 @@ class DockerPort(Protocol):
 
     @property
     def engine(self) -> str:
-        """``docker`` or ``podman``, decided by discovery's version read (design PD1)."""
+        """``docker`` or ``podman``, decided by discovery's version read."""
         ...
 
     @property
@@ -56,7 +53,7 @@ class DockerPort(Protocol):
     def run_probe(self, argv: tuple[str, ...], *, deadline: object, container_name: str) -> ProbeRun:
         """Verify the client and daemon, run ``docker <argv>`` and, at a timeout, remove ``container_name`` once.
 
-        One absolute ``deadline`` bounds all three steps (design 2.3): no identity read is retried and no step starts
+        One absolute ``deadline`` bounds all three steps: no identity read is retried and no step starts
         after it expired.
 
         Raises:
@@ -77,25 +74,8 @@ class DockerPort(Protocol):
         """
         ...
 
-    def inspect_exact_many(self, requests: tuple[ExactInspection, ...]) -> tuple[ExactInspectionOutcome, ...]:
-        """Verify once, inspect each identity without per-call verification, verify again.
-
-        Returns one outcome per request in request order. A per-identity inspection failure becomes that outcome's
-        ``failure``; a daemon or client identity change between the two verifications raises ``InfrastructureFailure``
-        and discards every outcome. Absence that finishes a cleanup must still come from a per-call ``inspect_exact``.
-        """
-        ...
-
     def compose(self, request: ComposeMutation) -> DockerResult:
         """Perform one journal-authorized bounded Compose mutation."""
-        ...
-
-    def control_container(self, request: ContainerMutation) -> DockerResult:
-        """Start or stop one exact owned container generation."""
-        ...
-
-    def cleanup_exact(self, request: CleanupMutation) -> DockerResult:
-        """Remove one exact journal-owned resource."""
         ...
 
     def execute(
