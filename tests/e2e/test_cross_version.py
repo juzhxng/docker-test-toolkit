@@ -26,7 +26,6 @@ from tests.installation_fixtures import base_python, previous_release_archive, r
 from tests.integration.account_fixtures import queue_entries, queue_phases, reap_orphan
 
 from docker_test_toolkit.application.installation import archive_version, install
-from docker_test_toolkit.application.lifecycle import NativeClock
 from docker_test_toolkit.config.installation import ARCHIVE_NAME
 from docker_test_toolkit.domain.models import SHARED_QUEUE_MIN_VERSION
 from docker_test_toolkit.domain.policy import version_at_least
@@ -397,16 +396,11 @@ def test_x5_the_old_guardian_waits_while_the_new_build_recovers_a_dead_holder(pa
         pairing.processes["holder"].kill()
         pairing.processes["holder"].wait(timeout=30)
         reap_orphan(guardian)
-        # The renamed copy of this build claims a dead holder at first sight, as the build itself does; the previous
-        # release waits out its grace first, so there the build's command is the first to claim.
-        # NOTE: until the previous release is 0.7.4 or newer, a host giving containers their own time namespaces has it
-        # report that namespace, which this build reads as another clock, so its live waiter reads as dead too. That
-        # transition is not this scenario; upgrade path: drop the branch once the previous release normalizes it.
-        waiter_reads_as_dead = json.loads(record.read_text())["requester"]["origin"] != NativeClock().origin
-        claims_at_first_sight = pairing.tmp.name == "n-prime"
+        # A queued guardian of either version claims a dead holder at first sight, so the build's command has nothing to
+        # start; waiting for the claim keeps that from racing the command.
         account = pairing.root / "state" / "test-admission"
         deadline = time.monotonic() + 60
-        while claims_at_first_sight and queue_entries(account)[holder_id].takeover is None:
+        while queue_entries(account)[holder_id].takeover is None:
             assert time.monotonic() < deadline, "the queued guardian did not claim the dead holder"
             time.sleep(0.05)
 
@@ -420,11 +414,7 @@ def test_x5_the_old_guardian_waits_while_the_new_build_recovers_a_dead_holder(pa
 
         assert refusal["error"]["category"] == "incompatible_state"
         spawned = refusal["error"]["context"]["recovery_trigger"]["spawned"]
-        if waiter_reads_as_dead:
-            assert spawned == 2
-            assert pairing.report("refused", "waiter", timeout=240)["version"] == pairing.old_version
-            continue
-        assert spawned == (0 if claims_at_first_sight else 1)
+        assert spawned == 0
         assert [item["run_id"] for item in refusal["error"]["context"]["runs"]] == [holder_id]
         assert pairing.report("entered", "waiter", timeout=240)["version"] == pairing.old_version
         recovered = json.loads(record.read_text())
