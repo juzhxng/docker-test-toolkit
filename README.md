@@ -126,8 +126,8 @@ finally:
     run.leave(outcome)  # removes exactly what the run created
 ```
 
-The stack's `compose.yaml` uses images the run pulled by digest or built, and gives each service limits within the
-budget:
+The stack's `compose.yaml` uses images the run pulled by digest or built. A run can only share the daemon with other runs if
+each service also has a hard memory limit, so set one within the budget:
 
 ```yaml
 services:

@@ -111,7 +111,9 @@ boundary". Then:
 
    - Pull images by digest (`name@sha256:...`) or build them through the run, and use those same images in Compose. Find a
      digest with `docker buildx imagetools inspect <image>`.
-   - Give every service `mem_limit` and `cpus` within the phase budget.
+   - Name every volume in Compose: an anonymous one is refused.
+   - Give every service `mem_limit` and `cpus` within the phase budget. Without a hard memory limit the run still works, but it
+     cannot share the daemon with other runs.
    - Do not pass `-p` to Compose, since the run chooses the project.
    - Read published ports with `compose ps --format json`. `compose port` is refused.
 
