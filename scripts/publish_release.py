@@ -1,4 +1,4 @@
-"""Publish a qualified, canaried release candidate as a GitHub Release, failing closed.
+"""Publish a canaried release candidate as a GitHub Release, failing closed.
 
 Run by ``.github/workflows/publish.yml`` (or locally with ``--dry-run``) from a checkout of the release tag. In order:
 
@@ -10,12 +10,12 @@ Run by ``.github/workflows/publish.yml`` (or locally with ``--dry-run``) from a 
    gets the archive, which is downloaded back and compared, the remote tag is checked again, and only then is the draft
    published. A failure after the draft exists deletes it.
 
-Every refusal exits 2 with one line naming the mismatch. That the candidate passed the CI-host qualification and the
-canary is the release runbook's obligation; the two references only go into the notes.
+Every refusal exits 2 with one line naming the mismatch. That the candidate passed the
+canary is the release runbook's obligation; the reference only goes into the notes.
 
 Usage:
     publish_release.py --tag v0.7.5 --candidate-sha256 HEX --repository owner/name [--repository-path PATH]
-        [--qualification TEXT] [--canary TEXT] [--dry-run]
+        [--canary TEXT] [--dry-run]
 """
 
 from __future__ import annotations
@@ -193,13 +193,12 @@ def publish(
     return "published"
 
 
-def release_notes(version: str, commit: str, run_id: int, qualification: str, canary: str, archive: Path) -> str:
-    """The release notes: identity, the CI run, the qualification and canary references, and the hash table."""
+def release_notes(version: str, commit: str, run_id: int, canary: str, archive: Path) -> str:
+    """The release notes: identity, the CI run, the canary reference, and the hash table."""
     lines = [
         f"docker-test-toolkit {version} from commit {commit}.",
         "",
         f"- CI run {run_id} passed every required job ({', '.join(REQUIRED_JOBS)}).",
-        f"- CI-host qualification: {qualification or 'not given'}.",
         f"- Canary: {canary or 'not given'}.",
         "",
         "| File | Bytes | SHA-256 |",
@@ -216,7 +215,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--candidate-sha256", required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--repository-path", type=Path, default=Path("."))
-    parser.add_argument("--qualification", default="")
     parser.add_argument("--canary", default="")
     parser.add_argument("--dry-run", action="store_true")
     options = parser.parse_args(argv)
@@ -232,9 +230,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if options.dry_run:
                 print(f"dry run: {options.tag} at {local.commit} is publishable (CI run {run_id})")
                 return 0
-            notes = release_notes(
-                options.tag.removeprefix("v"), local.commit, run_id, options.qualification, options.canary, archive
-            )
+            notes = release_notes(options.tag.removeprefix("v"), local.commit, run_id, options.canary, archive)
             outcome = publish(
                 options.tag,
                 archive,

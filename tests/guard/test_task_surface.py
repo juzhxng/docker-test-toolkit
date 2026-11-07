@@ -142,7 +142,7 @@ def test_publish_is_dispatch_only_and_calls_the_script() -> None:
     assert set(triggers) == {"workflow_dispatch"}
     inputs = triggers["workflow_dispatch"]["inputs"]
     assert inputs["tag"]["required"] is True and inputs["candidate_sha256"]["required"] is True
-    assert {"qualification", "canary"} <= set(inputs)
+    assert "canary" in inputs and "qualification" not in inputs
     assert workflow["permissions"] == {"contents": "write", "actions": "read"}
     (job,) = workflow["jobs"].values()
     assert job["runs-on"] == HOSTED

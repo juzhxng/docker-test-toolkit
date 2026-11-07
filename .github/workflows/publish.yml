@@ -1,9 +1,9 @@
 name: Publish
 
-# Publishes a qualified, canaried candidate as a GitHub Release. Nothing publishes on a tag push; a maintainer dispatches
-# this workflow with the tag and the installed candidate's SHA-256 after the CI-host qualification and the canary.
+# Publishes a canaried candidate as a GitHub Release. Nothing publishes on a tag push; a maintainer dispatches
+# this workflow with the tag and the installed candidate's SHA-256 after the canary.
 # scripts/publish_release.py refuses (exit 2) unless the tag is bound to a commit on main with a green CI run of every
-# required job and the rebuilt archive equals the candidate; it publishes through a draft (README "Releasing").
+# required job and the rebuilt archive equals the candidate; it publishes through a draft (docs/maintainers.md).
 on:
   workflow_dispatch:
     inputs:
@@ -13,10 +13,6 @@ on:
       candidate_sha256:
         description: SHA-256 of the installed candidate archive
         required: true
-      qualification:
-        description: CI-host qualification reference for the notes
-        required: false
-        default: ""
       canary:
         description: Canary run reference for the notes
         required: false
@@ -46,8 +42,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
-          QUALIFICATION: ${{ inputs.qualification }}
           CANARY: ${{ inputs.canary }}
         run: >-
           python3 scripts/publish_release.py --tag "$TAG" --candidate-sha256 "$CANDIDATE_SHA256"
-          --repository "${{ github.repository }}" --qualification "$QUALIFICATION" --canary "$CANARY"
+          --repository "${{ github.repository }}" --canary "$CANARY"

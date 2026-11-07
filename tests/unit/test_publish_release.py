@@ -223,10 +223,10 @@ def test_publish_deletes_the_draft_when_the_remote_tag_moved(tmp_path: Path) -> 
 
 
 def test_release_notes_carry_the_run_the_references_and_the_hash_table(tmp_path: Path) -> None:
-    notes = publish_release.release_notes("0.7.3", SHA, 7, "qualification run 3", "adopter run 160", _archive(tmp_path))
+    notes = publish_release.release_notes("0.7.3", SHA, 7, "adopter run 160", _archive(tmp_path))
 
     assert f"| {publish_release.ASSET} | {len(ARCHIVE)} | {CANDIDATE} |" in notes
-    assert "CI run 7" in notes and "qualification run 3" in notes and "adopter run 160" in notes and SHA in notes
+    assert "CI run 7" in notes and "adopter run 160" in notes and SHA in notes
 
 
 def test_required_jobs_match_the_ci_workflow() -> None:
