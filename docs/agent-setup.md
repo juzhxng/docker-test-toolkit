@@ -75,20 +75,45 @@ boundary". Then:
    services and credentials in the project. In Python, with the loader file on `sys.path`:
 
    ```python
-   run = toolkit.open_run(spec).enter()  # waits until the machine has room
-   docker = run.docker_context
-   subprocess.run([str(docker.executable), "pull", image], env=docker.environment, check=True)
-   subprocess.run(
-       [str(docker.executable), "compose", "up", "--detach", "--wait", "--wait-timeout", "60"],
-       env=docker.environment,
-       check=True,
+   spec = toolkit.RunSpec(
+       project_root=Path(__file__).resolve().parent,
+       entrypoint="integration",  # short names you choose for this kind of run
+       purpose="integration-tests",
+       profile="default",
+       services=("cache",),  # the services these tests need
+       closure=("cache",),  # those services plus everything they depend on
+       phases={"tests": toolkit.PhaseBudget(container_bytes=gib, host_process_bytes=gib, daemon_cpus=1, host_threads=2)},
+       initial_phase="tests",
    )
+   run = toolkit.open_run(spec).enter()  # waits until the machine has room
+   outcome = "failed"
+   try:
+       docker = run.docker_context
+
+       def in_run(*arguments):
+           return subprocess.run(
+               [str(docker.executable), *arguments], env=docker.environment, check=True, text=True, capture_output=True
+           )
+
+       in_run("pull", image)
+       in_run("compose", "up", "--detach", "--wait", "--wait-timeout", "60")
+       service = json.loads(in_run("compose", "ps", "--format", "json").stdout.splitlines()[0])
+       port = next(item["PublishedPort"] for item in service["Publishers"] if item["TargetPort"] == 6379)
+       # The tests run as an ordinary process on this machine: pass them the address.
+       tests = subprocess.run(["pytest", "-q"], env={**os.environ, "CACHE_HOST": "127.0.0.1", "CACHE_PORT": str(port)})
+       if tests.returncode == 0:
+           outcome = "passed"
+   finally:
+       run.leave(outcome)
    ```
 
-   The toolkit enforces these rules, so follow them from the start: pull images by digest (`name@sha256:...`) or build them
-   through the run, use those same images in Compose, give every service `mem_limit` and `cpus` within the phase budget, and do
-   not pass `-p` to Compose, since the run chooses the project. End with `run.leave("passed")` or
-   `run.leave("failed")` in a `finally`. The [README](../README.md#use) has the full example.
+   The toolkit enforces these rules, so follow them from the start:
+
+   - Pull images by digest (`name@sha256:...`) or build them through the run, and use those same images in Compose. Find a
+     digest with `docker buildx imagetools inspect <image>`.
+   - Give every service `mem_limit` and `cpus` within the phase budget.
+   - Do not pass `-p` to Compose, since the run chooses the project.
+   - Read published ports with `compose ps --format json`. `compose port` is refused.
 
 ## 6. Prove it
 
@@ -96,8 +121,10 @@ Run one Docker-backed test selection through the adapter, then a cleanup dry run
 project's absolute path:
 
 ```sh
-printf '{"project_root": "%s"}' "$PWD" > "$TMPDIR/project.json"
-docker-test-toolkit cleanup project --input "$TMPDIR/project.json" --json
+input=$(mktemp)
+printf '{"project_root": "%s"}' "$PWD" > "$input"
+docker-test-toolkit cleanup project --input "$input" --json
+rm "$input"
 ```
 
 Report the test result and anything the dry run lists. Never add `--execute` without the user's agreement.
