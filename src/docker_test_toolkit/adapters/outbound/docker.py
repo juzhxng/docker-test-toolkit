@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence, cast
 
 from docker_test_toolkit.application.ports.docker import DockerPort
 from docker_test_toolkit.application.ports.podman import MachineFactory, PodmanMachinePort
-from docker_test_toolkit.domain.errors import InfrastructureFailure, ResourceError
+from docker_test_toolkit.domain.errors import InfrastructureFailure, ResourceError, stderr_tail
 from docker_test_toolkit.domain.models import (
     ComposeMutation,
     DaemonIdentity,
@@ -47,7 +47,12 @@ from docker_test_toolkit.domain.policy import (
 if TYPE_CHECKING:
     from docker_test_toolkit.application.lifecycle import Deadline
 
+# NOTE: communicate() holds a child's whole output before any check, so this cap bounds what is used or relayed, not
+# the dispatcher's memory; the ceiling is that memory. Upgrade path: bounded streaming capture.
 _MAX_OUTPUT = 1024 * 1024
+# A relayed stream stays within this many UTF-8 bytes, so stdout and stderr together fit a consumer's 1 MiB capture
+# buffer (Node's default maxBuffer) even when every invalid byte became a 3-byte replacement character.
+RELAY_STREAM_BYTES = 384 * 1024
 _TERMINATION_GRACE_SECONDS = 0.25
 _REAP_TIMEOUT_SECONDS = 1.0
 
@@ -57,6 +62,19 @@ def _valid_tool_version(value: object) -> bool:
 
 
 DISCOVERY_VERSION_FORMAT = "{{.Client.Version}} {{json .Server.Components}}"  # the engine rides on the version read
+
+
+def _relay_stream(raw: bytes, name: str) -> str:
+    """Return one captured stream as text for the caller: invalid bytes replaced, and within ``RELAY_STREAM_BYTES``
+    of UTF-8, else its first and last half of that around one marker line."""
+    text = raw.decode("utf-8", "replace") if len(raw) <= RELAY_STREAM_BYTES else None
+    if text is not None and len(text.encode()) <= RELAY_STREAM_BYTES:
+        return text
+    half = RELAY_STREAM_BYTES // 2
+    head = raw[:half].decode("utf-8", "replace").encode()[:half].decode("utf-8", "ignore")
+    tail = raw[max(half, len(raw) - half) :].decode("utf-8", "replace").encode()[-half:].decode("utf-8", "ignore")
+    marker = f"[docker-test-toolkit: {name} cut from {len(raw)} bytes to its first and last {half // 1024} KiB]"
+    return f"{head}\n{marker}\n{tail}"
 
 
 class _DockerOperationInterrupted(Exception):
@@ -574,11 +592,14 @@ class DockerCliAdapter(DockerPort):
         environment: Mapping[str, str] | None = None,
         stream_output: bool = False,
         hold_fd: int | None = None,
+        relay_output: bool = False,
     ) -> DockerResult:
         """Execute bounded argv; main-thread streaming forwards SIGINT and SIGTERM.
 
         ``hold_fd`` (the image lock's descriptor) is inherited by the Docker child, so the lock stays held until the
-        child exits even when this process dies or unwinds first.
+        child exits even when this process dies or unwinds first. ``relay_output`` is for output that is only shown to
+        the caller, never parsed: invalid bytes are replaced, each stream is cut to ``RELAY_STREAM_BYTES`` around a
+        marker, and a timeout names the end of the child's stderr. Streaming ignores it.
         """
         if (
             not argv
@@ -589,7 +610,12 @@ class DockerCliAdapter(DockerPort):
             raise InfrastructureFailure("Docker adapter request is invalid or unbounded.")
         self._verify()
         return self._execute_verified(
-            argv, timeout_seconds=timeout_seconds, environment=environment, stream_output=stream_output, hold_fd=hold_fd
+            argv,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+            stream_output=stream_output,
+            hold_fd=hold_fd,
+            relay_output=relay_output,
         )
 
     def _execute_verified(
@@ -600,6 +626,7 @@ class DockerCliAdapter(DockerPort):
         environment: Mapping[str, str] | None,
         stream_output: bool,
         hold_fd: int | None = None,
+        relay_output: bool = False,
     ) -> DockerResult:
         """Run one already-validated argv; the caller has verified the client and daemon identity."""
         child_environment = dict(self.env)
@@ -668,9 +695,15 @@ class DockerCliAdapter(DockerPort):
                 hold_fd=hold_fd,
             )
         except subprocess.TimeoutExpired as error:
-            raise _DockerCommandTimeout("Docker operation did not complete within its bounded execution.") from error
+            tail = stderr_tail(error.stderr) if relay_output else ""
+            message = "Docker operation did not complete within its bounded execution"
+            raise _DockerCommandTimeout(f"{message}; stderr ended: {tail}" if tail else f"{message}.") from error
         except OSError as error:
             raise InfrastructureFailure("Docker operation did not complete within its bounded execution.") from error
+        if relay_output:
+            return DockerResult(
+                result.returncode, _relay_stream(result.stdout, "stdout"), _relay_stream(result.stderr, "stderr")
+            )
         if len(result.stdout) > _MAX_OUTPUT or len(result.stderr) > _MAX_OUTPUT:
             raise InfrastructureFailure("Docker operation exceeded its bounded output limit.")
         try:

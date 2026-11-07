@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
 from docker_test_toolkit.application.lifecycle import Deadline, NativeClock
 from docker_test_toolkit.application.recovery import Context, image_lock
 from docker_test_toolkit.domain.errors import InfrastructureFailure, ResourceBusy, ResourceError
@@ -265,6 +265,14 @@ case "${DOCKER_CONTEXT:-}|$*" in
   "fixture|container inspect malformed") printf '%s\\n' 'not json' ;;
   "fixture|container inspect "*) printf '%s\\n' '[{}]' ;;
   "fixture|flood") yes x | head -c 1100000 ;;
+  "fixture|invalid-utf8") printf '\\377boom' >&2; exit 1 ;;
+  "fixture|flood-invalid") head -c 1048575 /dev/zero | LC_ALL=C tr '\\000' '\\377' >&2; exit 1 ;;
+  "fixture|flood-both")
+    head -c 2097152 /dev/zero | LC_ALL=C tr '\\000' '\\377'
+    head -c 2097152 /dev/zero | LC_ALL=C tr '\\000' '\\377' >&2 ;;
+  "fixture|flood-exact") yes x | head -c 393216 ;;
+  "fixture|stall-stderr") printf 'TOKEN-IN-STDOUT\\n'; printf 'fatal: cannot reach registry\\n' >&2; sleep 5 ;;
+  "fixture|stall-invalid") head -c 64 /dev/zero | LC_ALL=C tr '\\000' '\\377' >&2; sleep 5 ;;
   "fixture|linger")
     parent=$PPID
     trap 'exit 42' TERM
@@ -458,6 +466,71 @@ def test_adapter_output_is_bounded(tmp_path: Path) -> None:
         adapter.execute(("flood",), timeout_seconds=5)
 
 
+def _adapter(tmp_path: Path) -> DockerCliAdapter:
+    return DockerCliAdapter.discover(_fake_docker(tmp_path), environment={"PATH": os.environ["PATH"]})
+
+
+def test_relayed_output_replaces_invalid_bytes_and_keeps_the_exit_code(tmp_path: Path) -> None:
+    result = _adapter(tmp_path).execute(("invalid-utf8",), timeout_seconds=5, relay_output=True)
+
+    assert (result.exit_code, result.stdout, result.stderr) == (1, "", "\ufffdboom")
+
+
+def test_strict_execute_still_refuses_invalid_bytes(tmp_path: Path) -> None:
+    with pytest.raises(InfrastructureFailure, match="not valid UTF-8"):
+        _adapter(tmp_path).execute(("invalid-utf8",), timeout_seconds=5)
+
+
+@pytest.mark.parametrize(("case", "name"), (("flood", "stdout"), ("flood-invalid", "stderr")))
+def test_relayed_stream_over_budget_keeps_head_marker_and_tail(tmp_path: Path, case: str, name: str) -> None:
+    result = _adapter(tmp_path).execute((case,), timeout_seconds=5, relay_output=True)
+
+    stream = getattr(result, name)
+    marker = next(line for line in stream.splitlines() if line.startswith("[docker-test-toolkit: "))
+    head, tail = stream.split("\n" + marker + "\n")
+    assert marker.startswith(f"[docker-test-toolkit: {name} cut from ")
+    assert len(head.encode()) <= RELAY_STREAM_BYTES // 2
+    assert len(tail.encode()) <= RELAY_STREAM_BYTES // 2
+    assert len(stream.encode()) <= RELAY_STREAM_BYTES + len(marker) + 2
+
+
+def test_relayed_streams_over_budget_stay_under_one_mib_together(tmp_path: Path) -> None:
+    result = _adapter(tmp_path).execute(("flood-both",), timeout_seconds=5, relay_output=True)
+
+    assert result.exit_code == 0
+    assert "[docker-test-toolkit: stdout cut from 2097152 bytes" in result.stdout
+    assert "[docker-test-toolkit: stderr cut from 2097152 bytes" in result.stderr
+    assert len(result.stdout.encode()) + len(result.stderr.encode()) < 1024 * 1024
+
+
+def test_relayed_stream_at_the_budget_is_whole(tmp_path: Path) -> None:
+    result = _adapter(tmp_path).execute(("flood-exact",), timeout_seconds=5, relay_output=True)
+
+    assert result.stdout == "x\n" * (RELAY_STREAM_BYTES // 2)
+
+
+def test_relayed_timeout_names_the_stderr_tail_never_stdout(tmp_path: Path) -> None:
+    with pytest.raises(InfrastructureFailure, match="bounded execution") as raised:
+        _adapter(tmp_path).execute(("stall-stderr",), timeout_seconds=0.5, relay_output=True)
+
+    assert str(raised.value).endswith("; stderr ended: fatal: cannot reach registry")
+    assert "TOKEN-IN-STDOUT" not in str(raised.value)
+
+
+def test_relayed_timeout_with_invalid_partial_stderr_yields_replacement_characters(tmp_path: Path) -> None:
+    with pytest.raises(InfrastructureFailure) as raised:
+        _adapter(tmp_path).execute(("stall-invalid",), timeout_seconds=0.5, relay_output=True)
+
+    assert str(raised.value).endswith("; stderr ended: " + "\ufffd" * 64)
+
+
+def test_strict_timeout_text_is_unchanged(tmp_path: Path) -> None:
+    with pytest.raises(InfrastructureFailure) as raised:
+        _adapter(tmp_path).execute(("stall-stderr",), timeout_seconds=0.5)
+
+    assert str(raised.value) == "Docker operation did not complete within its bounded execution."
+
+
 def test_adapter_accepts_the_four_hour_finite_ceiling(tmp_path: Path) -> None:
     adapter = DockerCliAdapter.discover(_fake_docker(tmp_path), environment={"PATH": os.environ["PATH"]})
 
@@ -602,6 +675,12 @@ def test_adapter_streaming_output_is_not_captured_or_size_limited(
     assert result.stdout == result.stderr == ""
     assert len(captured.out) == 1_100_000
 
+    relayed = adapter.execute(("flood-invalid",), timeout_seconds=5, stream_output=True, relay_output=True)
+
+    assert relayed.exit_code == 1
+    assert relayed.stdout == relayed.stderr == ""
+    assert len(capfd.readouterr().err) == 1_048_575  # passed through: neither replaced nor cut
+
 
 def test_adapter_forwards_targeted_sigterm_to_streamed_child(tmp_path: Path) -> None:
     binary = _fake_docker(tmp_path)
@@ -610,7 +689,7 @@ def test_adapter_forwards_targeted_sigterm_to_streamed_child(tmp_path: Path) -> 
 import os
 import sys
 from pathlib import Path
-from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
 adapter = DockerCliAdapter.discover(
     Path(sys.argv[1]),
     environment={"PATH": os.environ["PATH"], "DTT_MARKER": sys.argv[2]},
@@ -639,7 +718,7 @@ def test_adapter_forwards_targeted_sigterm_to_streamed_descendant(tmp_path: Path
 import os
 import sys
 from pathlib import Path
-from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
 adapter = DockerCliAdapter.discover(
     Path(sys.argv[1]),
     environment={
@@ -672,7 +751,7 @@ def test_adapter_kills_streamed_child_that_ignores_timeout_termination(tmp_path:
 import os
 import sys
 from pathlib import Path
-from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
 from docker_test_toolkit.domain.errors import InfrastructureFailure
 adapter = DockerCliAdapter.discover(Path(sys.argv[1]), environment={"PATH": os.environ["PATH"]})
 try:
@@ -700,7 +779,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
 from docker_test_toolkit.domain.errors import InfrastructureFailure
 marker = Path(sys.argv[2])
 mode = sys.argv[3]
@@ -771,7 +850,7 @@ def test_adapter_interrupt_kills_descendants(tmp_path: Path, mode: str, interrup
 import os
 import sys
 from pathlib import Path
-from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
 marker = Path(sys.argv[2])
 mode = sys.argv[3]
 environment = {"PATH": os.environ["PATH"], "DTT_MARKER": str(marker), "DTT_PYTHON": sys.executable}

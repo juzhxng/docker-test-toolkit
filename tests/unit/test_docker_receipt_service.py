@@ -242,6 +242,7 @@ class FakeDockerPort(DockerPort):
         environment=None,
         stream_output: bool = False,
         hold_fd: int | None = None,
+        relay_output: bool = False,
     ) -> DockerResult:
         assert 0 < timeout_seconds <= 14_400
         self.held_fds.append(hold_fd)
