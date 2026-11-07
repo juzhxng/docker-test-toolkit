@@ -163,6 +163,14 @@ A repository that needs an image or build result as a file uses the shim's archi
 copy it out and verify the copy against the SHA-256 in the printed line or the receipt before `leave`; the repository
 owns the copy's retention from then on.
 
+The shim relays a Docker mutation's stdout, stderr and exit code unredacted. Two things can differ from the child's
+bytes: bytes that are not UTF-8 are replaced (U+FFFD), and a stream whose relay would exceed 384 KiB keeps its first and
+last 192 KiB around one line `[docker-test-toolkit: <stream> cut from N bytes to its first and last 192 KiB]`, so both
+streams fit a 1 MiB capture buffer together. Commands that stream (`run`, `compose run`, `compose exec`, `compose cp`)
+reach you untouched; observation and `exec` output is exact or refused. A timed-out command, or a Compose file that
+does not render, names the end of the child's stderr in the toolkit's message. Adapters that report a failed command's
+stderr should keep a redacted tail of it.
+
 Host-only selection does not load the Docker lifecycle, inspect the daemon, or create state. Any newly active
 integration/E2E/audit lane must have an explicit repository classification.
 
@@ -186,7 +194,9 @@ hold the account at once. Adapters change nothing, but three things follow:
 - **What keeps a run exclusive.** A request stays exclusive once one of its commands broke a share rule: a fixed host
   port, host networking, another container's namespaces or Docker's default bridge, privileged mode or devices, the Docker socket, a writable
   bind of the checkout, a container without a hard memory limit, `--scale` above 1 or `watch`, or more than the run's
-  own phase budget. The shared run's command is refused with `share-rule`; the next run of that request runs alone.
+  own phase budget. The shared run's command is refused with `share-rule`, naming the rule and saying that the request
+  is now recorded as not shareable; rerun it, and the next run of that request runs alone while the verdict is kept
+  (the 256-key store per project evicts an earlier boot's entries first; a change of the share rules drops it).
 - **Same checkout.** Two runs of one project share the working tree. Outputs written into the checkout (coverage files,
   reports, caches) can race; write them under the run's private root or name them per run.
 - **Teardown.** A shared run's leave never deletes an image another run still uses; it hands it off and the last user
