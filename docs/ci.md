@@ -9,7 +9,8 @@ What differs is what shares the machine:
 
 - **GitHub-hosted runner:** every job gets a fresh machine, so install the toolkit in the job. Nothing else competes for that
   machine, but capacity checks, exact cleanup and recovery still apply, and your tests run as they do locally.
-- **Self-hosted runners sharing one Docker daemon:** one installation serves them all, so their jobs queue for capacity instead
+- **Your own server or VPS (self-hosted runners):** install once, not per job. Runners sharing one Docker daemon share that
+  installation, so their jobs queue for capacity instead
   of colliding, across repositories. A job killed by the runner is recovered by the next run or cleanup.
 
 ## GitHub-hosted runners
@@ -45,7 +46,7 @@ If your tests export images to archives, the daemon also needs the containerd im
     sudo systemctl restart docker
 ```
 
-## Self-hosted runners
+## Your own server or VPS
 
 Install once for the machine, not per job. Runners that share a Docker daemon and PID namespace must share one installation and
 one user. A run's temporary folder must be at the same path in the runners and in the daemon. A single-purpose host can lower its

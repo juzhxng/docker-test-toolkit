@@ -45,9 +45,12 @@ The agent installs the toolkit where you choose, connects your tests and proves 
 
 - **Your machine:** installed once. Every project on the machine and every agent session shares it, so their test runs queue
   instead of colliding.
-- **CI:** the same toolkit and the same adapter, so your tests run the same way. A GitHub-hosted job installs it on its fresh
-  machine each time. Self-hosted runners that share a Docker daemon share one installation, so their jobs queue too. See the
-  [CI guide](docs/ci.md).
+- **CI:** the same toolkit and the same adapter, so your tests run the same way.
+  - **GitHub-hosted runners:** each job starts on a fresh machine, so it installs the toolkit every time.
+  - **Your own server or VPS:** install it once, not per job. Runners that share a Docker daemon share that installation, so
+    their jobs queue too.
+
+  See the [CI guide](docs/ci.md).
 
 ## Requirements
 
