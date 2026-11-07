@@ -387,3 +387,19 @@ def _details_envelope(error: ResourceError) -> tuple[dict, int]:
     from docker_test_toolkit.application.protocol import error_envelope
 
     return error_envelope("cleanup.project", error)
+
+
+def test_an_error_message_redacts_a_credential_that_straddles_the_length_cut() -> None:
+    message = error_envelope("docker.dispatch", InfrastructureFailure("x" * 495 + " https://user:pa55word@host/path"))[
+        0
+    ]
+
+    text = message["error"]["message"]
+    assert "pa55word" not in text and "user:pa" not in text
+    assert len(text) <= 512
+
+
+def test_an_error_message_stays_within_512_characters_after_redaction() -> None:
+    message = error_envelope("docker.dispatch", InfrastructureFailure("token=abc " * 80))[0]
+
+    assert len(message["error"]["message"]) <= 512
