@@ -2105,6 +2105,28 @@ def _entered_run(tmp_path: Path, fake: FakeDockerPort):
     return handle, descriptor
 
 
+class _TimedOutNetworkCreate(FakeDockerPort):
+    """A daemon whose network creation outlives the dispatch deadline, as the adapter reports it when relaying."""
+
+    def execute(self, argv: tuple[str, ...], **options) -> DockerResult:
+        if argv[:2] == ("network", "create"):
+            raise InfrastructureFailure(
+                "Docker operation did not complete within its bounded execution; stderr ended: fatal: registry"
+            )
+        return super().execute(argv, **options)
+
+
+def test_a_timed_out_mutation_names_the_stderr_tail_and_stays_unresolved(tmp_path: Path) -> None:
+    fake = _TimedOutNetworkCreate()
+    handle, descriptor = _entered_run(tmp_path, fake)
+
+    with pytest.raises(IncompleteCleanup, match=r"the command did not finish: .*stderr ended: fatal: registry"):
+        lifecycle.dispatch_docker(handle._context, descriptor, fake, ("network", "create"))
+
+    receipt = list(json.loads(handle._context.record.read_text())["docker_receipts"].values())[-1]
+    assert (receipt["state"], receipt["result"]["exit_code"]) == ("unresolved", 5)
+
+
 def _prepare_owned_removal(
     handle, descriptor: dict, fake: FakeDockerPort, kind: str
 ) -> tuple[str, str, tuple[str, ...]]:

@@ -4121,7 +4121,7 @@ def _dispatch_classified(
             if not _validate_owned_identity(adapter, container):
                 raise InvalidInput("Owned container disappeared before network attachment.")
             child_started = True
-            result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd)
+            result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd, relay_output=True)
         elif command.kind == "container-create":
             image_id = command.plan["image_id"]
             if not isinstance(image_id, str):
@@ -4143,7 +4143,11 @@ def _dispatch_classified(
                     raise InvalidInput("Declared external image identity changed before mutation.")
             child_started = True
             result = adapter.execute(
-                command.argv, timeout_seconds=timeout, stream_output=command.blocking, hold_fd=hold_fd
+                command.argv,
+                timeout_seconds=timeout,
+                stream_output=command.blocking,
+                hold_fd=hold_fd,
+                relay_output=True,
             )
         elif command.kind == "build":
             try:  # the shared cache anchor is held until the build child returns
@@ -4151,7 +4155,7 @@ def _dispatch_classified(
                 if builder_resource is None or not _validate_owned_identity(adapter, builder_resource):
                     raise InvalidInput("Build requires the exact live owned builder.")
                 child_started = True
-                result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd)
+                result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd, relay_output=True)
             finally:
                 released = _close_cache_fail_open(held)
         elif command.kind.endswith("-rm"):
@@ -4162,13 +4166,17 @@ def _dispatch_classified(
             exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=resource_kind == "builder")
             if exists:
                 child_started = True
-                result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd)
+                result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd, relay_output=True)
             else:
                 result = DockerResult(0, "", "")
         else:
             child_started = True
             result = adapter.execute(
-                command.argv, timeout_seconds=timeout, stream_output=command.blocking, hold_fd=hold_fd
+                command.argv,
+                timeout_seconds=timeout,
+                stream_output=command.blocking,
+                hold_fd=hold_fd,
+                relay_output=True,
             )
         current = _load_run(context)
         state, resources = _promote_docker_result(adapter, receipt, result, current)
