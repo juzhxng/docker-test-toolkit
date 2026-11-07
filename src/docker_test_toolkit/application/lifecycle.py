@@ -3125,8 +3125,16 @@ def _refuse_or_record(context: RunContext, data: dict, verdict: ShareVerdict) ->
         _mark_share_unknown(data)
     failpoint("share-verdict-written")
     if _record_mode(data) == AdmissionMode.SHARED:
-        note = "" if recorded else " The verdict was not recorded."
-        raise InvalidInput(f"Shared run breaks share rule {verdict.rule}: {verdict.reason}.{note}", reason="share-rule")
+        # The rule and what happens next come first: the envelope cuts a long reason (an R10 bind path), not them.
+        outcome = (
+            "this request is now recorded as not shareable, so its next run is exclusive while that verdict is kept"
+            if recorded
+            else "the verdict could not be recorded"
+        )
+        raise InvalidInput(
+            f"Shared run breaks share rule {verdict.rule}; {outcome}; rerun it. Reason: {verdict.reason}.",
+            reason="share-rule",
+        )
 
 
 SHARE_UNKNOWN_MARKER = "share-unknown"
