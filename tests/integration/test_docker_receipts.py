@@ -460,8 +460,8 @@ def test_shim_relays_an_over_limit_passing_child_and_promotes_it(
 
     created = _shim(handle, "network", "create")
 
+    receipt = _last_receipt(record_path)
     record = json.loads(record_path.read_text())
-    receipt = list(record["docker_receipts"].values())[-1]
     assert created.returncode == 0, created.stderr[-300:]
     assert (receipt["state"], receipt["result"]) == ("promoted", {"category": "complete", "exit_code": 0})
     assert record["owned_resources"]["networks"]["b" * 64]["state"] == "present"

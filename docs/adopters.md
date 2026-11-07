@@ -196,7 +196,7 @@ hold the account at once. Adapters change nothing, but three things follow:
   bind of the checkout, a container without a hard memory limit, `--scale` above 1 or `watch`, or more than the run's
   own phase budget. The shared run's command is refused with `share-rule`, naming the rule and saying that the request
   is now recorded as not shareable; rerun it, and the next run of that request runs alone while the verdict is kept
-  (the 256-key store per project evicts an earlier boot's entries first; a change of the share rules drops it).
+  (the 256-key store per project evicts positive verdicts before negative ones and an earlier boot's before this boot's; a change of the share rules drops it).
 - **Same checkout.** Two runs of one project share the working tree. Outputs written into the checkout (coverage files,
   reports, caches) can race; write them under the run's private root or name them per run.
 - **Teardown.** A shared run's leave never deletes an image another run still uses; it hands it off and the last user

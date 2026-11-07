@@ -158,6 +158,18 @@ def test_eviction_takes_other_clock_origins_before_the_current_one(tmp_path: Pat
     assert sum(item["origin"] == "before-reboot" for item in verdicts.values()) == sharing.VERDICTS_PER_PROJECT - 2
 
 
+def test_eviction_keeps_negatives_over_positives(tmp_path: Path) -> None:
+    for index in range(sharing.VERDICTS_PER_PROJECT // 2):
+        _write(tmp_path, f"negative-{index}", shareable=False, origin="before-reboot", tick_ns=index)
+        _write(tmp_path, f"positive-{index}", origin="after-reboot", tick_ns=1_000 + index)
+
+    _write(tmp_path, "new", origin="after-reboot", tick_ns=5_000)
+
+    verdicts = _verdicts(tmp_path)
+    assert "positive-0" not in verdicts and "new" in verdicts
+    assert sum(item["shareable"] is False for item in verdicts.values()) == sharing.VERDICTS_PER_PROJECT // 2
+
+
 def test_write_verdict_takes_no_lock(tmp_path: Path) -> None:
     from docker_test_toolkit.factories.testing import install_lock_observer
 

@@ -689,7 +689,7 @@ def test_adapter_forwards_targeted_sigterm_to_streamed_child(tmp_path: Path) -> 
 import os
 import sys
 from pathlib import Path
-from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
 adapter = DockerCliAdapter.discover(
     Path(sys.argv[1]),
     environment={"PATH": os.environ["PATH"], "DTT_MARKER": sys.argv[2]},
@@ -718,7 +718,7 @@ def test_adapter_forwards_targeted_sigterm_to_streamed_descendant(tmp_path: Path
 import os
 import sys
 from pathlib import Path
-from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
 adapter = DockerCliAdapter.discover(
     Path(sys.argv[1]),
     environment={
@@ -751,7 +751,7 @@ def test_adapter_kills_streamed_child_that_ignores_timeout_termination(tmp_path:
 import os
 import sys
 from pathlib import Path
-from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
 from docker_test_toolkit.domain.errors import InfrastructureFailure
 adapter = DockerCliAdapter.discover(Path(sys.argv[1]), environment={"PATH": os.environ["PATH"]})
 try:
@@ -779,7 +779,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
 from docker_test_toolkit.domain.errors import InfrastructureFailure
 marker = Path(sys.argv[2])
 mode = sys.argv[3]
@@ -850,7 +850,7 @@ def test_adapter_interrupt_kills_descendants(tmp_path: Path, mode: str, interrup
 import os
 import sys
 from pathlib import Path
-from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
 marker = Path(sys.argv[2])
 mode = sys.argv[3]
 environment = {"PATH": os.environ["PATH"], "DTT_MARKER": str(marker), "DTT_PYTHON": sys.executable}

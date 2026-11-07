@@ -258,8 +258,8 @@ the account together. Nothing changes for adopters: they open runs as before.
   socket, no writable bind of the checkout, hard memory limits, no `--scale` or watch, and the run's own budget). A
   violation records a negative verdict and refuses the command with `share-rule`; the message names the rule, says
   whether the verdict was recorded, asks for a rerun and ends with the reason. The next run of that request is
-  exclusive while the verdict is kept. The store holds 256 keys per project and evicts an earlier boot's entries first,
-  then the oldest; a change of the share rules drops it. An exclusive run never fails because of a share rule; it only
+  exclusive while the verdict is kept. The store holds 256 keys per project and evicts positives before negatives, an
+  earlier boot's entries before this boot's, then the oldest; a change of the share rules drops it. An exclusive run never fails because of a share rule; it only
   records the verdict.
 - **Image lock.** `<account>/images.lock` serializes shared runs' builds, pulls, builder creation, cached-image binding
   and image removal; every Docker child launched under it inherits it, so it is released only when that child exits.
