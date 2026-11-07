@@ -3,6 +3,11 @@
 Instructions for a coding agent setting up docker-test-toolkit for its user. People can follow them too. Report what you
 found after each step, and stop and ask whenever a step says so.
 
+## Choose where
+
+Ask the user whether to set it up on this machine, in CI, or both, unless they already said. For CI, follow the
+[CI guide](ci.md) for the install, then steps 3 to 6 below still apply to the project. Everything below is for this machine.
+
 ## 1. Check the machine
 
 Check for CPython 3.12 or newer, the Docker CLI with its Compose and Buildx plugins, and a running daemon.
@@ -23,12 +28,20 @@ shasum -a 256 docker-test-toolkit.pyz   # sha256sum on Linux
 
 Compare the hash with the table in the [latest release's notes](https://github.com/juzhxng/docker-test-toolkit/releases/latest).
 If they differ, delete the file, tell the user and stop. Otherwise install it, using any CPython 3.12 or newer that is not
-inside a virtual environment. On Linux the installation lives in `/opt` and needs root, so ask the user to run it or to allow
-`sudo`, and link the command afterwards with
-`sudo ln -sf /opt/docker-test-toolkit/bin/docker-test-toolkit /usr/local/bin/docker-test-toolkit`:
+inside a virtual environment. On macOS:
 
 ```sh
 python3.12 -I docker-test-toolkit.pyz install --json
+docker-test-toolkit readiness inspect --json
+```
+
+On Linux the installation lives in `/opt` and belongs to the user who runs the tests. It takes `sudo` for the folder and the
+link, but not for the install: a root install leaves that user locked out. Ask the user to run these or to allow `sudo`:
+
+```sh
+sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 755 /opt/docker-test-toolkit
+python3 -I docker-test-toolkit.pyz install --json
+sudo ln -sf /opt/docker-test-toolkit/bin/docker-test-toolkit /usr/local/bin/docker-test-toolkit
 docker-test-toolkit readiness inspect --json
 ```
 

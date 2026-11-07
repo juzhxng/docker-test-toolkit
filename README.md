@@ -32,13 +32,22 @@ Projects hold no copy, and a new toolkit release never requires a project change
 Paste this into your coding agent, in the project you want to connect:
 
 ```text
-Set up docker-test-toolkit for this project. Read and follow
+Set up docker-test-toolkit for this project, on this machine, in my CI, or both. Ask me which if I
+did not say. Read and follow
 https://raw.githubusercontent.com/juzhxng/docker-test-toolkit/main/docs/agent-setup.md
-Ask me before anything that changes my machine or my harness configuration.
+Ask me before anything that changes my machine, my CI or my harness configuration.
 ```
 
-The agent checks your machine, installs the toolkit, connects your tests and proves it with one real run.
+The agent installs the toolkit where you choose, connects your tests and proves it with one real run.
 [Read the steps](docs/agent-setup.md) first if you like. To do it by hand, read on.
+
+## Where it runs
+
+- **Your machine:** installed once. Every project on the machine and every agent session shares it, so their test runs queue
+  instead of colliding.
+- **CI:** the same toolkit and the same adapter, so your tests run the same way. A GitHub-hosted job installs it on its fresh
+  machine each time. Self-hosted runners that share a Docker daemon share one installation, so their jobs queue too. See the
+  [CI guide](docs/ci.md).
 
 ## Requirements
 
@@ -61,10 +70,13 @@ python3.12 -I docker-test-toolkit.pyz install --json
 docker-test-toolkit readiness inspect --json
 ```
 
-Any CPython 3.12 or newer outside a virtual environment works. On Linux, run `install` as root, since the installation
-lives in `/opt/docker-test-toolkit`, then link the command:
+Any CPython 3.12 or newer outside a virtual environment works. On Linux the installation lives in
+`/opt/docker-test-toolkit` and belongs to the user who runs the tests, so create that folder first, and link the command
+afterwards:
 
 ```sh
+sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 755 /opt/docker-test-toolkit
+python3 -I docker-test-toolkit.pyz install --json
 sudo ln -sf /opt/docker-test-toolkit/bin/docker-test-toolkit /usr/local/bin/docker-test-toolkit
 ```
 
@@ -129,6 +141,7 @@ The [adopter guide](docs/adopters.md) covers both, along with finite batches, sh
 ## Documentation
 
 - [Agent setup](docs/agent-setup.md): the steps a coding agent follows to connect a project
+- [CI guide](docs/ci.md): how the toolkit works on CI, and setting it up on hosted and self-hosted runners
 - [Adopter guide](docs/adopters.md): integrating a project, and the permanent contract it can rely on
 - [Operations guide](docs/operations.md): installation, CI runners, cleanup, recovery and troubleshooting
 - [Compatibility policy](docs/compatibility.md): what stays stable between releases

@@ -31,8 +31,16 @@ curl -fsSLO https://github.com/juzhxng/docker-test-toolkit/releases/latest/downl
 shasum -a 256 docker-test-toolkit.pyz   # sha256sum on Linux
 ```
 
-On Linux the installation lives in `/opt`, so run `install` as root. A release that does not make the command link needs
-`sudo ln -sf /opt/docker-test-toolkit/bin/docker-test-toolkit /usr/local/bin/docker-test-toolkit`.
+On Linux the installation belongs to the user who runs the tests, so create its folder first, and link the command
+afterwards if that user cannot write `/usr/local/bin`:
+
+```sh
+sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 755 /opt/docker-test-toolkit
+python3 -I docker-test-toolkit.pyz install --json
+sudo ln -sf /opt/docker-test-toolkit/bin/docker-test-toolkit /usr/local/bin/docker-test-toolkit
+```
+
+A root install leaves any other user locked out of the account's state.
 
 Install a release archive with a CPython 3.12 or newer that is not inside a virtual environment:
 
@@ -79,6 +87,8 @@ for its whole life and keeps its PID. If the recorded interpreter is gone it exi
 
 ## CI runners
 
+The [CI guide](ci.md) explains how the toolkit works on CI. This is the detail of a self-hosted stack.
+
 Runners on a shared CI host that share one Docker daemon and one PID namespace share one account. The runner stack provides:
 
 | Item | Stack setting |
@@ -91,9 +101,7 @@ Runners on a shared CI host that share one Docker daemon and one PID namespace s
 | Host reserve | `install --host-reserve-bytes 1073741824`, once |
 | PID 1 that reaps orphans | `init: true`, an init such as `dumb-init`, or a shared PID namespace with one: the toolkit never counts a zombie as dead, so under a PID 1 that does not reap, a killed run is never recovered |
 
-A GitHub-hosted runner leaves `/usr/local/bin` mode 777, and the toolkit refuses a writable directory on its safe `PATH`;
-run `sudo chmod go-w /usr/local/bin` before the first toolkit step. Its daemon also uses the classic image store; image export needs the
-containerd store (`"features": {"containerd-snapshotter": true}` in `/etc/docker/daemon.json`, then restart Docker).
+For a GitHub-hosted runner, see the [CI guide](ci.md).
 
 Installing a release on a machine and the parallel-runs limit (`install --parallel-runs`) on a shared CI account are
 decisions for whoever runs that machine.

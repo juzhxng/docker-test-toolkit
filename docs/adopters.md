@@ -324,6 +324,5 @@ stdin) or `--command "<text>"`: a refused command exits 2 with the reason on std
 
 ## CI
 
-CI runners use the toolkit installed on the runner host (see [Operations](operations.md#ci-runners)); a workflow has no
-toolkit step of its own. Docker-backed integration/E2E jobs use the ordinary adapter command; they do not call a separate
-setup/teardown utility.
+See the [CI guide](ci.md) for installing the toolkit on hosted and self-hosted runners. Docker-backed integration/E2E jobs use
+the ordinary adapter command; they do not call a separate setup/teardown utility.
