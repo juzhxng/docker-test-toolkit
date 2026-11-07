@@ -1,6 +1,6 @@
 name: CI
 
-# Every push to main and every pull request runs the four required jobs on GitHub-hosted arm64 runners. A release is
+# Every push to main and every pull request runs the required jobs on GitHub-hosted arm64 and amd64 runners. A release is
 # published only from a commit whose run of this workflow passed all four (scripts/publish_release.py).
 on:
   push:
@@ -30,8 +30,13 @@ jobs:
 
       - name: Install gitleaks
         run: &install-gitleaks |
-          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_arm64.tar.gz
-          echo "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          case "$RUNNER_ARCH" in
+            ARM64) file=gitleaks_8.30.1_linux_arm64.tar.gz sum=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 ;;
+            X64) file=gitleaks_8.30.1_linux_x64.tar.gz sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;;
+            *) echo "::error::no gitleaks for $RUNNER_ARCH"; exit 1 ;;
+          esac
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/$file"
+          echo "$sum  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
@@ -50,7 +55,11 @@ jobs:
           gitleaks git --config "$RUNNER_TEMP/gitleaks.toml" --log-opts=--all --no-banner --redact .
 
   quality:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, ubuntu-24.04]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -90,7 +99,11 @@ jobs:
         run: uv run poe int --durations=0 --durations-min=0 -ra --no-fold-skipped
 
   e2e:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, ubuntu-24.04]
     timeout-minutes: 65
     steps:
       - uses: actions/checkout@v7
@@ -130,7 +143,11 @@ jobs:
           -v --durations=0 --durations-min=0 -ra --no-fold-skipped
 
   shared-runs:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, ubuntu-24.04]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -147,12 +164,6 @@ jobs:
       - name: Run the shared-runs suite
         timeout-minutes: 50
         env: *e2e-env
-        # The deselected scenarios run in the CI-host qualification (scripts/qualify_candidate.sh), not on this 8 GB,
-        # 2 CPU runner: the host decline needs about 6 GiB of headroom plus a 5 GiB hog, and the two image hand-offs
-        # hold a 2-CPU builder budget beside a 1-CPU user at once.
         run: >-
           uv run pytest --basetemp=.pytest-tmp/ci-shared-runs -m e2e tests/e2e/test_shared_runs.py
           -v --durations=0 --durations-min=0 -ra --no-fold-skipped
-          --deselect tests/e2e/test_shared_runs.py::test_a_host_decline_others_caused_fails_no_granted_run
-          --deselect tests/e2e/test_shared_runs.py::test_owner_leave_hands_off_and_the_last_user_drains
-          --deselect tests/e2e/test_shared_runs.py::test_owner_image_rm_hands_off_and_non_owner_rm_is_refused

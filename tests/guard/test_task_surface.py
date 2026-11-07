@@ -83,14 +83,7 @@ def test_builder_consumers_use_only_the_subcommand_cli() -> None:
 CI = ROOT / ".github/workflows/ci.yml"
 PUBLISH = ROOT / ".github/workflows/publish.yml"
 HOSTED = "ubuntu-24.04-arm"
-MOVED_SCENARIOS = {
-    f"tests/e2e/test_shared_runs.py::{name}"
-    for name in (
-        "test_a_host_decline_others_caused_fails_no_granted_run",
-        "test_owner_leave_hands_off_and_the_last_user_drains",
-        "test_owner_image_rm_hands_off_and_non_owner_rm_is_refused",
-    )
-}
+MATRIX_RUNNERS = [HOSTED, "ubuntu-24.04"]
 TEST_RESERVE = {"DOCKER_TEST_TOOLKIT_TEST_HOST_RESERVE_BYTES": "1073741824"}
 
 
@@ -102,12 +95,17 @@ def _triggers(workflow: dict[str, Any]) -> dict[str, Any]:
     return workflow.get("on", workflow.get(True)) or {}
 
 
-def test_ci_runs_four_hosted_jobs_without_containers() -> None:
+def test_ci_runs_every_job_on_hosted_runners_of_both_architectures_without_containers() -> None:
     workflow = _yaml(CI)
 
     assert set(workflow["jobs"]) == {"scan", "quality", "e2e", "shared-runs"}
     for name, job in workflow["jobs"].items():
-        assert job["runs-on"] == HOSTED, name
+        if name == "scan":
+            assert job["runs-on"] == HOSTED
+        else:
+            assert job["runs-on"] == "${{ matrix.runner }}", name
+            assert job["strategy"]["matrix"]["runner"] == MATRIX_RUNNERS, name
+            assert job["strategy"]["fail-fast"] is False, name
         assert "container" not in job and "name" not in job, name
     assert _triggers(workflow) == {
         "push": {"branches": ["main"]},
@@ -133,15 +131,8 @@ def test_e2e_and_shared_runs_build_and_declare_the_test_reserve() -> None:
     assert "tests/e2e --ignore=tests/e2e/test_shared_runs.py" in str(jobs["e2e"]["steps"])
 
 
-def test_shared_runs_names_the_moved_scenarios() -> None:
-    lines = CI.read_text().splitlines()
-    deselects = [index for index, line in enumerate(lines) if "--deselect" in line]
-
-    assert {lines[index].split("--deselect ")[1].strip() for index in deselects} == MOVED_SCENARIOS
-    assert len(deselects) == len(MOVED_SCENARIOS)
-    step = lines[deselects[0] - 8 : deselects[0]]
-    assert any("run in the CI-host" in line and line.strip().startswith("#") for line in step)
-    assert any("qualification" in line for line in step)
+def test_ci_deselects_nothing() -> None:
+    assert "--deselect" not in CI.read_text()
 
 
 def test_publish_is_dispatch_only_and_calls_the_script() -> None:

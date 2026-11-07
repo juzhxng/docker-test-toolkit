@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import re
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -23,7 +24,8 @@ SHA = "a" * 40
 TAG_OBJECT = "b" * 40
 ARCHIVE = b"zipapp bytes"
 CANDIDATE = hashlib.sha256(ARCHIVE).hexdigest()
-JOBS = [{"name": name, "conclusion": "success"} for name in ("scan", "quality", "e2e", "shared-runs")]
+JOBS = [{"name": name, "conclusion": "success"} for name in publish_release.REQUIRED_JOBS]
+LAST_JOB = publish_release.REQUIRED_JOBS[-1]
 
 
 class _FakeGh:
@@ -146,8 +148,8 @@ def test_binding_refuses_a_tag_that_is_not_the_checked_commit_on_main(
         ([], JOBS, "no green CI run"),
         ([{"id": 8, "head_sha": "d" * 40, "conclusion": "success", "status": "completed"}], JOBS, "no green CI run"),
         ([{"id": 8, "head_sha": SHA, "conclusion": "failure", "status": "completed"}], JOBS, "no green CI run"),
-        (None, JOBS[:-1], "required job shared-runs is missing"),
-        (None, [*JOBS[:3], {"name": "shared-runs", "conclusion": "skipped"}], "shared-runs is skipped"),
+        (None, JOBS[:-1], f"required job {LAST_JOB} is missing"),
+        (None, [*JOBS[:-1], {"name": LAST_JOB, "conclusion": "skipped"}], f"{LAST_JOB} is skipped"),
         (None, [{"name": "scan", "conclusion": "cancelled"}, *JOBS[1:]], "scan is cancelled"),
     ],
 )
@@ -157,7 +159,7 @@ def test_green_run_refuses_a_run_missing_a_required_job(
     state: dict[str, object] = {"jobs": jobs}
     if runs is not None:
         state["runs"] = runs
-    with pytest.raises(PublishError, match=message):
+    with pytest.raises(PublishError, match=re.escape(message)):
         publish_release.green_run(SHA, _FakeGh(tmp_path, **state), REPO)
 
 
@@ -232,7 +234,12 @@ def test_required_jobs_match_the_ci_workflow() -> None:
 
     workflow = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "ci.yml").read_text())
 
-    assert set(publish_release.REQUIRED_JOBS) == set(workflow["jobs"])
+    expected = {
+        f"{name} ({runner})" if "matrix" in job.get("strategy", {}) else name
+        for name, job in workflow["jobs"].items()
+        for runner in job.get("strategy", {}).get("matrix", {}).get("runner", [""])
+    }
+    assert set(publish_release.REQUIRED_JOBS) == expected
 
 
 def test_a_create_that_fails_after_making_the_draft_leaves_no_draft(tmp_path: Path) -> None:

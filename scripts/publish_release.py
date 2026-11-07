@@ -33,7 +33,8 @@ from typing import Any
 
 import build_zipapp  # the sibling build script: scripts/ is sys.path[0] when this file runs
 
-REQUIRED_JOBS = ("scan", "quality", "e2e", "shared-runs")
+RUNNERS = ("ubuntu-24.04-arm", "ubuntu-24.04")
+REQUIRED_JOBS = ("scan", *(f"{job} ({runner})" for job in ("quality", "e2e", "shared-runs") for runner in RUNNERS))
 WORKFLOW = "ci.yml"
 ASSET = "docker-test-toolkit.pyz"
 
