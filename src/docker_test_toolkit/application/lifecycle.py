@@ -130,6 +130,7 @@ from docker_test_toolkit.domain.errors import (
     InfrastructureFailure,
     InvalidInput,
     ToolkitError,
+    stderr_tail,
 )
 from docker_test_toolkit.domain.models import (
     BUILDER_RELEASE_MIN_VERSION,
@@ -2588,7 +2589,10 @@ def _prepare_compose_receipt(
     hoisted, _understood = compose_trailing_globals(command.argv)
     rendered = adapter.execute((*command.argv[:index], *hoisted, "config", "--format", "json"), timeout_seconds=30)
     if rendered.exit_code:
-        raise InvalidInput("Compose configuration could not be rendered before mutation.")
+        # Compose's stderr names the error; its stdout holds resolved values and is never shown.
+        tail = stderr_tail(rendered.stderr)
+        message = "Compose configuration could not be rendered before mutation"
+        raise InvalidInput(f"{message}; compose said: {tail}" if tail else f"{message}.")
     try:
         config = json.loads(rendered.stdout, object_pairs_hook=unique_object)
     except ValueError as error:

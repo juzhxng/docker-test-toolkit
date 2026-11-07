@@ -14,6 +14,7 @@ import pytest
 
 from docker_test_toolkit import ArtifactIdentity, ExternalDockerResource, PhaseBudget, RunSpec
 from docker_test_toolkit.application import lifecycle
+from docker_test_toolkit.application.docker_commands import ClassifiedDockerCommand
 from docker_test_toolkit.application.ports.docker import DockerPort
 from docker_test_toolkit.domain.errors import (
     IncompleteCleanup,
@@ -2103,6 +2104,38 @@ def _entered_run(tmp_path: Path, fake: FakeDockerPort):
     _ = handle.docker_context
     descriptor = json.loads((handle.private_root / "docker-authority.json").read_text())
     return handle, descriptor
+
+
+class _FailedRender:
+    """A Compose client whose render fails, printing a resolved value on stdout and its error on stderr."""
+
+    def __init__(self, stderr: str) -> None:
+        self.stderr = stderr
+
+    def execute(self, argv: tuple[str, ...], *, timeout_seconds: float) -> DockerResult:
+        return DockerResult(1, "SECRET=hunter2\n", self.stderr)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    (
+        ("", "Compose configuration could not be rendered before mutation."),
+        (
+            "yaml: line 3: mapping values are not allowed\n",
+            "Compose configuration could not be rendered before mutation; compose said: "
+            "yaml: line 3: mapping values are not allowed",
+        ),
+    ),
+)
+def test_a_failed_render_names_composes_stderr_never_its_stdout(stderr: str, expected: str) -> None:
+    command = ClassifiedDockerCommand(
+        "compose", ("compose", "--project-name", "p", "up"), {"subcommand_index": 3, "subcommand": "up"}
+    )
+
+    with pytest.raises(InvalidInput) as raised:
+        lifecycle._prepare_compose_receipt(_FailedRender(stderr), command, {})
+
+    assert str(raised.value) == expected
 
 
 class _TimedOutNetworkCreate(FakeDockerPort):
