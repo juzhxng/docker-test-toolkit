@@ -149,8 +149,21 @@ def test_publish_is_dispatch_only_and_calls_the_script() -> None:
     assert any("scripts/publish_release.py" in str(step.get("run", "")) for step in job["steps"])
 
 
-def test_ci_and_publish_are_the_only_workflows() -> None:
-    assert sorted(path.name for path in (ROOT / ".github/workflows").iterdir()) == ["ci.yml", "publish.yml"]
+def test_ci_publish_and_the_dependabot_merge_are_the_only_workflows() -> None:
+    names = sorted(path.name for path in (ROOT / ".github/workflows").iterdir())
+    assert names == ["ci.yml", "dependabot-merge.yml", "publish.yml"]
+
+
+def test_the_dependabot_merge_acts_only_on_dependabots_tested_commit_and_runs_no_pull_request_code() -> None:
+    workflow = _yaml(ROOT / ".github/workflows/dependabot-merge.yml")
+    (job,) = workflow["jobs"].values()
+    text = (ROOT / ".github/workflows/dependabot-merge.yml").read_text()
+
+    assert _triggers(workflow)["workflow_run"]["workflows"] == ["CI"]
+    assert workflow["permissions"] == {"contents": "read"}
+    assert "github.event.workflow_run.actor.login == 'dependabot[bot]'" in job["if"]
+    assert "--match-head-commit" in text
+    assert "actions/checkout" not in text
 
 
 def test_ownership_manifest_lists_every_production_source_file() -> None:

@@ -1,0 +1,67 @@
+name: Dependabot merge
+
+# Acts on a Dependabot pull request once its CI run has finished. Green: the tested commit is merged, major versions
+# included. Red: the pull request stays on its branch and is assigned to the repository owner, so main never receives an
+# untested update. A green update of workflow files is assigned to the owner too, because GITHUB_TOKEN may not merge it.
+# No pull request code is checked out or run.
+# A flaked Dependabot CI run is retried with `@dependabot recreate` on the pull request.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    # Only Dependabot branches start this workflow; every other CI run would add a skipped run to the Actions list.
+    branches: ['dependabot/**']
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    permissions:
+      contents: write
+      pull-requests: write
+    if: >-
+      contains(fromJSON('["success", "failure"]'), github.event.workflow_run.conclusion) &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge the tested commit, or assign the failed pull request to the owner
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          TESTED: ${{ github.event.workflow_run.head_sha }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          pr=$(gh pr list -R "$REPOSITORY" --head "$BRANCH" --state open --json number,headRefOid,author \
+            --jq ".[] | select(.author.login == \"app/dependabot\" and .headRefOid == \"$TESTED\") | .number")
+          if [ -z "$pr" ]; then echo "no open Dependabot pull request at the tested commit $TESTED"; exit 0; fi
+          if [ "$CONCLUSION" != "success" ]; then
+            gh pr edit "$pr" -R "$REPOSITORY" --add-assignee "$OWNER"
+            gh pr comment "$pr" -R "$REPOSITORY" --body "CI failed for $TESTED, so this update stays off main: $RUN_URL"
+            exit 0
+          fi
+          base=$(gh pr view "$pr" -R "$REPOSITORY" --json baseRefName --jq .baseRefName)
+          behind=$(gh api "repos/$REPOSITORY/compare/$base...$TESTED" --jq .behind_by)
+          subject=$(gh pr view "$pr" -R "$REPOSITORY" --json title --jq .title)
+          if [ "$behind" = "0" ]; then
+            # Up to date with its base, so the squashed tree is exactly the tested tree.
+            subject="$subject (#$pr) [skip ci]"
+          else
+            # The base moved after the tested commit; main's own CI run tests the combination.
+            subject="$subject (#$pr)"
+          fi
+          if ! output=$(gh pr merge "$pr" -R "$REPOSITORY" --squash --delete-branch --match-head-commit "$TESTED" \
+            --subject "$subject" 2>&1); then
+            printf '%s\n' "$output"
+            # GITHUB_TOKEN can never be granted the workflows permission, so an update of workflow files (GitHub
+            # Actions versions) is left to the owner: one click, and a human look at what now runs in CI.
+            case "$output" in *"without \`workflows\` permission"*) ;; *) exit 1 ;; esac
+            gh pr edit "$pr" -R "$REPOSITORY" --add-assignee "$OWNER"
+            gh pr comment "$pr" -R "$REPOSITORY" --body "CI is green ($RUN_URL), but this update changes workflow files, which the workflow token may not merge. Please merge it with one click."
+          fi
+        shell: bash
