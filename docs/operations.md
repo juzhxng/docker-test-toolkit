@@ -31,7 +31,8 @@ curl -fsSLO https://github.com/juzhxng/docker-test-toolkit/releases/latest/downl
 shasum -a 256 docker-test-toolkit.pyz   # sha256sum on Linux
 ```
 
-On Linux the installation lives in `/opt`, so run `install` as root.
+On Linux the installation lives in `/opt`, so run `install` as root. A release that does not make the command link needs
+`sudo ln -sf /opt/docker-test-toolkit/bin/docker-test-toolkit /usr/local/bin/docker-test-toolkit`.
 
 Install a release archive with a CPython 3.12 or newer that is not inside a virtual environment:
 

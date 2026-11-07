@@ -61,8 +61,12 @@ python3.12 -I docker-test-toolkit.pyz install --json
 docker-test-toolkit readiness inspect --json
 ```
 
-Any CPython 3.12 or newer outside a virtual environment works. On Linux, run `install` as root: the installation lives in
-`/opt/docker-test-toolkit` and the command in `/usr/local/bin`.
+Any CPython 3.12 or newer outside a virtual environment works. On Linux, run `install` as root, since the installation
+lives in `/opt/docker-test-toolkit`, then link the command:
+
+```sh
+sudo ln -sf /opt/docker-test-toolkit/bin/docker-test-toolkit /usr/local/bin/docker-test-toolkit
+```
 
 ## Use
 

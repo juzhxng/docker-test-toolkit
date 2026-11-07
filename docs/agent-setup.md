@@ -24,7 +24,8 @@ shasum -a 256 docker-test-toolkit.pyz   # sha256sum on Linux
 Compare the hash with the table in the [latest release's notes](https://github.com/juzhxng/docker-test-toolkit/releases/latest).
 If they differ, delete the file, tell the user and stop. Otherwise install it, using any CPython 3.12 or newer that is not
 inside a virtual environment. On Linux the installation lives in `/opt` and needs root, so ask the user to run it or to allow
-`sudo`:
+`sudo`, and link the command afterwards with
+`sudo ln -sf /opt/docker-test-toolkit/bin/docker-test-toolkit /usr/local/bin/docker-test-toolkit`:
 
 ```sh
 python3.12 -I docker-test-toolkit.pyz install --json
