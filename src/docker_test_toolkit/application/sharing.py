@@ -464,7 +464,8 @@ def write_verdict(
     negative one: a request's render can vary between its runs (an environment-chosen bind source), so a clean run
     proves nothing about the variant that broke a rule, and a positive over it would admit that variant shared and
     refuse it. A negative stays until the share rules change or the key is evicted. Beyond
-    ``VERDICTS_PER_PROJECT`` keys the oldest tick is evicted. Raises OSError or ResourceError when it cannot write.
+    ``VERDICTS_PER_PROJECT`` keys, entries of another clock origin are evicted first, then the oldest tick of this
+    one. Raises OSError or ResourceError when it cannot write.
     """
     path = verdict_path(registry, project_id)
     verdicts = _stored_verdicts(path) or {}
@@ -472,9 +473,12 @@ def write_verdict(
     if shareable and existing is not None and existing["shareable"] is False:
         return
     verdicts[key] = {"shareable": shareable, "reason": reason, "run_id": run_id, "origin": origin, "tick_ns": tick_ns}
-    for oldest in sorted(verdicts, key=lambda name: verdicts[name]["tick_ns"])[
-        : max(0, len(verdicts) - VERDICTS_PER_PROJECT)
-    ]:
+    # Ticks restart low after a reboot, so an earlier boot's entries go first; the key just written never does.
+    candidates = sorted(
+        (name for name in verdicts if name != key),
+        key=lambda name: (verdicts[name]["origin"] == origin, verdicts[name]["tick_ns"]),
+    )
+    for oldest in candidates[: max(0, len(verdicts) - VERDICTS_PER_PROJECT)]:
         del verdicts[oldest]
     path.parent.mkdir(mode=0o700, exist_ok=True)
     atomic_json(path, {"schema": 1, "rules": SHARE_RULES_VERSION, "verdicts": verdicts})

@@ -144,6 +144,20 @@ def test_verdict_store_evicts_oldest_tick_beyond_256_keys(tmp_path: Path) -> Non
     assert mode == 0o600
 
 
+def test_eviction_takes_other_clock_origins_before_the_current_one(tmp_path: Path) -> None:
+    """After a reboot the ticks restart low: the store keeps this boot's verdicts and evicts the earlier boot's."""
+    for index in range(sharing.VERDICTS_PER_PROJECT):
+        _write(tmp_path, f"old-{index}", origin="before-reboot", tick_ns=10_000 + index)
+
+    _write(tmp_path, "negative", shareable=False, origin="after-reboot", tick_ns=1)
+    _write(tmp_path, "later", origin="after-reboot", tick_ns=2)
+
+    verdicts = _verdicts(tmp_path)
+    assert len(verdicts) == sharing.VERDICTS_PER_PROJECT
+    assert verdicts["negative"]["shareable"] is False and "later" in verdicts
+    assert sum(item["origin"] == "before-reboot" for item in verdicts.values()) == sharing.VERDICTS_PER_PROJECT - 2
+
+
 def test_write_verdict_takes_no_lock(tmp_path: Path) -> None:
     from docker_test_toolkit.factories.testing import install_lock_observer
 
