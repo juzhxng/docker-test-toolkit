@@ -87,7 +87,7 @@ container's own namespace id reads as another clock, as after a reboot.
 0.7.6 changes no record, receipt or queue format. A finished mutation dispatched through the shim whose output is not
 UTF-8 or exceeds 1 MiB now goes through the promotion path like any finished child (receipt `complete` or `child_failure` by its exit code,
 shim exit = the child's) where it was always `unresolved` (receipt exit 5, shim exit 7 `incomplete_cleanup`);
-reconciliation can still leave it `unresolved`. Its relayed output is cut to 384 KiB per stream, so a valid stream
+reconciliation can still leave it `unresolved`. Its relayed output is cut to 384 KiB per stream plus one marker line, so a valid stream
 between 384 KiB and 1 MiB, relayed whole before, now arrives cut around a marker. The toolkit's own cleanup commands
 (leave, recovery, retention, archive export) keep the strict reading. Receipt exit codes 2 and 5 can be synthetic: a refusal before the child
 gives state `failed` with 2 or 5, and a reconciliation failure after it can replace the real code with 5. The shim's

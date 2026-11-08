@@ -166,8 +166,8 @@ owns the copy's retention from then on.
 The shim relays a Docker mutation's stdout, stderr and exit code unredacted. Two things can differ from the child's
 bytes: bytes that are not UTF-8 are replaced (U+FFFD), and a stream whose relay would exceed 384 KiB keeps up to 192 KiB
 of relayed text from its start and from its end around one line
-`[docker-test-toolkit: <stream> cut from N bytes to its first and last 192 KiB]`, so both streams fit a 1 MiB capture
-buffer together. Commands that stream (`run`, `compose run`, `compose exec`, `compose cp`) reach you untouched;
+`[docker-test-toolkit: <stream> cut from N bytes to its first and last 192 KiB]` (each cut can also show one replacement
+character where it split a character), so both streams fit a 1 MiB capture buffer together. Commands that stream (`run`, `compose run`, `compose exec`, `compose cp`) reach you untouched;
 observation and `docker exec` output is exact or refused. A timed-out mutation whose output the toolkit captures, or a
 Compose file that does not render, names the end of the child's stderr in the toolkit's message. Adapters that report a failed command's
 stderr should keep a redacted tail of it.
