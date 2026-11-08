@@ -193,9 +193,24 @@ def publish(
     return "published"
 
 
-def release_notes(version: str, commit: str, run_id: int, canary: str, archive: Path) -> str:
-    """The release notes: identity, the CI run, the canary reference, and the hash table."""
+def changes_since_previous_tag(path: Path, tag: str) -> str:
+    """The subjects of the commits ``tag`` adds to the previous tag, or to the start of history, as a Markdown list."""
+    try:
+        revisions = f"{_git(path, 'describe', '--tags', '--abbrev=0', '--match', 'v*', f'{tag}^')}..{tag}"
+    except subprocess.CalledProcessError:
+        revisions = tag
+    return _git(path, "log", "--no-merges", "--format=- %s", revisions)
+
+
+def release_notes(version: str, commit: str, run_id: int, canary: str, archive: Path, changes: str) -> str:
+    """The release notes: what changed, then identity, the CI run, the canary reference, and the hash table."""
     lines = [
+        "## What changed",
+        "",
+        changes,
+        "",
+        "## Provenance",
+        "",
         f"docker-test-toolkit {version} from commit {commit}.",
         "",
         f"- CI run {run_id} passed every required job ({', '.join(REQUIRED_JOBS)}).",
@@ -230,7 +245,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if options.dry_run:
                 print(f"dry run: {options.tag} at {local.commit} is publishable (CI run {run_id})")
                 return 0
-            notes = release_notes(options.tag.removeprefix("v"), local.commit, run_id, options.canary, archive)
+            changes = changes_since_previous_tag(path, options.tag)
+            notes = release_notes(options.tag.removeprefix("v"), local.commit, run_id, options.canary, archive, changes)
             outcome = publish(
                 options.tag,
                 archive,
