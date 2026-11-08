@@ -22,8 +22,8 @@ you change it:
 ```yaml
 - name: Install docker-test-toolkit
   env:
-    VERSION: v0.7.5
-    SHA256: 64204e16c47373988bbcaa2ef5fa8a84c2791d8a1c70d8d8a097c4c15652893a
+    VERSION: v0.7.6
+    SHA256: 6b30bcb178dbc353204d6e1bcdc1c1106bc0933afbcf210a52d71c5f8a45fa2b
   run: |
     curl -fsSLO "https://github.com/juzhxng/docker-test-toolkit/releases/download/$VERSION/docker-test-toolkit.pyz"
     echo "$SHA256  docker-test-toolkit.pyz" | sha256sum -c -
