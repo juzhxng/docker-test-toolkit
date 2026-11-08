@@ -67,12 +67,15 @@ DISCOVERY_VERSION_FORMAT = "{{.Client.Version}} {{json .Server.Components}}"  # 
 def _relay_stream(raw: bytes, name: str) -> str:
     """Return one captured stream as text for the caller: invalid bytes replaced, and within ``RELAY_STREAM_BYTES``
     of UTF-8, else its first and last half of that around one marker line."""
-    text = raw.decode("utf-8", "replace") if len(raw) <= RELAY_STREAM_BYTES else None
-    if text is not None and len(text.encode()) <= RELAY_STREAM_BYTES:
-        return text
     half = RELAY_STREAM_BYTES // 2
-    head = raw[:half].decode("utf-8", "replace").encode()[:half].decode("utf-8", "ignore")
-    tail = raw[max(half, len(raw) - half) :].decode("utf-8", "replace").encode()[-half:].decode("utf-8", "ignore")
+    if len(raw) > RELAY_STREAM_BYTES:  # never decode a large stream whole: only its two ends are relayed
+        start, end = raw[:half].decode("utf-8", "replace"), raw[-half:].decode("utf-8", "replace")
+    else:
+        start = end = raw.decode("utf-8", "replace")
+        if len(start.encode()) <= RELAY_STREAM_BYTES:
+            return start
+    head = start.encode()[:half].decode("utf-8", "ignore")  # replacement can triple the size: cut the encoded text
+    tail = end.encode()[-half:].decode("utf-8", "ignore")
     marker = f"[docker-test-toolkit: {name} cut from {len(raw)} bytes to its first and last {half // 1024} KiB]"
     return f"{head}\n{marker}\n{tail}"
 
