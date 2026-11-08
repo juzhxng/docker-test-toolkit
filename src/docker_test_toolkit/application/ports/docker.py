@@ -86,10 +86,14 @@ class DockerPort(Protocol):
         environment: Mapping[str, str] | None = None,
         stream_output: bool = False,
         hold_fd: int | None = None,
+        relay_output: bool = False,
     ) -> DockerResult:
         """Execute bounded argv; main-thread streaming inherits I/O and forwards signals.
 
         ``hold_fd`` is a descriptor the Docker child inherits (the image lock), held until the child exits.
+        ``relay_output`` marks output that is only relayed to the caller, never parsed: it is returned with invalid
+        bytes replaced and each stream bounded around a marker instead of being refused, and a timeout names the end of
+        the child's stderr. Streaming ignores it.
         """
         ...
 

@@ -14,6 +14,7 @@ import pytest
 
 from docker_test_toolkit import ArtifactIdentity, ExternalDockerResource, PhaseBudget, RunSpec
 from docker_test_toolkit.application import lifecycle
+from docker_test_toolkit.application.docker_commands import ClassifiedDockerCommand
 from docker_test_toolkit.application.ports.docker import DockerPort
 from docker_test_toolkit.domain.errors import (
     IncompleteCleanup,
@@ -242,6 +243,7 @@ class FakeDockerPort(DockerPort):
         environment=None,
         stream_output: bool = False,
         hold_fd: int | None = None,
+        relay_output: bool = False,
     ) -> DockerResult:
         assert 0 < timeout_seconds <= 14_400
         self.held_fds.append(hold_fd)
@@ -2102,6 +2104,60 @@ def _entered_run(tmp_path: Path, fake: FakeDockerPort):
     _ = handle.docker_context
     descriptor = json.loads((handle.private_root / "docker-authority.json").read_text())
     return handle, descriptor
+
+
+class _FailedRender:
+    """A Compose client whose render fails, printing a resolved value on stdout and its error on stderr."""
+
+    def __init__(self, stderr: str) -> None:
+        self.stderr = stderr
+
+    def execute(self, argv: tuple[str, ...], *, timeout_seconds: float) -> DockerResult:
+        return DockerResult(1, "SECRET=hunter2\n", self.stderr)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    (
+        ("", "Compose configuration could not be rendered before mutation."),
+        (
+            "yaml: line 3: mapping values are not allowed\n",
+            "Compose configuration could not be rendered before mutation; compose said: "
+            "yaml: line 3: mapping values are not allowed",
+        ),
+    ),
+)
+def test_a_failed_render_names_composes_stderr_never_its_stdout(stderr: str, expected: str) -> None:
+    command = ClassifiedDockerCommand(
+        "compose", ("compose", "--project-name", "p", "up"), {"subcommand_index": 3, "subcommand": "up"}
+    )
+
+    with pytest.raises(InvalidInput) as raised:
+        lifecycle._prepare_compose_receipt(_FailedRender(stderr), command, {})
+
+    assert str(raised.value) == expected
+
+
+class _TimedOutNetworkCreate(FakeDockerPort):
+    """A daemon whose network creation outlives the dispatch deadline, as the adapter reports it when relaying."""
+
+    def execute(self, argv: tuple[str, ...], **options) -> DockerResult:
+        if argv[:2] == ("network", "create"):
+            raise InfrastructureFailure(
+                "Docker operation did not complete within its bounded execution; stderr ended: fatal: registry"
+            )
+        return super().execute(argv, **options)
+
+
+def test_a_timed_out_mutation_names_the_stderr_tail_and_stays_unresolved(tmp_path: Path) -> None:
+    fake = _TimedOutNetworkCreate()
+    handle, descriptor = _entered_run(tmp_path, fake)
+
+    with pytest.raises(IncompleteCleanup, match=r"the command did not finish: .*stderr ended: fatal: registry"):
+        lifecycle.dispatch_docker(handle._context, descriptor, fake, ("network", "create"))
+
+    receipt = list(json.loads(handle._context.record.read_text())["docker_receipts"].values())[-1]
+    assert (receipt["state"], receipt["result"]["exit_code"]) == ("unresolved", 5)
 
 
 def _prepare_owned_removal(

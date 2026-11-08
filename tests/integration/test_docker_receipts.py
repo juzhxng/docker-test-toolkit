@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from docker_test_toolkit import ArtifactIdentity, ExternalDockerResource, PhaseBudget, RunSpec
-from docker_test_toolkit.adapters.outbound.docker import DockerCliAdapter
+from docker_test_toolkit.adapters.outbound.docker import RELAY_STREAM_BYTES, DockerCliAdapter
 from docker_test_toolkit.application import lifecycle
 from docker_test_toolkit.application.api import RunHandle
 from docker_test_toolkit.application.recovery import Context, atomic_json, load, lock
@@ -78,6 +78,7 @@ esac
 
 def _stateful_fake_docker(path: Path) -> Path:
     state = path / "container.json"
+    network_state = path / "network.json"
     mode_file = path / "mode"
     records = path.parent / "state/registry"
     docker = path / "docker"
@@ -91,6 +92,7 @@ import sys
 import time
 
 state = pathlib.Path({str(state)!r})
+network_state = pathlib.Path({str(network_state)!r})
 mode_file = pathlib.Path({str(mode_file)!r})
 records = pathlib.Path({str(records)!r})
 args = sys.argv[1:]
@@ -178,6 +180,40 @@ else:
             raise SystemExit(1)
         if state.exists():
             state.unlink()
+        print(command[-1])
+    elif command[:2] == ["network", "create"]:
+        name = command[-1]
+        labels = {{}}
+        for index, value in enumerate(command):
+            if value == "--label":
+                key, label_value = command[index + 1].split("=", 1)
+                labels[key] = label_value
+        if mode == "stderr-invalid":
+            sys.stderr.buffer.write(b"\\xffboom")
+            raise SystemExit(1)
+        if mode == "stderr-huge":
+            sys.stderr.buffer.write(b"x" * (1024 * 1024 + 1))
+            raise SystemExit(1)
+        network_state.write_text(json.dumps({{
+            "Id": "b" * 64, "Name": name, "Created": "2026-09-16T00:00:00Z", "Labels": labels,
+        }}))
+        if mode == "both-huge":
+            sys.stdout.buffer.write(b"\\xff" * (2 * 1024 * 1024))
+            sys.stderr.buffer.write(b"\\xff" * (2 * 1024 * 1024))
+        else:
+            print("b" * 64)
+    elif command[:2] == ["network", "inspect"]:
+        if mode == "inspect-invalid":
+            sys.stdout.buffer.write(b"\\xff")
+            raise SystemExit(0)
+        if not network_state.exists():
+            print("[]")
+            print(f"Error response from daemon: network {{command[-1]}} not found", file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps([json.loads(network_state.read_text())]))
+    elif command[:2] == ["network", "rm"]:
+        if network_state.exists():
+            network_state.unlink()
         print(command[-1])
     else:
         raise SystemExit(71)
@@ -359,6 +395,92 @@ def test_private_shim_journals_before_promoting_and_removing_exact_container(
     assert removed.returncode == 0, removed.stderr
     assert record["owned_resources"]["containers"][container_id]["state"] == "removed"
     assert list(record["docker_receipts"].values())[-1]["state"] == "removed"
+    handle.leave()
+
+
+def _entered_shim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    binary_directory = tmp_path / "bin"
+    binary_directory.mkdir()
+    _stateful_fake_docker(binary_directory)
+    monkeypatch.setenv("PATH", f"{binary_directory}{os.pathsep}{os.environ['PATH']}")
+    handle = (
+        build_test_services(tmp_path / "state")
+        .open_run(_spec(project), docker_factory=_configure_fake_docker(binary_directory))
+        .enter()
+    )
+    return handle, tmp_path / "state/registry/runs" / f"{handle.run_id}.json", binary_directory / "mode"
+
+
+def _shim(handle, *argv: str) -> subprocess.CompletedProcess[bytes]:
+    context = handle.docker_context
+    return subprocess.run([context.executable, *argv], env=dict(context.environment), capture_output=True, check=False)
+
+
+def _last_receipt(record_path: Path) -> dict:
+    return list(json.loads(record_path.read_text())["docker_receipts"].values())[-1]
+
+
+def test_shim_relays_a_failing_childs_invalid_bytes_and_finishes_the_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle, record_path, mode_file = _entered_shim(tmp_path, monkeypatch)
+    mode_file.write_text("stderr-invalid")
+
+    created = _shim(handle, "network", "create")
+
+    receipt = _last_receipt(record_path)
+    assert created.returncode == 1
+    assert created.stderr.decode().endswith("\n\ufffdboom")  # after the interpreter's own warning lines
+    assert (receipt["state"], receipt["result"]) == ("failed", {"category": "child_failure", "exit_code": 1})
+    handle.leave()
+
+
+def test_shim_relays_an_over_limit_failing_child_with_a_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    handle, record_path, mode_file = _entered_shim(tmp_path, monkeypatch)
+    mode_file.write_text("stderr-huge")
+
+    created = _shim(handle, "network", "create")
+
+    receipt = _last_receipt(record_path)
+    assert created.returncode == 1
+    assert (receipt["state"], receipt["result"]) == ("failed", {"category": "child_failure", "exit_code": 1})
+    assert "[docker-test-toolkit: stderr cut from 1048577 bytes" in created.stderr.decode()
+    relayed = created.stderr[created.stderr.index(b"xxxx") :]  # the child's own bytes, after interpreter warnings
+    assert len(relayed) <= RELAY_STREAM_BYTES + 128
+    handle.leave()
+
+
+def test_shim_relays_an_over_limit_passing_child_and_promotes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handle, record_path, mode_file = _entered_shim(tmp_path, monkeypatch)
+    mode_file.write_text("both-huge")
+
+    created = _shim(handle, "network", "create")
+
+    receipt = _last_receipt(record_path)
+    record = json.loads(record_path.read_text())
+    assert created.returncode == 0, created.stderr[-300:]
+    assert (receipt["state"], receipt["result"]) == ("promoted", {"category": "complete", "exit_code": 0})
+    assert record["owned_resources"]["networks"]["b" * 64]["state"] == "present"
+    assert b"stdout cut from" in created.stdout and b"stderr cut from" in created.stderr
+    assert len(created.stdout) + len(created.stderr) < 1024 * 1024
+    mode_file.write_text("")
+    handle.leave()
+
+
+def test_shim_observation_output_stays_strict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    handle, _record_path, mode_file = _entered_shim(tmp_path, monkeypatch)
+    assert _shim(handle, "network", "create").returncode == 0
+    mode_file.write_text("inspect-invalid")
+
+    observed = _shim(handle, "network", "inspect", "b" * 64)
+
+    assert (observed.returncode, observed.stdout) == (5, b"")
+    assert b"not valid UTF-8" in observed.stderr
+    mode_file.write_text("")
     handle.leave()
 
 

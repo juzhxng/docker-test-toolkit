@@ -41,12 +41,21 @@ def world(tmp_path: Path) -> Iterator[_World]:
         yield built
 
 
+RECORDED = "; this request is now recorded as not shareable, so its next run is exclusive while that verdict is kept"
+
+
+def _recorded_refusal(error: InvalidInput, rule: str) -> None:
+    """The refusal names the rule, says the verdict was recorded and asks for a rerun, then gives the reason."""
+    assert str(error).startswith(f"Shared run breaks share rule {rule}{RECORDED}; rerun it. Reason: ")
+
+
 def _refused(world: _World, handle: RunHandle, *argv: str, rule: str) -> None:
     """A shared run's violation: the negative verdict names the rule, the refusal follows, no receipt is appended."""
     before = _receipts(handle)
     with pytest.raises(InvalidInput) as raised:
         _dispatch(world, handle, *argv)
     assert raised.value.reason == "share-rule"
+    _recorded_refusal(raised.value, rule)
     assert _receipts(handle) == before
     verdict = _verdict(world, handle)
     assert verdict is not None and verdict["shareable"] is False and rule in verdict["reason"]
@@ -165,6 +174,7 @@ def test_transition_into_smaller_phase_with_owned_container_refused(world: _Worl
         lifecycle.transition_phase(shared._lease, "small")
 
     assert raised.value.reason == "share-rule"
+    _recorded_refusal(raised.value, "R12")
     assert _record(shared)["grant"]["phase"] == "tests"
     assert "R12" in _verdict(world, shared)["reason"]
     _leave(world, shared)
@@ -209,10 +219,14 @@ def _unwritable(store: Path) -> Iterator[None]:
 def test_verdict_write_failure_still_refuses(world: _World) -> None:
     shared = world.open(shared=True)
     store = sharing.verdict_path(world.registry, shared._context.project.project_id).parent
-    with _unwritable(store), pytest.raises(InvalidInput, match="not recorded") as raised:
+    with _unwritable(store), pytest.raises(InvalidInput) as raised:
         _dispatch(world, shared, "run", IMAGE_ID, "true")
 
     assert raised.value.reason == "share-rule"
+    assert str(raised.value).startswith(
+        "Shared run breaks share rule R9; the verdict could not be recorded; rerun it. "
+    )
+    assert "recorded as not shareable" not in str(raised.value)
     assert _verdict(world, shared)["shareable"] is True  # the seed survived: nothing was written
     _leave(world, shared)
 
@@ -439,6 +453,7 @@ def test_retained_restart_over_budget_refused(world: _World) -> None:
         lifecycle.restart_retained_resources(shared._lease)
 
     assert raised.value.reason == "share-rule"
+    _recorded_refusal(raised.value, "R12")
     assert "R12" in _verdict(world, shared)["reason"]
     assert not any(command[:2] == ("container", "start") for command in world.fake.commands[len(before) :])
     _leave(world, shared)
@@ -692,12 +707,15 @@ def test_concurrent_starts_of_one_run_cannot_both_pass_r12(world: _World) -> Non
         install_failpoint(None)
 
     assert raised.value.reason == "share-rule" and "R12" in _verdict(world, shared)["reason"]
+    _recorded_refusal(raised.value, "R12")
     running = [
         cid for cid, item in world.fake.containers.items() if item["State"]["Running"] and cid in (first, second)
     ]
     assert running == [second]  # B, a single dispatcher, passed both checks: its own receipt never counts against it
     states = [item["state"] for item in _record(shared)["docker_receipts"].values()]
     assert states.count("failed") == 1 and not {"pending", "unresolved"} & set(states)  # A's receipt is resolved
+    failed = next(item for item in _record(shared)["docker_receipts"].values() if item["state"] == "failed")
+    assert failed["result"]["exit_code"] == 2  # synthetic: the child never started
     _leave(world, shared)
 
 
@@ -713,6 +731,7 @@ def test_a_compose_file_after_the_subcommand_is_bound_and_judged(world: _World, 
         _dispatch(world, shared, "compose", "--file", str(compose), "up", "--detach", f"--file={missing}")
 
     assert raised.value.reason == "share-rule"
+    _recorded_refusal(raised.value, "R15")
     verdict = _verdict(world, shared)
     assert verdict is not None and verdict["shareable"] is False and "R15" in verdict["reason"]
     _leave(world, shared)

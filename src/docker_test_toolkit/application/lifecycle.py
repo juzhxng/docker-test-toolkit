@@ -130,6 +130,7 @@ from docker_test_toolkit.domain.errors import (
     InfrastructureFailure,
     InvalidInput,
     ToolkitError,
+    stderr_tail,
 )
 from docker_test_toolkit.domain.models import (
     BUILDER_RELEASE_MIN_VERSION,
@@ -2588,7 +2589,10 @@ def _prepare_compose_receipt(
     hoisted, _understood = compose_trailing_globals(command.argv)
     rendered = adapter.execute((*command.argv[:index], *hoisted, "config", "--format", "json"), timeout_seconds=30)
     if rendered.exit_code:
-        raise InvalidInput("Compose configuration could not be rendered before mutation.")
+        # Compose's stderr names the error; its stdout holds resolved values and is never shown.
+        tail = stderr_tail(rendered.stderr)
+        message = "Compose configuration could not be rendered before mutation"
+        raise InvalidInput(f"{message}; compose said: {tail}" if tail else f"{message}.")
     try:
         config = json.loads(rendered.stdout, object_pairs_hook=unique_object)
     except ValueError as error:
@@ -3121,8 +3125,16 @@ def _refuse_or_record(context: RunContext, data: dict, verdict: ShareVerdict) ->
         _mark_share_unknown(data)
     failpoint("share-verdict-written")
     if _record_mode(data) == AdmissionMode.SHARED:
-        note = "" if recorded else " The verdict was not recorded."
-        raise InvalidInput(f"Shared run breaks share rule {verdict.rule}: {verdict.reason}.{note}", reason="share-rule")
+        # The rule and what happens next come first: the envelope cuts a long reason (an R10 bind path), not them.
+        outcome = (
+            "this request is now recorded as not shareable, so its next run is exclusive while that verdict is kept"
+            if recorded
+            else "the verdict could not be recorded"
+        )
+        raise InvalidInput(
+            f"Shared run breaks share rule {verdict.rule}; {outcome}; rerun it. Reason: {verdict.reason}.",
+            reason="share-rule",
+        )
 
 
 SHARE_UNKNOWN_MARKER = "share-unknown"
@@ -4121,7 +4133,7 @@ def _dispatch_classified(
             if not _validate_owned_identity(adapter, container):
                 raise InvalidInput("Owned container disappeared before network attachment.")
             child_started = True
-            result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd)
+            result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd, relay_output=True)
         elif command.kind == "container-create":
             image_id = command.plan["image_id"]
             if not isinstance(image_id, str):
@@ -4143,7 +4155,11 @@ def _dispatch_classified(
                     raise InvalidInput("Declared external image identity changed before mutation.")
             child_started = True
             result = adapter.execute(
-                command.argv, timeout_seconds=timeout, stream_output=command.blocking, hold_fd=hold_fd
+                command.argv,
+                timeout_seconds=timeout,
+                stream_output=command.blocking,
+                hold_fd=hold_fd,
+                relay_output=True,
             )
         elif command.kind == "build":
             try:  # the shared cache anchor is held until the build child returns
@@ -4151,7 +4167,7 @@ def _dispatch_classified(
                 if builder_resource is None or not _validate_owned_identity(adapter, builder_resource):
                     raise InvalidInput("Build requires the exact live owned builder.")
                 child_started = True
-                result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd)
+                result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd, relay_output=True)
             finally:
                 released = _close_cache_fail_open(held)
         elif command.kind.endswith("-rm"):
@@ -4162,13 +4178,17 @@ def _dispatch_classified(
             exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=resource_kind == "builder")
             if exists:
                 child_started = True
-                result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd)
+                result = adapter.execute(command.argv, timeout_seconds=timeout, hold_fd=hold_fd, relay_output=True)
             else:
                 result = DockerResult(0, "", "")
         else:
             child_started = True
             result = adapter.execute(
-                command.argv, timeout_seconds=timeout, stream_output=command.blocking, hold_fd=hold_fd
+                command.argv,
+                timeout_seconds=timeout,
+                stream_output=command.blocking,
+                hold_fd=hold_fd,
+                relay_output=True,
             )
         current = _load_run(context)
         state, resources = _promote_docker_result(adapter, receipt, result, current)

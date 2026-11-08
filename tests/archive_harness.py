@@ -42,7 +42,9 @@ class ExportingDockerPort(FakeDockerPort):
         output.chmod(0o600)
         return 0
 
-    def execute(self, argv, *, timeout_seconds, environment=None, stream_output=False, hold_fd=None):
+    def execute(
+        self, argv, *, timeout_seconds, environment=None, stream_output=False, hold_fd=None, relay_output=False
+    ):
         if argv[:2] == ("image", "pull"):
             item = {
                 "Id": self.image_id,
@@ -64,7 +66,11 @@ class ExportingDockerPort(FakeDockerPort):
             self.exports.append(argv)
             return DockerResult(self.save(Path(argv[3])), "", "")
         return super().execute(
-            argv, timeout_seconds=timeout_seconds, environment=environment, stream_output=stream_output
+            argv,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+            stream_output=stream_output,
+            relay_output=relay_output,
         )
 
 

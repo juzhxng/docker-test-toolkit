@@ -144,6 +144,43 @@ def test_verdict_store_evicts_oldest_tick_beyond_256_keys(tmp_path: Path) -> Non
     assert mode == 0o600
 
 
+def test_eviction_takes_other_clock_origins_before_the_current_one(tmp_path: Path) -> None:
+    """After a reboot the ticks restart low: the store keeps this boot's verdicts and evicts the earlier boot's."""
+    for index in range(sharing.VERDICTS_PER_PROJECT):
+        _write(tmp_path, f"old-{index}", shareable=False, origin="before-reboot", tick_ns=10_000 + index)
+
+    _write(tmp_path, "negative", shareable=False, origin="after-reboot", tick_ns=1)
+    _write(tmp_path, "later", origin="after-reboot", tick_ns=2)
+
+    verdicts = _verdicts(tmp_path)
+    assert len(verdicts) == sharing.VERDICTS_PER_PROJECT
+    assert verdicts["negative"]["shareable"] is False and "later" in verdicts
+    assert sum(item["origin"] == "before-reboot" for item in verdicts.values()) == sharing.VERDICTS_PER_PROJECT - 2
+
+
+def test_eviction_keeps_negatives_over_positives(tmp_path: Path) -> None:
+    for index in range(sharing.VERDICTS_PER_PROJECT // 2):
+        _write(tmp_path, f"negative-{index}", shareable=False, origin="before-reboot", tick_ns=index)
+        _write(tmp_path, f"positive-{index}", origin="after-reboot", tick_ns=1_000 + index)
+
+    _write(tmp_path, "new", origin="after-reboot", tick_ns=5_000)
+
+    verdicts = _verdicts(tmp_path)
+    assert "positive-0" not in verdicts and "new" in verdicts
+    assert sum(item["shareable"] is False for item in verdicts.values()) == sharing.VERDICTS_PER_PROJECT // 2
+
+
+def test_eviction_never_takes_the_key_being_written(tmp_path: Path) -> None:
+    for index in range(sharing.VERDICTS_PER_PROJECT):
+        _write(tmp_path, f"negative-{index}", shareable=False, tick_ns=100 + index)
+
+    _write(tmp_path, "lowest", tick_ns=1)  # a positive with the oldest tick: first in every order but its own write
+
+    verdicts = _verdicts(tmp_path)
+    assert "lowest" in verdicts and "negative-0" not in verdicts
+    assert len(verdicts) == sharing.VERDICTS_PER_PROJECT
+
+
 def test_write_verdict_takes_no_lock(tmp_path: Path) -> None:
     from docker_test_toolkit.factories.testing import install_lock_observer
 

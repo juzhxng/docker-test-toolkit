@@ -109,6 +109,22 @@ class IncompleteCleanup(ResourceError):
     category = "incomplete_cleanup"
 
 
+STDERR_TAIL_LIMIT = 200  # NOTE: characters of a child's stderr named in a toolkit error; Podman keeps 256 (podman.py)
+
+
+def stderr_tail(stderr: bytes | str | None) -> str:
+    """Return the end of a child's stderr for an error message: replacement-decoded, on one line, at most
+    ``STDERR_TAIL_LIMIT`` characters, ``""`` when there is none.
+
+    Only the last bytes are decoded, so a large partial stream is never decoded whole.
+    """
+    if not stderr:
+        return ""
+    window = stderr[-4 * STDERR_TAIL_LIMIT :]
+    text = window.decode("utf-8", "replace") if isinstance(window, bytes) else window
+    return text.replace("\r", " ").replace("\n", " ").strip()[-STDERR_TAIL_LIMIT:]
+
+
 class ArchiveRejected(InfrastructureFailure):
     """Report an archive export step that failed for a named, closed failure class."""
 

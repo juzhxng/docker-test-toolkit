@@ -42,6 +42,11 @@ sudo ln -sf /opt/docker-test-toolkit/bin/docker-test-toolkit /usr/local/bin/dock
 
 A root install leaves any other user locked out of the account's state.
 
+The toolkit looks for `docker` only in a fixed list of folders (`~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`
+and the system folders), never the caller's `PATH`. Docker Desktop's per-user `~/.docker/bin` is not among them: on a
+Mac where Desktop installed its command-line tools for the user, choose System under Settings → Advanced, or the
+install reports `probe_image: daemon-unavailable` and every run fails to find Docker.
+
 Install a release archive with a CPython 3.12 or newer that is not inside a virtual environment:
 
 ```sh
@@ -251,8 +256,11 @@ the account together. Nothing changes for adopters: they open runs as before.
 - **Share rules.** Before every Docker mutation of a shared run the toolkit checks the rendered command against the
   share rules (no fixed host ports, no host networking, shared namespaces or Docker's default bridge, no privileged or device access, no daemon
   socket, no writable bind of the checkout, hard memory limits, no `--scale` or watch, and the run's own budget). A
-  violation refuses the command with `share-rule` and records a negative verdict, so the next run of that request is
-  exclusive. An exclusive run never fails because of a share rule; it only records the verdict.
+  violation records a negative verdict and refuses the command with `share-rule`; the message names the rule, says
+  whether the verdict was recorded, asks for a rerun and ends with the reason. The next run of that request is
+  exclusive while the verdict is kept. The store holds 256 keys per project and evicts positives before negatives, an
+  earlier boot's entries before this boot's, then the oldest; a change of the share rules drops it. An exclusive run never fails because of a share rule; it only
+  records the verdict.
 - **Image lock.** `<account>/images.lock` serializes shared runs' builds, pulls, builder creation, cached-image binding
   and image removal; every Docker child launched under it inherits it, so it is released only when that child exits.
   Exclusive runs do not take it. Operator `cleanup project` and `cleanup session` take it without waiting, refuse

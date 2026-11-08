@@ -22,10 +22,11 @@ _AUTHORIZATION = re.compile(r"(?i)(authorization\s*:\s*(?:bearer|basic)\s+)[^\s]
 
 
 def _safe_message(error: BaseException) -> str:
-    message = str(error).replace("\r", " ").replace("\n", " ")[:512]
+    # Redact before cutting: a cut can split a credential past recognition, and redaction can lengthen the text.
+    message = str(error).replace("\r", " ").replace("\n", " ")
     message = _URL_CREDENTIAL.sub(r"\g<scheme><redacted>@", message)
     message = _QUERY_SECRET.sub(r"\1=<redacted>", message)
-    return _AUTHORIZATION.sub(r"\1<redacted>", message)
+    return _AUTHORIZATION.sub(r"\1<redacted>", message)[:512]
 
 
 def _error_category(error: BaseException, *, cleanup: bool = False) -> tuple[str, int, str]:
