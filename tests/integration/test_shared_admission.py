@@ -231,6 +231,8 @@ def test_cpu_only_coholder_shortfall_waits(tmp_path: Path) -> None:
     waiting = EnterThread(second)
     wait_until(lambda: second.status().state == "queued", message="the joiner queued")
     assert queue_phases(account)[second.run_id] == "queued"
+    # The reason is recorded only at the grant, so hold the first run for at least one full pass of the joiner.
+    _holds_for(1.5, lambda: queue_phases(account)[second.run_id] == "queued")
     first.leave()
     waiting.join(30)
 
