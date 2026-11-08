@@ -1058,9 +1058,14 @@ def test_a_host_decline_others_caused_fails_no_granted_run(
         _until(lambda: observed_after(_record(control, "a"), granted_a), message="A's first sample after its grant")
         b = _worker(root, large, control, "b", "hold", container=GIB // 2, host=4 * GIB, service=0)
         _wait(control / "entered-b.json", timeout=600)  # a host without about 6 GiB headroom waits here and fails
-        logged = [
-            grant for grant in sharing.read_grants(_account(root)) if grant.run_id == _record(control, "b")["run_id"]
-        ]
+        logged: list[sharing.Grant] = []
+
+        def b_logged() -> bool:  # the grants log is appended just after the grant B's requester can already see
+            run_id = _record(control, "b")["run_id"]
+            logged[:] = [grant for grant in sharing.read_grants(_account(root)) if grant.run_id == run_id]
+            return bool(logged)
+
+        _until(b_logged, timeout=30, message="B's grant in the grants log")
         assert len(logged) == 1 and logged[0].budget_bytes >= 4 * GIB
         # Setup check, not a skip: a host decline can only reach the hog's size where the headroom holds it; below
         # that, macOS compresses and swaps instead and no run declines.
