@@ -4363,8 +4363,12 @@ def _docker_receipts_terminal(data: dict) -> bool:
     return all(receipt["state"] not in {"pending", "unresolved"} for receipt in data["docker_receipts"].values())
 
 
-def _disowned_any_volume(data: dict) -> bool:
-    return any(is_disowned(volume) for volume in data["owned_resources"]["volumes"].values())
+def _disowned_anonymous_volume(data: dict) -> bool:
+    """Whether the run disowned an anonymous volume: the only kind ``container rm -v`` can delete."""
+    return any(
+        is_disowned(volume) and re.fullmatch(r"[0-9a-f]{64}", name)
+        for name, volume in data["owned_resources"]["volumes"].items()
+    )
 
 
 def _owned_removal_command(
@@ -4486,7 +4490,7 @@ def _reconcile_receipt(
                 if (key in receipt["plan"]) != (key in expected) or receipt["plan"].get(key) != expected.get(key):
                     raise ResourceError("Docker image removal receipt changed exact authority.")
         else:
-            argv = _owned_removal_command(kind, identity, keep_anonymous_volumes=_disowned_any_volume(data))
+            argv = _owned_removal_command(kind, identity, keep_anonymous_volumes=_disowned_anonymous_volume(data))
         result = adapter.execute(argv, timeout_seconds=30, hold_fd=hold_fd) if exists else DockerResult(0, "", "")
         state, resources = _promote_docker_result(adapter, receipt, result, data)
     _finish_docker_receipt(context, receipt, state, result, resources, deadline_ns)
@@ -5363,7 +5367,9 @@ def _remove_owned(
                 argv, image_plan = _image_removal(resource)
                 plan.update(image_plan)
             else:
-                argv = _owned_removal_command(kind, identity, keep_anonymous_volumes=_disowned_any_volume(current))
+                argv = _owned_removal_command(
+                    kind, identity, keep_anonymous_volumes=_disowned_anonymous_volume(current)
+                )
             _run_owned_mutation(context, argv, f"{kind}-rm", plan, deadline_ns, hold_fd)
 
 
@@ -11710,7 +11716,7 @@ def _require_disownable(data: dict, disown: tuple[tuple[str, str], ...]) -> None
         if (
             isinstance(builder, str)
             and builder in data["owned_resources"]["builders"]
-            and not is_disowned(data["owned_resources"]["builders"][builder])
+            and data["owned_resources"]["builders"][builder]["state"] != "removed"  # a removed builder deletes nothing
             and ("builder", builder) not in requested
         ):
             # removing the builder would delete its worker: a worker leaves the run only with its builder

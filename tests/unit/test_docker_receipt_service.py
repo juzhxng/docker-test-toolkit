@@ -4397,3 +4397,38 @@ def test_compose_promotion_records_an_oom_kill_of_a_new_container(tmp_path: Path
     record = _record(handle)
     assert record["infrastructure_failure"] == "container-oom"
     _end_after_oom(handle, descriptor, fake)
+
+
+def test_a_worker_whose_builder_is_already_removed_can_be_disowned_alone(tmp_path: Path) -> None:
+    """With its builder already gone, removing the builder cannot touch the worker: the worker alone may be disowned."""
+    fake = FakeDockerPort()
+    project = tmp_path / "project"
+    project.mkdir()
+    services = build_test_services(tmp_path / "state")
+    handle = services.open_run(_spec(project), docker_factory=lambda: fake, admit_docker=True).enter()
+    _ = handle.docker_context
+    descriptor = json.loads((handle.private_root / "docker-authority.json").read_text())
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("buildx", "create"))
+    builder_id, builder = next(iter(_record(handle)["owned_resources"]["builders"].items()))
+    worker_id = builder["evidence"]["buildkit_container_id"]
+    _edit_record(handle, lambda data: data["owned_resources"]["builders"][builder_id].update(state="removed"))
+    abandon_run(handle._context, services.root / "admission")
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+
+    assert _recover(services, handle, (("container", worker_id),)).state == "complete"
+    assert worker_id in fake.containers
+
+
+def test_a_disowned_named_volume_keeps_container_removal_with_its_anonymous_volumes(tmp_path: Path) -> None:
+    """Only a disowned anonymous volume can be deleted by ``rm -v``; a disowned named volume changes nothing else."""
+    fake = FakeDockerPort()
+    services, handle, _descriptor = _recovering_run(tmp_path, fake)
+    named = f"{handle.docker_context.compose_project}_data"
+    abandon_run(handle._context, services.root / "admission")
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+
+    assert _recover(services, handle, (("volume", named),)).state == "complete"
+
+    removals = [command for command in fake.commands if command[:2] == ("container", "rm")]
+    assert removals and all("-v" in command for command in removals)
+    assert named in fake.volumes

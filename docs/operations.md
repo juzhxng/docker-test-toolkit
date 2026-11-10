@@ -612,8 +612,8 @@ example a volume replaced by another one under its name, `run recover` can relea
   container control that targets one ends without a Docker call. The result lists every disowned resource under
   `disowned`.
 - A BuildKit worker container is disowned only together with its builder (removing the builder would delete the
-  worker); a disowned builder does not take its worker along, so list both. While the run has a disowned volume, its
-  containers are removed without `-v`, so a disowned anonymous volume is kept.
+  worker), unless the builder is already removed; a disowned builder does not take its worker along, so list both.
+  While the run has a disowned anonymous volume, its containers are removed without `-v`, so that volume is kept.
 - A network or volume still used by a disowned container cannot be removed; that refusal names it in
   `error.context.resource`. Add it to the next request; nothing is disowned implicitly.
 - A disowned object is the operator's from then on. `cleanup project` still lists, and on `--execute` removes, an
