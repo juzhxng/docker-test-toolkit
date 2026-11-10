@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from tests.integration.account_fixtures import abandon_run
 
 from docker_test_toolkit import ArtifactIdentity, ExternalDockerResource, PhaseBudget, RunSpec
 from docker_test_toolkit.application import lifecycle
+from docker_test_toolkit.domain.errors import ResourceError
 from docker_test_toolkit.factories.cli import bind_docker_adapter, build_docker_adapter
 from docker_test_toolkit.factories.testing import build_test_services
 
@@ -57,14 +59,15 @@ def _spec(project: Path) -> RunSpec:
     )
 
 
-def _entered(tmp_path: Path):
+def _entered(tmp_path: Path, *, volume: bool = False):
     """An entered run whose one service exposes a port, after ``compose up``; the Compose file is ``compose.yml``."""
     project = tmp_path / "project"
     project.mkdir()
     # ``expose`` without ``ports``: the running container reports {"6379/tcp": null}, the exited one {}
-    (project / "compose.yml").write_text(
-        f"services:\n  fixture:\n    image: {redis_id()}\n    expose:\n      - '6379'\n"
-    )
+    compose = f"services:\n  fixture:\n    image: {redis_id()}\n    expose:\n      - '6379'\n"
+    if volume:
+        compose += "    volumes:\n      - data:/data\nvolumes:\n  data: {}\n"
+    (project / "compose.yml").write_text(compose)
     services = build_test_services(tmp_path / "state")
     lifecycle.configure_docker_factories(build_docker_adapter, bind_docker_adapter)
     handle = services.open_run(_spec(project), admit_docker=True).enter()
@@ -179,4 +182,66 @@ def test_compose_run_tolerates_a_sibling_stopped_meanwhile(tmp_path: Path, redis
         assert handle.leave("passed").cleanup_outcome == "complete"
         assert _service_containers(compose_project) == []
     finally:
+        assert remove_run_leftovers(handle._context.project.state) == []
+
+
+def test_renamed_container_is_released_by_disowning_it_and_its_dependencies(tmp_path: Path, redis_image: None) -> None:
+    """A running service container renamed by someone else is no longer provably the run's: disown releases the run.
+
+    Its network and volume stay in use by it, so each removal is refused naming the object; disowning them too ends
+    the run, and every object stays on the daemon untouched.
+    """
+    services, handle, _project = _entered(tmp_path, volume=True)
+    compose_project = handle.docker_context.compose_project
+    [service] = _service_containers(compose_project)
+    foreign = f"dtt-e2e-foreign-{uuid.uuid4().hex[:8]}"
+    record = json.loads(handle._context.record.read_text())
+    network = next(iter(record["owned_resources"]["networks"]))
+    volume = next(iter(record["owned_resources"]["volumes"]))
+    try:
+        abandon_run(handle._context, services.root / "admission")
+        subprocess.run([_DOCKER, "rename", service, foreign], check=True, capture_output=True)
+
+        def recover(*disown: tuple[str, str]):
+            return lifecycle.recover_run(handle._context, disown=disown, _test_directory=services.root / "admission")
+
+        with pytest.raises(ResourceError) as refused:
+            recover()
+        assert refused.value.reason == "owned-identity-conflict"
+        assert (refused.value.details["conflict"]["identifier"], refused.value.details["conflict"]["keys"]) == (
+            service,
+            ["name"],
+        )
+        request = [("container", service)]
+        named = []
+        for _attempt in range(3):
+            try:
+                status = recover(*request)
+                break
+            except ResourceError as error:
+                resource = error.details["resource"]
+                named.append(resource["kind"])
+                request.append((resource["kind"], resource["identifier"]))
+        assert status.state == "complete"
+        assert sorted(named) == ["network", "volume"]
+        assert sorted(request) == sorted([("container", service), ("network", network), ("volume", volume)])
+
+        final = json.loads(handle._context.record.read_text())
+        assert all(
+            lifecycle._owned_entry(final, kind, identifier)["evidence"]["disowned"] for kind, identifier in request
+        )
+        assert lifecycle.quiescence_blockers(final) == ()
+        inspected = subprocess.run(
+            [_DOCKER, "inspect", "--format", "{{.Name}} {{.State.Running}}", service],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert inspected.stdout.split() == [f"/{foreign}", "true"]
+        assert subprocess.run([_DOCKER, "network", "inspect", network], capture_output=True).returncode == 0
+        assert subprocess.run([_DOCKER, "volume", "inspect", volume], capture_output=True).returncode == 0
+    finally:
+        subprocess.run([_DOCKER, "rm", "-f", "-v", service], check=False, capture_output=True)
+        subprocess.run([_DOCKER, "network", "rm", network], check=False, capture_output=True)
+        subprocess.run([_DOCKER, "volume", "rm", volume], check=False, capture_output=True)
         assert remove_run_leftovers(handle._context.project.state) == []
