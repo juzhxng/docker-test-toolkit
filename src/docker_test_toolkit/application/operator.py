@@ -47,6 +47,44 @@ def _one_shot_context(payload: dict) -> lifecycle.RunContext:
     return lifecycle.load_operator_context(json.dumps(locator, separators=(",", ":")))
 
 
+_DISOWN_KINDS = frozenset({"builder", "container", "image", "network", "volume"})
+_DISOWN_LIMIT = 64
+_INVALID_DISOWN = "The disown request must list at most 64 objects with a resource kind and a string identifier."
+
+
+def _disown_request(payload: dict) -> tuple[tuple[str, str], ...]:
+    """Read ``run recover``'s optional exact disown list; duplicates count once, other entry fields are ignored."""
+    entries = payload.get("disown", [])
+    if not isinstance(entries, list):
+        raise InvalidInput(_INVALID_DISOWN)
+    request: dict[tuple[str, str], None] = {}
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or entry.get("kind") not in _DISOWN_KINDS
+            or not isinstance(entry.get("identifier"), str)
+            or not entry["identifier"]
+        ):
+            raise InvalidInput(_INVALID_DISOWN)
+        request[(entry["kind"], entry["identifier"])] = None
+    if len(request) > _DISOWN_LIMIT:
+        raise InvalidInput(_INVALID_DISOWN)
+    return tuple(request)
+
+
+def _disowned_resources(record: dict) -> list[dict[str, str]]:
+    """Every resource the run record marks disowned, by kind then identifier."""
+    return sorted(
+        (
+            {"kind": item["kind"], "identifier": item["identifier"], "name": item["name"]}
+            for items in record["owned_resources"].values()
+            for item in items.values()
+            if item["evidence"].get("disowned") is True
+        ),
+        key=lambda item: (item["kind"], item["identifier"]),
+    )
+
+
 def _protocol_result() -> dict[str, object]:
     return {
         "version": TOOLKIT_VERSION,
@@ -429,9 +467,13 @@ def _execute(
     if command in {"run.recover", "run.release"}:
         context = _one_shot_context(payload)
         if command == "run.recover":
-            recovered = asdict(lifecycle.recover_run(context))
+            recovered = asdict(lifecycle.recover_run(context, disown=_disown_request(payload)))
             report = lifecycle.retention_after_release(context, None, "recovery")  # no lock is held here
-            return {**recovered, "retention": None if report is None else asdict(report)}
+            return {
+                **recovered,
+                "retention": None if report is None else asdict(report),
+                "disowned": _disowned_resources(lifecycle.load_run_record(context)),
+            }
         return asdict(lifecycle.release_run(context))
     if command == "resource.observe":
         payload = known_fields(

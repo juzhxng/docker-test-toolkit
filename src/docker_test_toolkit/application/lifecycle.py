@@ -2102,6 +2102,8 @@ def _compose_promotion(adapter, receipt: dict, result: DockerResult, data: dict)
     for container_id in identifiers:
         if not re.fullmatch(r"[0-9a-f]{64}", container_id):
             return "unresolved", []
+        if container_id in known_containers and _is_disowned(known_containers[container_id]):
+            continue  # no longer the run's: not inspected, not emitted
         inspection = adapter.inspect_exact(ExactInspection("container", container_id))
         item = inspection.attributes
         config = item.get("Config")
@@ -2230,7 +2232,8 @@ def _compose_promotion(adapter, receipt: dict, result: DockerResult, data: dict)
             )
         )
     planned_volumes = set(plan["volumes"])
-    for name in sorted(planned_volumes | attached_volumes):
+    disowned_volumes = {name for name, item in data["owned_resources"]["volumes"].items() if _is_disowned(item)}
+    for name in sorted((planned_volumes | attached_volumes) - disowned_volumes):
         inspection = adapter.inspect_exact(ExactInspection("volume", name))
         if not inspection.exists:
             continue
@@ -2273,7 +2276,11 @@ def _compose_promotion(adapter, receipt: dict, result: DockerResult, data: dict)
     for owned in data["owned_resources"].values():
         for previous in owned.values():
             identity = (previous["kind"], previous["identifier"])
-            if previous["evidence"].get("compose_project") != project or identity in live_identities:
+            if (
+                previous["evidence"].get("compose_project") != project
+                or identity in live_identities
+                or _is_disowned(previous)
+            ):
                 continue
             if adapter.inspect_exact(ExactInspection(*identity)).exists:
                 if previous["kind"] == "volume" and _validate_owned_identity(adapter, previous):
@@ -3823,9 +3830,14 @@ def _apply_receipt_result(
         current["plan"]["cache"] = {**cache, "finished_ns": NativeClock().read()}
     for resource in resources:
         plural = "builders" if resource["kind"] == "builder" else f"{resource['kind']}s"
+        existing = data["owned_resources"][plural].get(resource["identifier"])
         builder_name = resource["evidence"].get("builder")
+        builder = data["owned_resources"]["builders"].get(builder_name) if isinstance(builder_name, str) else None
+        if (existing is not None and _is_disowned(existing)) or (
+            resource["kind"] == "container" and builder is not None and _is_disowned(builder)
+        ):
+            continue  # a disowned object, or the worker of a disowned builder, is never re-adopted
         if resource["kind"] == "container" and isinstance(builder_name, str):
-            builder = data["owned_resources"]["builders"].get(builder_name)
             if builder is None:
                 raise ResourceError("BuildKit worker promotion contradicts its owned builder.")
             if builder["evidence"].get("buildkit_container_id") not in {None, resource["identifier"]}:
@@ -3835,7 +3847,6 @@ def _apply_receipt_result(
                     ["evidence.buildkit_container_id"],
                 )
             builder["evidence"]["buildkit_container_id"] = resource["identifier"]
-        existing = data["owned_resources"][plural].get(resource["identifier"])
         if existing is not None:
             replaced = (
                 existing["state"] == "removed"
@@ -3893,10 +3904,7 @@ def _apply_receipt_result(
     if receipt["kind"] == "container-rm" and state == "removed":
         container_id = receipt["plan"]["container_id"]
         data["owned_resources"]["containers"][container_id]["state"] = "removed"
-        for history in data["endpoints"].values():
-            for endpoint in history:
-                if endpoint["active"] and endpoint["container_id"] == container_id:
-                    endpoint.update(active=False, retired_revision=data["revision"] + 1)
+        _retire_container_endpoints(data, container_id, data["revision"] + 1)
     elif receipt["kind"] in {"builder-rm", "image-rm", "network-rm", "volume-rm"} and state == "removed":
         kind = receipt["kind"].removesuffix("-rm")
         plural = "builders" if kind == "builder" else f"{kind}s"
@@ -3907,10 +3915,7 @@ def _apply_receipt_result(
             "running" if receipt["kind"] == "container-start" else "stopped"
         )
         if receipt["kind"] == "container-stop":
-            for history in data["endpoints"].values():
-                for endpoint in history:
-                    if endpoint["active"] and endpoint["container_id"] == container_id:
-                        endpoint.update(active=False, retired_revision=data["revision"] + 1)
+            _retire_container_endpoints(data, container_id, data["revision"] + 1)
     elif receipt["kind"] == "compose" and state == "removed":
         for items in data["owned_resources"].values():
             for resource in items.values():
@@ -4425,6 +4430,10 @@ def _reconcile_receipt(
     context: RunContext, data: dict, receipt: dict, deadline_ns: int | None, hold_fd: int | None = None
 ) -> None:
     """Promote or finish one interrupted non-archive receipt through its exact key (``_reconcile_docker_receipt``)."""
+    if _targets_disowned(data, receipt):
+        # Its target is no longer the run's: whatever the command did left the run nothing it owns. No Docker call.
+        _finish_docker_receipt(context, receipt, "failed", DockerResult(5, "", ""), [], deadline_ns)
+        return
     adapter = _bound_docker(data)
     recorded = receipt["result"]
     result = DockerResult(recorded["exit_code"], "", "") if recorded is not None else DockerResult(5, "", "")
@@ -11103,6 +11112,16 @@ def _reconcile_pending_compose(context: RunContext, deadline_ns: int | None = No
         atomic_json(context.record, current)
 
 
+def _controlled_targets(data: dict, operation: dict) -> tuple[str, ...]:
+    """An interrupted container control's targets, without those the run has disowned since."""
+    containers = data["owned_resources"]["containers"]
+    return tuple(
+        target
+        for target in operation["plan"]["targets"]
+        if target not in containers or not _is_disowned(containers[target])
+    )
+
+
 def _reconcile_pending_container_control(context: RunContext, deadline_ns: int | None = None) -> None:
     """Record the observed result of an interrupted exact stop/start without compensating."""
     with _locked_run(context, deadline_ns):
@@ -11132,7 +11151,7 @@ def _reconcile_pending_container_control(context: RunContext, deadline_ns: int |
         docker = _bound_docker(data)
         if docker.observe_daemon().daemon_id != data["grant"]["daemon_id"]:
             raise ResourceError("Docker daemon changed before container control reconciliation.")
-        observed = _observe_owned_control(data, docker, tuple(operation["plan"]["targets"]), deadline)
+        observed = _observe_owned_control(data, docker, _controlled_targets(data, operation), deadline)
     oom = any(
         item["observation"]["oom_killed"] or item["observation"]["oom_events"]
         for item in observed["containers"].values()
@@ -11144,7 +11163,7 @@ def _reconcile_pending_container_control(context: RunContext, deadline_ns: int |
         if current["resources"]:
             current["resources"] = observed
         else:
-            _publish_owned_control(current, observed, tuple(operation["plan"]["targets"]))
+            _publish_owned_control(current, observed, _controlled_targets(current, operation))
         current["revision"] += 1
         current["last_operation"] = {
             **operation,
@@ -11610,6 +11629,7 @@ def recover_run(
     *,
     drain_live_consumers: bool = True,
     takeover_attempt: str | None = None,
+    disown: tuple[tuple[str, str], ...] = (),
     _test_directory: Path | None = None,
     _deadline_ns: int | None = None,
 ) -> RunStatus:
@@ -11621,9 +11641,14 @@ def recover_run(
     them instead. Every blocking lock wait and every phase boundary honors one recovery deadline (the leave budget plus
     60 s, or the test-only ``_deadline_ns``); when it expires the error names the run and the last completed phase, and
     the claim and ``recovery_actor`` stay so a later recoverer resumes after the claimant is proven dead.
+
+    ``disown`` names exact ``(kind, identifier)`` resources of this run that stop being the run's: they are marked in
+    recovery's first write and left on the daemon untouched. It applies only to the resource-cleaning recovery of a
+    run that does not end retained; anywhere else, or for a resource the run does not own, it raises ``InvalidInput``
+    before anything is written.
     """
     try:
-        return _recover_run(context, drain_live_consumers, takeover_attempt, _test_directory, _deadline_ns)
+        return _recover_run(context, drain_live_consumers, takeover_attempt, disown, _test_directory, _deadline_ns)
     except ResourceBusy as error:
         if error.reason != "lock-deadline":
             raise
@@ -11633,16 +11658,82 @@ def recover_run(
         ) from error
 
 
+def _grant_bears_resources(data: dict) -> bool:
+    return bool(
+        any(data.get(key) for key in ("resources", "endpoints", "consumers", "pending_operation", "last_operation"))
+        or data["docker_receipts"]
+        or any(data["owned_resources"].values())
+    )
+
+
+def _is_disowned(resource: dict) -> bool:
+    return resource["evidence"].get("disowned") is True
+
+
+def _require_disownable(data: dict, disown: tuple[tuple[str, str], ...]) -> None:
+    """Each entry must be a resource this run records as its own (not removed), or one it already disowned."""
+    for kind, identifier in disown:
+        resource = data["owned_resources"]["builders" if kind == "builder" else f"{kind}s"].get(identifier)
+        if resource is None or (resource["state"] == "removed" and not _is_disowned(resource)):
+            raise InvalidInput(f"Disown names a resource this run does not own: {kind} {identifier}.")
+
+
+_EXACT_TARGET_KINDS = frozenset(
+    {"builder-rm", "container-rm", "image-rm", "network-rm", "volume-rm", "container-start", "container-stop"}
+)
+
+
+def _targets_disowned(data: dict, receipt: dict) -> bool:
+    """Whether an exact control or removal receipt targets a resource the run has disowned."""
+    if receipt["kind"] not in _EXACT_TARGET_KINDS:
+        return False
+    _kind, plural, identifier = _owned_target(receipt["kind"], receipt["plan"])
+    resource = data["owned_resources"][plural].get(identifier)
+    return resource is not None and _is_disowned(resource)
+
+
+def _owned_entry(data: dict, kind: str, identifier: str) -> dict:
+    return data["owned_resources"]["builders" if kind == "builder" else f"{kind}s"][identifier]
+
+
+def _apply_disown(data: dict, disown: tuple[tuple[str, str], ...]) -> None:
+    """Mark each requested resource as no longer the run's: ``removed`` with ``evidence.disowned``; never re-owned."""
+    marked = [entry for entry in disown if not _is_disowned(_owned_entry(data, *entry))]
+    if not marked:
+        return
+    data["revision"] += 1
+    for kind, identifier in marked:
+        resource = _owned_entry(data, kind, identifier)
+        resource["state"] = "removed"
+        resource["evidence"]["disowned"] = True
+        if kind == "container":
+            _retire_container_endpoints(data, identifier, data["revision"])
+
+
+def _retire_container_endpoints(data: dict, container_id: str, revision: int) -> None:
+    for history in data["endpoints"].values():
+        for endpoint in history:
+            if endpoint["active"] and endpoint["container_id"] == container_id:
+                endpoint.update(active=False, retired_revision=revision)
+
+
 def _recover_run(
     context: RunContext,
     drain_live_consumers: bool,
     takeover_attempt: str | None,
+    disown: tuple[tuple[str, str], ...],
     _test_directory: Path | None,
     _deadline_ns: int | None,
 ) -> RunStatus:
     # Revocation may need the account lock. Finish it before taking this run lock
     # again; no nested run locks and no private deletion while either actor lives.
     data = _load_run(context)
+    _require_disownable(data, disown)  # a fast fail; checked again under the run lock before the marker write
+    resource_cleaning = bool(data["generation"]) and data.get("retained_grant") is None and _grant_bears_resources(data)
+    if disown and (not resource_cleaning or data["retain"]):
+        raise InvalidInput(
+            "A disown request applies only to the resource-cleaning recovery of a run that is not retained."
+        )
     deadline_ns = (
         _deadline_ns
         if _deadline_ns is not None
@@ -11661,16 +11752,13 @@ def _recover_run(
             _deadline_ns=deadline_ns,
         )
     if data["generation"]:
-        if (
-            any(data.get(key) for key in ("resources", "endpoints", "consumers", "pending_operation", "last_operation"))
-            or data["docker_receipts"]
-            or any(data["owned_resources"].values())
-        ):
+        if _grant_bears_resources(data):
             return _recover_resource_grant(
                 context,
                 _test_directory=_test_directory,
                 drain_live_consumers=drain_live_consumers,
                 takeover_attempt=takeover_attempt,
+                disown=disown,
                 deadline_ns=deadline_ns,
             )
         recovered = _recover_empty_grant(
@@ -12013,6 +12101,7 @@ def _recover_resource_grant(
     _test_directory: Path | None = None,
     drain_live_consumers: bool = True,
     takeover_attempt: str | None = None,
+    disown: tuple[tuple[str, str], ...] = (),
     deadline_ns: int | None = None,
 ) -> RunStatus:
     """Drain an ended guardian's exact recorded consumers/resources and publish the terminal record.
@@ -12039,7 +12128,10 @@ def _recover_resource_grant(
             data = _load_run(context)
             if data["account_directory"] != str(directory):
                 raise ResourceError("Recovery cannot move original authority to another account domain.")
+            _require_disownable(data, disown)
             if data.get("recovery_outcome") == "complete":
+                if any(not _is_disowned(_owned_entry(data, *entry)) for entry in disown):
+                    raise InvalidInput("A disown request cannot change a run whose recovery is complete.")
                 return _retire_completed_resource_grant(context, directory, data, deadline_ns)
             pending = data["pending_operation"]
             if pending is not None and pending["kind"] not in _RECONCILABLE_OPERATION_KINDS:
@@ -12071,6 +12163,8 @@ def _recover_resource_grant(
                 state = _load_queue(directory, anchor)
                 entry = state.entries.get(context.run_id)
                 if release_shape:
+                    if disown:
+                        raise InvalidInput("A disown request does not apply to a release recovery.")
                     if _release_authority_changed(state, context):
                         raise ResourceError("Release authority changed before exact recovery.")
                     _hold_capacity_fence(held, account)  # release recovery excludes every other run
@@ -12084,6 +12178,7 @@ def _recover_resource_grant(
                     raise ResourceError("Original grant lost its account recovery reference.")
                 if not release_recovery:
                     _begin_recovery_record(data, actor, False, None)
+                    _apply_disown(data, disown)  # in the same write: a crash leaves all markers or none
                     atomic_json(context.record, data)
                     failpoint("recovery-record-written")
                     if entry is not None and entry.takeover is not None:

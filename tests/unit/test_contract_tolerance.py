@@ -358,9 +358,12 @@ def locator(monkeypatch: pytest.MonkeyPatch) -> dict:
     state = Path("/state")
     monkeypatch.setattr(operator_module, "registry_directory", lambda: state)
     loaded: list = []
-    monkeypatch.setattr(lifecycle, "_load_run", lambda context: (loaded.append(context), {})[1])
+    record = {"owned_resources": {kind: {} for kind in ("builders", "containers", "images", "networks", "volumes")}}
+    monkeypatch.setattr(lifecycle, "_load_run", lambda context: (loaded.append(context), record)[1])
     for service in ("run_status", "recover_run", "release_run"):
-        monkeypatch.setattr(lifecycle, service, lambda context, _name=service: {"service": _name, "context": context})
+        monkeypatch.setattr(
+            lifecycle, service, lambda context, _name=service, **_: {"service": _name, "context": context}
+        )
     monkeypatch.setattr(operator_module, "asdict", lambda value: value)
     return {
         "project_root": "/project",

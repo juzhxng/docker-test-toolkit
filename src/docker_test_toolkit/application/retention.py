@@ -453,6 +453,7 @@ def _retain_builder_volumes(account: Path, registry: Path, docker: DockerPort, b
     known: set[str] = set()
     promoted: list[tuple[str, str, object]] = []
     unpromoted: set[str] = set()
+    disowned: set[str] = set()  # a disowned builder is no longer the run's: its volume is never deleted for it
     for _name, _run_id, _bytes, raw in run_files(registry):
         if not isinstance(raw, dict):
             continue
@@ -470,14 +471,20 @@ def _retain_builder_volumes(account: Path, registry: Path, docker: DockerPort, b
             continue  # a live run's builder, or one recorded on another daemon: never touched from this one
         evidenced = set()
         for builder_name, builder in builders.items():
+            if isinstance(builder, dict) and (builder.get("evidence") or {}).get("disowned") is True:
+                disowned.add(buildkit_state_volume(builder_name))
+                continue
             volume = (builder.get("evidence") or {}).get("state_volume") if isinstance(builder, dict) else None
             if isinstance(volume, dict) and volume.get("name") == buildkit_state_volume(builder_name):
                 promoted.append((builder_name, volume["name"], volume.get("created_at")))
                 evidenced.add(volume["name"])
         unpromoted |= set(planned) | volumes
         unpromoted -= evidenced
+    unpromoted -= disowned
     listed = docker.execute(("volume", "ls", "-q"), timeout_seconds=budget.timeout_s())
     present = set(listed.stdout.split()) if listed.exit_code == 0 else set()
+    for name in sorted(disowned & present):
+        report.skip(name, "disowned")
     for name in sorted(unpromoted & present):
         report.skip(name, "unpromoted-builder")
     unrecorded = sorted(name for name in present if _LEGACY_VOLUME.fullmatch(name) and name not in known)

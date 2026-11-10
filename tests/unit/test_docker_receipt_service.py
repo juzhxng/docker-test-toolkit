@@ -739,6 +739,7 @@ def _spec(
     container_bytes: int = 2 * 1024**3,
     daemon_cpus: int = 2,
     capacity: int = 1,
+    retain: bool = False,
 ) -> RunSpec:
     external_resources = (
         [ExternalDockerResource("network", "e" * 64, "external", "connect_owned_container")] if capacity == 1 else []
@@ -771,6 +772,7 @@ def _spec(
         external_resources=tuple(external_resources),
         wait_seconds=20,
         capacity=capacity,
+        retain=retain,
     )
 
 
@@ -2852,13 +2854,14 @@ def test_compose_run_refuses_a_generated_name_collision_before_execution(
 _COMPOSE_RUN = ("compose", "run", "--rm", "--no-deps", "--entrypoint", "true", "fixture", "true")
 
 
-def _recovering_run(tmp_path: Path, fake: FakeDockerPort):
+def _recovering_run(tmp_path: Path, fake: FakeDockerPort, *, retain: bool = False):
     """An entered run with one exposed-port service and a completed ``compose up``."""
-    fake.compose_ports = {"8080/tcp": None}  # exposed, not published: recorded as ``{"8080/tcp": []}``
+    if not fake.compose_ports:
+        fake.compose_ports = {"8080/tcp": None}  # exposed, not published: recorded as ``{"8080/tcp": []}``
     project = tmp_path / "project"
     project.mkdir()
     services = build_test_services(tmp_path / "state")
-    handle = services.open_run(_spec(project), docker_factory=lambda: fake, admit_docker=True).enter()
+    handle = services.open_run(_spec(project, retain=retain), docker_factory=lambda: fake, admit_docker=True).enter()
     _ = handle.docker_context
     descriptor = json.loads((handle.private_root / "docker-authority.json").read_text())
     lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "up", "--detach"))
@@ -3971,3 +3974,324 @@ def test_reconciliation_that_stays_unresolved_names_its_target(tmp_path: Path, m
     fake.in_use.clear()
     lifecycle._reconcile_docker_receipt(handle._context)
     assert handle.leave("failed").cleanup_outcome == "complete"
+
+
+class _Crash(Exception):
+    """Stops a recovery at a failpoint, as a kill there would."""
+
+
+def _stuck_by_a_renamed_container(tmp_path: Path, fake: FakeDockerPort, **arrange):
+    """A killed run whose pending compose run now finds its service container renamed: plain recovery refuses."""
+    services, handle, descriptor = _recovering_run(tmp_path, fake, **arrange)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+    _reopen_last_receipt(handle)
+    fake.containers["c" * 64]["Name"] = "/renamed"
+    _abandon(services, handle)
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+    return services, handle
+
+
+def _recover(services, handle, disown: tuple[tuple[str, str], ...] = ()):
+    return lifecycle.recover_run(handle._context, disown=disown, _test_directory=services.root / "admission")
+
+
+def test_disown_is_written_with_the_recovery_actor_before_any_docker_call(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    services, handle = _stuck_by_a_renamed_container(tmp_path, fake)
+    commands_before = len(fake.commands)
+    seen: dict = {}
+
+    def at_first_section_end(stage: str) -> None:
+        if stage == "recovery-first-section-released":
+            seen.update(record=_record(handle), commands=len(fake.commands))
+            raise _Crash
+
+    install_failpoint(at_first_section_end)
+    try:
+        with pytest.raises(_Crash):
+            _recover(services, handle, (("container", "c" * 64),))
+    finally:
+        install_failpoint(None)
+
+    container = seen["record"]["owned_resources"]["containers"]["c" * 64]
+    assert (container["state"], container["evidence"]["disowned"]) == ("removed", True)
+    assert seen["record"]["recovery_actor"] is not None
+    assert seen["commands"] == commands_before
+
+
+@pytest.mark.parametrize(
+    "request_",
+    [
+        (("container", "0" * 64),),
+        (("container", "VOLUME"),),  # a recorded volume's name sent as a container
+        (("network", "REMOVED"),),
+    ],
+    ids=["unknown", "other-kind", "already-removed"],
+)
+def test_disown_refuses_what_the_run_does_not_own(tmp_path: Path, request_: tuple) -> None:
+    fake = FakeDockerPort()
+    services, handle = _stuck_by_a_renamed_container(tmp_path, fake)
+    record = _record(handle)
+    volume = next(iter(record["owned_resources"]["volumes"]))
+    network = next(iter(record["owned_resources"]["networks"]))
+    if request_[0][1] == "REMOVED":
+        _edit_record(handle, lambda data: data["owned_resources"]["networks"][network].update(state="removed"))
+    request_ = tuple((kind, {"VOLUME": volume, "REMOVED": network}.get(name, name)) for kind, name in request_)
+    before = handle._context.record.read_bytes()
+
+    with pytest.raises(InvalidInput, match="does not own"):
+        _recover(services, handle, request_)
+
+    assert handle._context.record.read_bytes() == before
+
+
+def test_disown_is_refused_for_a_retained_run(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    services, handle = _stuck_by_a_renamed_container(tmp_path, fake, retain=True)
+    before = handle._context.record.read_bytes()
+
+    with pytest.raises(InvalidInput, match="disown"):
+        _recover(services, handle, (("container", "c" * 64),))
+
+    assert handle._context.record.read_bytes() == before
+
+
+def test_disown_is_refused_for_a_run_that_never_reached_a_grant(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    project = tmp_path / "project"
+    project.mkdir()
+    services = build_test_services(tmp_path / "state")
+    run = services.open_run(_spec(project), docker_factory=lambda: fake, admit_docker=True)
+    before = run._context.record.read_bytes()
+
+    with pytest.raises(InvalidInput, match=r"(?i)disown"):
+        lifecycle.recover_run(
+            run._context, disown=(("container", "c" * 64),), _test_directory=services.root / "admission"
+        )
+
+    assert run._context.record.read_bytes() == before
+    run.cancel()
+
+
+def test_disown_retires_the_endpoint_of_a_disowned_container(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    fake.compose_ports = {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "28080"}]}
+    services, handle, descriptor = _recovering_run(tmp_path, fake)
+    handle.publish_endpoint("fixture", "http", 8080)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+    _reopen_last_receipt(handle)
+    fake.containers["c" * 64]["Name"] = "/renamed"
+    _abandon(services, handle)
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+
+    assert _recover(services, handle, (("container", "c" * 64),)).state == "complete"
+
+    assert _record(handle)["endpoints"]["fixture"][-1]["active"] is False
+
+
+def _released(services, handle, request: tuple, match: str) -> ResourceError:
+    """Plain recovery refuses naming the resource; recovery with the request completes."""
+    with pytest.raises(ResourceError, match=match) as refused:
+        _recover(services, handle)
+    assert _recover(services, handle, request).state == "complete"
+    record = _record(handle)
+    for kind, identifier in request:
+        assert _owned_entry(record, kind, identifier)["evidence"]["disowned"] is True
+    return refused.value
+
+
+def _owned_entry(record: dict, kind: str, identifier: str) -> dict:
+    return record["owned_resources"]["builders" if kind == "builder" else f"{kind}s"][identifier]
+
+
+def test_renamed_container_is_released_by_disown(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    services, handle = _stuck_by_a_renamed_container(tmp_path, fake)
+    kept = copy.deepcopy(fake.containers["c" * 64])
+
+    refused = _released(services, handle, (("container", "c" * 64),), "collides")
+
+    assert refused.details["conflict"]["identifier"] == "c" * 64
+    assert fake.containers["c" * 64] == kept
+    assert not any(command[:2] == ("container", "rm") and command[-1] == "c" * 64 for command in fake.commands)
+
+
+def test_cleanup_conflict_is_released_by_disown(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    services, handle, _descriptor = _recovering_run(tmp_path, fake)
+    volume = f"{handle.docker_context.compose_project}_data"
+    fake.volumes[volume]["CreatedAt"] = "another"
+    kept = copy.deepcopy(fake.volumes[volume])
+    _abandon(services, handle)
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+
+    refused = _released(services, handle, (("volume", volume),), "Owned volume identity changed")
+
+    assert refused.details["conflict"]["keys"] == ["evidence.created"]
+    assert fake.volumes[volume] == kept
+
+
+def test_recreated_volume_is_released_by_disown(tmp_path: Path) -> None:
+    """S4: the foreign volume under the recorded name is skipped by promotion and never re-adopted."""
+    fake = FakeDockerPort()
+    services, handle, descriptor = _recovering_run(tmp_path, fake)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+    _reopen_last_receipt(handle)
+    volume = f"{handle.docker_context.compose_project}_data"
+    fake.volumes[volume].update(CreatedAt="another", Labels={})
+    kept = copy.deepcopy(fake.volumes[volume])
+    _abandon(services, handle)
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+
+    _released(services, handle, (("volume", volume),), "Owned volume identity changed")
+
+    assert fake.volumes[volume] == kept
+    assert _record(handle)["owned_resources"]["volumes"][volume]["evidence"]["created"] != "another"
+
+
+def test_open_removal_receipt_of_a_disowned_resource_closes_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An earlier recovery left a removal unresolved; with its target disowned it closes without a Docker call."""
+    fake = FakeDockerPort()
+    services, handle, _descriptor = _recovering_run(tmp_path, fake)
+    network = next(iter(_record(handle)["owned_resources"]["networks"]))
+    _abandon(services, handle)
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+    fake.in_use.add(network)
+    with pytest.raises(ResourceError, match="cleanup result is unresolved"):
+        _recover(services, handle)
+    fake.networks[network]["Created"] = "another"
+
+    refused = _released(services, handle, (("network", network),), "Owned network identity changed")
+
+    receipt = next(
+        item
+        for item in _record(handle)["docker_receipts"].values()
+        if item["kind"] == "network-rm" and item["plan"]["network_id"] == network
+    )
+    assert (receipt["state"], receipt["result"]["exit_code"]) == ("failed", 5)
+    assert refused.details["conflict"]["identifier"] == network
+    assert network in fake.networks
+
+
+def test_dependency_in_use_is_named_then_released_by_disown(tmp_path: Path) -> None:
+    """A recorded network still used by a disowned container stays in use: it is named, then disowned too."""
+    fake = FakeDockerPort()
+    services, handle = _stuck_by_a_renamed_container(tmp_path, fake)
+    network = next(iter(_record(handle)["owned_resources"]["networks"]))
+    fake.in_use.add(network)
+
+    with pytest.raises(ResourceError, match="unresolved") as refused:
+        _recover(services, handle, (("container", "c" * 64),))
+    assert refused.value.details["resource"] == {"kind": "network", "identifier": network}
+
+    assert _recover(services, handle, (("container", "c" * 64), ("network", network))).state == "complete"
+    assert network in fake.networks
+
+
+def test_second_conflict_not_requested_still_refuses(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    fake.compose_services = ("fixture", "second")
+    services, handle = _stuck_by_a_renamed_container(tmp_path, fake)
+    fake.containers["d" * 64]["Name"] = "/renamed-too"
+
+    with pytest.raises(ResourceError, match="collides") as refused:
+        _recover(services, handle, (("container", "c" * 64),))
+
+    assert refused.value.details["conflict"]["identifier"] == "d" * 64
+    assert _record(handle)["owned_resources"]["containers"]["c" * 64]["evidence"]["disowned"] is True
+    assert _recover(services, handle, (("container", "d" * 64),)).state == "complete"
+
+
+def test_crash_after_the_marker_write_resumes_without_touching_it(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    services, handle = _stuck_by_a_renamed_container(tmp_path, fake)
+    kept = copy.deepcopy(fake.containers["c" * 64])
+
+    def crash(stage: str) -> None:
+        if stage == "recovery-first-section-released":
+            raise _Crash
+
+    install_failpoint(crash)
+    try:
+        with pytest.raises(_Crash):
+            _recover(services, handle, (("container", "c" * 64),))
+    finally:
+        install_failpoint(None)
+
+    assert _recover(services, handle).state == "complete"  # a plain rerun: the marker is durable
+    assert fake.containers["c" * 64] == kept
+    assert _recover(services, handle).state == "complete"  # and a further one changes nothing
+
+
+def test_disowned_buildkit_worker_is_not_adopted(tmp_path: Path) -> None:
+    """A promotion that observes the worker of a disowned builder leaves the recorded worker entry as it is."""
+    fake = FakeDockerPort()
+    handle, descriptor = _entered_run(tmp_path, fake)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("buildx", "create"))
+    record = _record(handle)
+    builder_id, builder = next(iter(record["owned_resources"]["builders"].items()))
+    worker_id = builder["evidence"]["buildkit_container_id"]
+    receipt = next(item for item in record["docker_receipts"].values() if item["kind"] == "builder-create")
+
+    def disown_and_reopen(data: dict) -> None:
+        lifecycle._apply_disown(data, (("builder", builder_id),))
+        data["docker_receipts"][receipt["id"]].update(state="pending", result=None, resources=[])
+
+    pending = _edit_record(handle, disown_and_reopen)["docker_receipts"][receipt["id"]]
+    worker = {**record["owned_resources"]["containers"][worker_id], "state": "stopped"}
+    lifecycle._finish_docker_receipt(handle._context, pending, "promoted", DockerResult(0, "", ""), [worker])
+
+    assert (
+        _record(handle)["owned_resources"]["containers"][worker_id]
+        == record["owned_resources"]["containers"][worker_id]
+    )
+
+
+def test_pending_container_control_drops_a_disowned_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run killed during an exact stop whose target then changed: disowning the target lets recovery finish."""
+    fake = FakeDockerPort()
+    fake.compose_services = ("caller", "target")
+    project = tmp_path / "project"
+    project.mkdir()
+    services = build_test_services(tmp_path / "state")
+    handle = services.open_run(
+        _spec(project, services=fake.compose_services), docker_factory=lambda: fake, admit_docker=True
+    ).enter()
+    _ = handle.docker_context
+    descriptor = json.loads((handle.private_root / "docker-authority.json").read_text())
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "up", "--detach"))
+    target_id = "d" * 64
+
+    def interrupt_stop(data: dict) -> None:
+        data["revision"] += 1
+        data["pending_operation"] = {
+            "id": "55555555-5555-4555-8555-555555555555",
+            "kind": "container-control",
+            "generation": data["generation"],
+            "revision": data["revision"],
+            "actor": data["guardian"],
+            "deadline": asdict(lifecycle.Deadline.after(lifecycle.NativeClock(), 30)),
+            "plan": {
+                "action": "stop",
+                "targets": [target_id],
+                "expected": {target_id: {"started_at": "started-0", "restart_count": 0}},
+                "request_sha256": "e" * 64,
+            },
+        }
+
+    _edit_record(handle, interrupt_stop)
+    fake.containers[target_id]["Name"] = "/renamed"
+    _abandon(services, handle)
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+    monkeypatch.setattr(lifecycle, "observe_container", _observe_fake_container)  # as the file's other control tests
+
+    with pytest.raises(ResourceError):
+        _recover(services, handle)
+    assert _recover(services, handle, (("container", target_id),)).state == "complete"
+
+    record = _record(handle)
+    assert record["pending_operation"] is None
+    assert record["last_operation"]["outcome"] == "failed"
+    assert target_id in fake.containers
