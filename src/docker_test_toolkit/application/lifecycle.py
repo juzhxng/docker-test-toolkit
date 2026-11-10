@@ -34,7 +34,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Callable, ParamSpec, TextIO, TypeVar, cast
+from typing import BinaryIO, Callable, ParamSpec, TextIO, TypeGuard, TypeVar, cast
 
 from docker_test_toolkit.application import admission as account_queue
 from docker_test_toolkit.application import build_cache, image_archive, retention
@@ -3709,6 +3709,13 @@ def _identity_conflict(sentence: str, resource: dict, keys: Iterable[str]) -> Re
     )
 
 
+def _is_identity_conflict(error: BaseException) -> TypeGuard[ResourceError]:
+    return isinstance(error, ResourceError) and error.reason == "owned-identity-conflict"
+
+
+_ABSENT = object()
+
+
 def _evidence_differences(recorded: dict, observed: dict, *, ignore: Iterable[str] = ()) -> list[str]:
     """Return the paths where two resource entries differ: ``kind``, ``name``, then each top-level evidence key."""
     paths = [key for key in ("kind", "name") if recorded.get(key) != observed.get(key)]
@@ -3720,9 +3727,6 @@ def _evidence_differences(recorded: dict, observed: dict, *, ignore: Iterable[st
         if recorded["evidence"].get(key, _ABSENT) != observed["evidence"].get(key, _ABSENT)
     ]
     return paths
-
-
-_ABSENT = object()
 
 
 def _first_sight_of_oom(data: dict, recorded: dict, observed: dict) -> bool:
@@ -4296,7 +4300,7 @@ def _dispatch_classified(
                 context, receipt, "failed", DockerResult(5, "", ""), [], cache=_failed_build_cache(cache_plan)
             )
             raise
-        conflict = error if isinstance(error, ResourceError) and error.reason == "owned-identity-conflict" else None
+        conflict = error if _is_identity_conflict(error) else None
         step = "the command did not finish" if result is None else "reconciling its result failed"
         # Toolkit errors carry fixed texts; an OS error is named by its type, since its text may hold paths.
         unresolved_cause = f"{step}: {type(error).__name__ if isinstance(error, OSError) else error}"
@@ -4436,9 +4440,7 @@ def _reconcile_receipt(
             state, resources = "failed", []
     removal_kinds = {"builder-rm", "container-rm", "image-rm", "network-rm", "volume-rm"}
     if state == "unresolved" and receipt["kind"] in removal_kinds:
-        kind = receipt["kind"].removesuffix("-rm")
-        identity = cast(str, receipt["plan"][f"{kind}_id"])
-        plural = "builders" if kind == "builder" else f"{kind}s"
+        kind, plural, identity = _owned_target(receipt["kind"], receipt["plan"])
         resource = data["owned_resources"][plural][identity]
         exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=kind == "builder")
         if (
@@ -4460,15 +4462,11 @@ def _reconcile_receipt(
         result = adapter.execute(argv, timeout_seconds=30, hold_fd=hold_fd) if exists else DockerResult(0, "", "")
         state, resources = _promote_docker_result(adapter, receipt, result, data)
     _finish_docker_receipt(context, receipt, state, result, resources, deadline_ns)
-    if state == "unresolved" and receipt["kind"] in removal_kinds:
-        kind = receipt["kind"].removesuffix("-rm")
-        identifier = receipt["plan"][f"{kind}_id"]
-        raise ResourceError(
-            f"Docker mutation remains unresolved after exact reconciliation. Resource: {kind} {identifier}.",
-            details={"resource": {"kind": kind, "identifier": identifier}},
-        )
     if state == "unresolved":
-        raise ResourceError("Docker mutation remains unresolved after exact reconciliation.")
+        sentence = "Docker mutation remains unresolved after exact reconciliation."
+        if receipt["kind"] in removal_kinds:
+            raise _unresolved_on(*_owned_target(receipt["kind"], receipt["plan"])[::2], sentence)
+        raise ResourceError(sentence)
 
 
 # --- Archive export: ``image-save`` -------------------------------------------------------------------------
@@ -5210,6 +5208,22 @@ def _image_identity_paths(adapter, resource: dict, item: dict) -> list[str]:
     return [path for path, differs in checks if differs]
 
 
+def _owned_target(kind: str, plan: dict) -> tuple[str, str, str]:
+    """Return the resource kind, its ``owned_resources`` key and the identifier an owned mutation receipt targets."""
+    removal = kind.endswith("-rm")
+    resource_kind = kind.removesuffix("-rm") if removal else "container"
+    plural = "builders" if resource_kind == "builder" else f"{resource_kind}s"
+    return resource_kind, plural, str(plan[f"{resource_kind}_id" if removal else "container_id"])
+
+
+def _unresolved_on(kind: str, identifier: str, sentence: str) -> ResourceError:
+    """Name the target of an owned mutation that stayed unresolved, so an operator can act on exactly it."""
+    return ResourceError(
+        f"{sentence} Resource: {kind} {identifier}.",
+        details={"resource": {"kind": kind, "identifier": identifier}},
+    )
+
+
 def _run_owned_mutation(
     context: RunContext,
     argv: tuple[str, ...],
@@ -5229,18 +5243,11 @@ def _run_owned_mutation(
     )
     adapter = _bound_docker(data)
     timeout = max(0.001, deadline.remaining_ns(NativeClock()) / 1_000_000_000)
-    resource_kind = kind.removesuffix("-rm").removeprefix("container-") if kind.endswith("-rm") else "container"
-    plural = "builders" if resource_kind == "builder" else f"{resource_kind}s"
-    target = str(plan[f"{resource_kind}_id" if kind.endswith("-rm") else "container_id"])
-    resource = data["owned_resources"][plural][target]
-    before_command: ResourceError | None = None
+    resource_kind, plural, target = _owned_target(kind, plan)
+    result: DockerResult | None = None
     try:
-        try:
-            exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=resource_kind == "builder")
-        except ResourceError as error:
-            if error.reason == "owned-identity-conflict":
-                before_command = error
-            raise
+        resource = data["owned_resources"][plural][target]
+        exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=resource_kind == "builder")
         if not exists and kind.endswith("-rm"):
             result = DockerResult(0, "", "")
         else:
@@ -5250,7 +5257,7 @@ def _run_owned_mutation(
         current = _load_run(context)
         state, resources = _promote_docker_result(adapter, receipt, result, current)
     except (InfrastructureFailure, OSError, ResourceError) as error:
-        if error is before_command:
+        if result is None and _is_identity_conflict(error):
             # Nothing ran: the receipt ends failed, so it does not block a recovery that disowns the resource.
             _finish_docker_receipt(context, receipt, "failed", DockerResult(5, "", ""), [], deadline_ns)
             raise
@@ -5258,10 +5265,7 @@ def _run_owned_mutation(
         state, resources = "unresolved", []
     _finish_docker_receipt(context, receipt, state, result, resources, deadline_ns)
     if state == "unresolved":
-        raise ResourceError(
-            f"Exact Docker cleanup result is unresolved. Resource: {resource_kind} {target}.",
-            details={"resource": {"kind": resource_kind, "identifier": target}},
-        )
+        raise _unresolved_on(resource_kind, target, "Exact Docker cleanup result is unresolved.")
 
 
 def _stop_owned_docker_resources(context: RunContext, deadline_ns: int | None = None) -> None:
