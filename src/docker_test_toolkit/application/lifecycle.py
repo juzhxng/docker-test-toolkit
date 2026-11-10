@@ -3691,10 +3691,10 @@ def _first_sight_of_oom(data: dict, recorded: dict, observed: dict) -> bool:
     """
     seen = observed["evidence"].get("control") or {}
     known = recorded["evidence"].get("control") or {}
-    same_generation = all(known.get(key) == seen.get(key) for key in ("started_at", "restart_count"))
+    keys = ("started_at", "restart_count", "oom_killed")
     return (
         seen.get("oom_killed") is True
-        and not (same_generation and known.get("oom_killed") is True)
+        and tuple(known.get(key) for key in keys) != tuple(seen.get(key) for key in keys)
         and data["recovery_actor"] is None
         and data["state"] in ("active", "stopping")
         and data["infrastructure_failure"] is None
@@ -3789,8 +3789,8 @@ def _finish_receipt_locked(
                 )
                 and set(existing["evidence"].get("repo_tags", [])) <= set(resource["evidence"]["repo_tags"])
             )
-            # A compose receipt re-observes every container of its project; only the start generation, state and port
-            # map may have changed since the run recorded it (a restart, a stop, an engine restart).
+            # A compose receipt re-observes every container of its project; only its volatile evidence (start
+            # generation and port map) may have changed since it was recorded: a restart, a stop, an engine restart.
             container_refresh = (
                 receipt["kind"] in {"compose", "compose-run"}
                 and same_identity

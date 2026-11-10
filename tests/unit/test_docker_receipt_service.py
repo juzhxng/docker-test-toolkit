@@ -33,6 +33,7 @@ from docker_test_toolkit.domain.models import (
 )
 from docker_test_toolkit.factories.testing import build_test_services, install_failpoint
 from tests.integration.account_fixtures import (
+    abandon_run,
     current_identity,
     dead_identity,
     kill_guardian,
@@ -2861,22 +2862,30 @@ def _recovering_run(tmp_path: Path, fake: FakeDockerPort):
     return services, handle, descriptor
 
 
+def _record(handle) -> dict:
+    return json.loads(handle._context.record.read_text())
+
+
+def _edit_record(handle, change: Callable[[dict], object]) -> dict:
+    """Apply ``change`` to the run record in one atomic replacement (the guardian reads it live); return the record."""
+    data = _record(handle)
+    change(data)
+    lifecycle.atomic_json(handle._context.record, data)
+    return data
+
+
 def _reopen_last_receipt(handle) -> dict:
     """Leave the last receipt as a crash between dispatch and finish leaves it: ``pending``, nothing recorded."""
-    data = json.loads(handle._context.record.read_text())
-    receipt = list(data["docker_receipts"].values())[-1]
-    receipt.update(state="pending", result=None, resources=[])
-    data["revision"] += 1
-    lifecycle.atomic_json(handle._context.record, data)
-    return receipt
+
+    def reopen(data: dict) -> None:
+        list(data["docker_receipts"].values())[-1].update(state="pending", result=None, resources=[])
+        data["revision"] += 1
+
+    return list(_edit_record(handle, reopen)["docker_receipts"].values())[-1]
 
 
 def _abandon(services, handle) -> None:
-    """The run's guardian and requester are gone, as after a kill."""
-    kill_guardian(handle._context)
-    retire_actor(
-        handle._context.project.state, current_identity(), dead_identity(), account=services.root / "admission"
-    )
+    abandon_run(handle._context, services.root / "admission")
 
 
 def test_recovery_finishes_a_pending_compose_run_after_its_siblings_stopped(tmp_path: Path) -> None:
@@ -2899,35 +2908,45 @@ def test_recovery_finishes_a_pending_compose_run_after_its_siblings_stopped(tmp_
     assert "c" * 64 not in fake.containers
 
 
-def test_live_compose_run_accepts_a_sibling_that_stopped(tmp_path: Path) -> None:
-    fake = FakeDockerPort()
-    _services, handle, descriptor = _recovering_run(tmp_path, fake)
+def _stop_sibling(fake: FakeDockerPort) -> None:
     fake.stop_container("c" * 64)
 
-    result = lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
 
-    record = json.loads(handle._context.record.read_text())
-    sibling = record["owned_resources"]["containers"]["c" * 64]
-    assert result.exit_code == 0
-    assert list(record["docker_receipts"].values())[-1]["state"] == "promoted"
-    assert (sibling["state"], sibling["evidence"]["bindings"]) == ("stopped", {})
-    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "down", "--volumes"))
-    assert handle.leave().cleanup_outcome == "complete"
-
-
-def test_live_compose_run_accepts_a_sibling_that_restarted(tmp_path: Path) -> None:
-    fake = FakeDockerPort()
-    _services, handle, descriptor = _recovering_run(tmp_path, fake)
+def _restart_sibling(fake: FakeDockerPort) -> None:
     fake.containers["c" * 64]["State"]["StartedAt"] = "started-1"
     fake.containers["c" * 64]["RestartCount"] = 1
 
+
+@pytest.mark.parametrize(
+    ("disturb", "expected"),
+    [
+        (_stop_sibling, {"state": "stopped", "bindings": {}, "started_at": "started-0", "restart_count": 0}),
+        (
+            _restart_sibling,
+            {"state": "running", "bindings": {"8080/tcp": []}, "started_at": "started-1", "restart_count": 1},
+        ),
+    ],
+)
+def test_live_compose_run_accepts_a_sibling_whose_state_changed(
+    tmp_path: Path, disturb: Callable[[FakeDockerPort], None], expected: dict
+) -> None:
+    fake = FakeDockerPort()
+    _services, handle, descriptor = _recovering_run(tmp_path, fake)
+    disturb(fake)
+
     result = lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
 
-    control = json.loads(handle._context.record.read_text())["owned_resources"]["containers"]["c" * 64]["evidence"][
-        "control"
-    ]
+    record = _record(handle)
+    sibling = record["owned_resources"]["containers"]["c" * 64]
+    control = sibling["evidence"]["control"]
     assert result.exit_code == 0
-    assert (control["started_at"], control["restart_count"]) == ("started-1", 1)
+    assert list(record["docker_receipts"].values())[-1]["state"] == "promoted"
+    assert {
+        "state": sibling["state"],
+        "bindings": sibling["evidence"]["bindings"],
+        "started_at": control["started_at"],
+        "restart_count": control["restart_count"],
+    } == expected
     lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "down", "--volumes"))
     assert handle.leave().cleanup_outcome == "complete"
 
@@ -3681,10 +3700,12 @@ def _oom_kill(fake: FakeDockerPort, container_id: str = "c" * 64) -> None:
 
 def _end_after_oom(handle, descriptor, fake: FakeDockerPort) -> None:
     """Clear the recorded OOM (it fails any leave) and end the run cleanly."""
-    recorded = json.loads(handle._context.record.read_text())
-    recorded["infrastructure_failure"] = None
-    recorded.pop("failure_evidence", None)
-    lifecycle.atomic_json(handle._context.record, recorded)  # one atomic replacement: the guardian reads it live
+
+    def clear(data: dict) -> None:
+        data["infrastructure_failure"] = None
+        data.pop("failure_evidence", None)
+
+    _edit_record(handle, clear)
     lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "down", "--volumes"))
     handle.leave("failed")
 
@@ -3705,33 +3726,32 @@ def test_compose_run_promotion_records_a_sibling_oom_kill(tmp_path: Path) -> Non
     _end_after_oom(handle, descriptor, fake)
 
 
-def test_promotion_oom_counts_a_container_without_recorded_control(tmp_path: Path) -> None:
+def _drop_recorded_control(data: dict) -> None:
+    data["owned_resources"]["containers"]["c" * 64]["evidence"].pop("control")
+
+
+def _earlier_failure(data: dict) -> None:
+    data["infrastructure_failure"] = "compose-up-failed"
+
+
+@pytest.mark.parametrize(
+    ("arrange", "failure", "evidence"),
+    [(_drop_recorded_control, "container-oom", True), (_earlier_failure, "compose-up-failed", False)],
+)
+def test_promotion_oom_rule_edges(
+    tmp_path: Path, arrange: Callable[[dict], None], failure: str, evidence: bool
+) -> None:
+    """A container recorded without ``control`` still counts as unseen; an earlier failure keeps its own cause."""
     fake = FakeDockerPort()
     _services, handle, descriptor = _recovering_run(tmp_path, fake)
-    record = json.loads(handle._context.record.read_text())
-    record["owned_resources"]["containers"]["c" * 64]["evidence"].pop("control")
-    lifecycle.atomic_json(handle._context.record, record)  # one atomic replacement: the guardian reads it live
+    _edit_record(handle, arrange)
     _oom_kill(fake)
 
     lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
 
-    assert json.loads(handle._context.record.read_text())["infrastructure_failure"] == "container-oom"
-    _end_after_oom(handle, descriptor, fake)
-
-
-def test_promotion_oom_keeps_an_earlier_failure(tmp_path: Path) -> None:
-    fake = FakeDockerPort()
-    _services, handle, descriptor = _recovering_run(tmp_path, fake)
-    record = json.loads(handle._context.record.read_text())
-    record["infrastructure_failure"] = "compose-up-failed"
-    lifecycle.atomic_json(handle._context.record, record)  # one atomic replacement: the guardian reads it live
-    _oom_kill(fake)
-
-    lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
-
-    record = json.loads(handle._context.record.read_text())
-    assert record["infrastructure_failure"] == "compose-up-failed"
-    assert "failure_evidence" not in record
+    record = _record(handle)
+    assert record["infrastructure_failure"] == failure
+    assert ("failure_evidence" in record) is evidence
     _end_after_oom(handle, descriptor, fake)
 
 

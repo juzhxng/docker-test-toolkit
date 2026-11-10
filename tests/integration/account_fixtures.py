@@ -854,6 +854,12 @@ def retire_actor(registry: Path, identity: dict, replacement: dict, *, account: 
         write_raw_queue(account, canonical_json_bytes(replace_identity(queue, identity, replacement)))
 
 
+def abandon_run(context: lifecycle.RunContext, account: Path) -> None:
+    """Model a killed run: its guardian is killed and the test process, its requester, counts as dead."""
+    kill_guardian(context)
+    retire_actor(context.project.state, current_identity(), dead_identity(), account=account)
+
+
 def start_live_actor(name: str = "actor") -> tuple[subprocess.Popen[str], dict]:
     """Start a sleeping process and return it with its own native identity (as it would record itself)."""
     program = (

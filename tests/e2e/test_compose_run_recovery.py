@@ -15,8 +15,8 @@ import time
 from pathlib import Path
 
 import pytest
-from tests.e2e.conftest import redis_id
-from tests.integration.account_fixtures import current_identity, dead_identity, kill_guardian, retire_actor
+from tests.e2e.conftest import redis_id, remove_run_leftovers
+from tests.integration.account_fixtures import abandon_run
 
 from docker_test_toolkit import ArtifactIdentity, ExternalDockerResource, PhaseBudget, RunSpec
 from docker_test_toolkit.application import lifecycle
@@ -57,13 +57,21 @@ def _spec(project: Path) -> RunSpec:
     )
 
 
-def _project(tmp_path: Path) -> tuple[Path, Path]:
+def _entered(tmp_path: Path):
+    """An entered run whose one service exposes a port, after ``compose up``; the Compose file is ``compose.yml``."""
     project = tmp_path / "project"
     project.mkdir()
-    compose = project / "compose.yml"
     # ``expose`` without ``ports``: the running container reports {"6379/tcp": null}, the exited one {}
-    compose.write_text(f"services:\n  fixture:\n    image: {redis_id()}\n    expose:\n      - '6379'\n")
-    return project, compose
+    (project / "compose.yml").write_text(
+        f"services:\n  fixture:\n    image: {redis_id()}\n    expose:\n      - '6379'\n"
+    )
+    services = build_test_services(tmp_path / "state")
+    lifecycle.configure_docker_factories(build_docker_adapter, bind_docker_adapter)
+    handle = services.open_run(_spec(project), admit_docker=True).enter()
+    up = _shim(handle.docker_context, project, "compose", "up", "--detach")
+    _out, err = up.communicate(timeout=120)
+    assert up.returncode == 0, err
+    return services, handle, project
 
 
 def _shim(docker, project: Path, *argv: str, **popen) -> subprocess.Popen[str]:
@@ -89,57 +97,32 @@ def _service_containers(compose_project: str) -> list[str]:
 
 
 def _stop_directly(compose_project: str) -> None:
-    for container_id in _service_containers(compose_project):
-        subprocess.run([_DOCKER, "stop", "-t", "1", container_id], check=True, capture_output=True)
+    subprocess.run([_DOCKER, "stop", "-t", "1", *_service_containers(compose_project)], check=True, capture_output=True)
 
 
-def _remove_leftovers(compose_project: str) -> None:
-    """Remove only this test's compose project objects, if a failed assertion left any."""
-    for container_id in _service_containers(compose_project):
-        subprocess.run([_DOCKER, "rm", "-f", "-v", container_id], check=False, capture_output=True)
-    for kind in ("network", "volume"):
-        listed = subprocess.run(
-            [_DOCKER, kind, "ls", "-q", "--filter", f"label=com.docker.compose.project={compose_project}"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        for name in listed.stdout.split():
-            subprocess.run([_DOCKER, kind, "rm", name], check=False, capture_output=True)
-
-
-def _pending_compose_run(record_path: Path, deadline_s: float = 60) -> dict:
+def _wait_for_pending_compose_run(record_path: Path, compose_project: str, deadline_s: float = 60) -> None:
     deadline = time.monotonic() + deadline_s
     while time.monotonic() < deadline:
         record = json.loads(record_path.read_text())
-        pending = next(
-            (
-                item
+        if (
+            any(
+                item["kind"] == "compose-run" and item["state"] == "pending"
                 for item in record["docker_receipts"].values()
-                if item["kind"] == "compose-run" and item["state"] == "pending"
-            ),
-            None,
-        )
-        if pending is not None and _service_containers(pending["plan"]["project"]):
-            return pending
+            )
+            and len(_service_containers(compose_project)) > 1  # the one-off exists beside the service
+        ):
+            return
         time.sleep(0.05)
-    raise AssertionError("no pending compose-run receipt appeared")
+    raise AssertionError("no pending compose-run receipt with its one-off container appeared")
 
 
 def test_killed_compose_run_recovers_after_its_containers_stopped(tmp_path: Path, redis_image: None) -> None:
-    project, compose = _project(tmp_path)
-    services = build_test_services(tmp_path / "state")
-    lifecycle.configure_docker_factories(build_docker_adapter, bind_docker_adapter)
-    handle = services.open_run(_spec(project), admit_docker=True).enter()
-    docker = handle.docker_context
-    up = _shim(docker, project, "compose", "--file", str(compose), "up", "--detach")
-    assert up.wait(timeout=120) == 0, up.stderr.read() if up.stderr else ""
+    services, handle, project = _entered(tmp_path)
+    compose_project = handle.docker_context.compose_project
     long_run = _shim(
-        docker,
+        handle.docker_context,
         project,
         "compose",
-        "--file",
-        str(compose),
         "run",
         "--rm",
         "--no-deps",
@@ -150,15 +133,11 @@ def test_killed_compose_run_recovers_after_its_containers_stopped(tmp_path: Path
         "sleep 300",
         start_new_session=True,
     )
-    compose_project = docker.compose_project
     try:
-        _pending_compose_run(handle._context.record)
+        _wait_for_pending_compose_run(handle._context.record, compose_project)
         os.killpg(long_run.pid, signal.SIGKILL)  # the client dies mid-run
         long_run.wait(timeout=10)
-        kill_guardian(handle._context)
-        retire_actor(
-            handle._context.project.state, current_identity(), dead_identity(), account=services.root / "admission"
-        )
+        abandon_run(handle._context, services.root / "admission")
         _stop_directly(compose_project)  # stands in for the engine stop: every container exits
 
         status = lifecycle.recover_run(handle._context, _test_directory=services.root / "admission")
@@ -174,27 +153,19 @@ def test_killed_compose_run_recovers_after_its_containers_stopped(tmp_path: Path
         if long_run.poll() is None:
             os.killpg(long_run.pid, signal.SIGKILL)
             long_run.wait(timeout=10)
-        _remove_leftovers(compose_project)
+        assert remove_run_leftovers(handle._context.project.state) == []
 
 
 def test_compose_run_tolerates_a_sibling_stopped_meanwhile(tmp_path: Path, redis_image: None) -> None:
-    project, compose = _project(tmp_path)
-    services = build_test_services(tmp_path / "state")
-    lifecycle.configure_docker_factories(build_docker_adapter, bind_docker_adapter)
-    handle = services.open_run(_spec(project), admit_docker=True).enter()
-    docker = handle.docker_context
-    compose_project = docker.compose_project
+    _services, handle, project = _entered(tmp_path)
+    compose_project = handle.docker_context.compose_project
     try:
-        up = _shim(docker, project, "compose", "--file", str(compose), "up", "--detach")
-        assert up.wait(timeout=120) == 0
         _stop_directly(compose_project)  # the service exits before the next compose run finishes
 
         one_off = _shim(
-            docker,
+            handle.docker_context,
             project,
             "compose",
-            "--file",
-            str(compose),
             "run",
             "--rm",
             "--no-deps",
@@ -208,4 +179,4 @@ def test_compose_run_tolerates_a_sibling_stopped_meanwhile(tmp_path: Path, redis
         assert handle.leave("passed").cleanup_outcome == "complete"
         assert _service_containers(compose_project) == []
     finally:
-        _remove_leftovers(compose_project)
+        assert remove_run_leftovers(handle._context.project.state) == []
