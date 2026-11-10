@@ -29,6 +29,7 @@ from docker_test_toolkit.domain.models import (
     RunSpec,
 )
 from docker_test_toolkit.domain.policy import known_fields
+from docker_test_toolkit.domain.records import is_disowned
 
 _INVALID_CONTEXT = "Command input requires one exact run context."
 
@@ -79,7 +80,7 @@ def _disowned_resources(record: dict) -> list[dict[str, str]]:
             {"kind": item["kind"], "identifier": item["identifier"], "name": item["name"]}
             for items in record["owned_resources"].values()
             for item in items.values()
-            if item["evidence"].get("disowned") is True
+            if is_disowned(item)
         ),
         key=lambda item: (item["kind"], item["identifier"]),
     )

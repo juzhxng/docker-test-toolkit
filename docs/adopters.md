@@ -213,7 +213,10 @@ def keep_service_logs(handle, services, directory, tail=200):
                 text=True,
                 timeout=60,
             )
-            (target / f"{service}.log").write_text(read.stdout + read.stderr)
+            if read.returncode:
+                print(f"logs of {service} not kept: exit {read.returncode}: {read.stderr[-500:]}", file=sys.stderr)
+                continue
+            (target / f"{service}.log").write_text(read.stdout)
         except (OSError, subprocess.SubprocessError) as error:
             print(f"logs of {service} not kept: {error}", file=sys.stderr)
 

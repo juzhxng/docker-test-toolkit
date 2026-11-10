@@ -48,6 +48,7 @@ from docker_test_toolkit.domain.policy import (
     cache_cap_bytes,
     eviction_plan,
 )
+from docker_test_toolkit.domain.records import is_disowned
 
 if TYPE_CHECKING:
     from docker_test_toolkit.application.lifecycle import Deadline, NativeClock
@@ -471,7 +472,7 @@ def _retain_builder_volumes(account: Path, registry: Path, docker: DockerPort, b
             continue  # a live run's builder, or one recorded on another daemon: never touched from this one
         evidenced = set()
         for builder_name, builder in builders.items():
-            if isinstance(builder, dict) and (builder.get("evidence") or {}).get("disowned") is True:
+            if is_disowned(builder):
                 disowned.add(buildkit_state_volume(builder_name))
                 continue
             volume = (builder.get("evidence") or {}).get("state_volume") if isinstance(builder, dict) else None

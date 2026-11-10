@@ -2890,10 +2890,6 @@ def _reopen_last_receipt(handle) -> dict:
     return list(_edit_record(handle, reopen)["docker_receipts"].values())[-1]
 
 
-def _abandon(services, handle) -> None:
-    abandon_run(handle._context, services.root / "admission")
-
-
 def test_recovery_finishes_a_pending_compose_run_after_its_siblings_stopped(tmp_path: Path) -> None:
     """The field case: killed during ``compose run``, the engine stopped every container, then ``run recover``."""
     fake = FakeDockerPort()
@@ -2901,7 +2897,7 @@ def test_recovery_finishes_a_pending_compose_run_after_its_siblings_stopped(tmp_
     lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
     receipt = _reopen_last_receipt(handle)
     fake.stop_container("c" * 64)  # an exited container reports ``Ports {}``
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
 
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
     status = lifecycle.recover_run(handle._context, _test_directory=services.root / "admission")
@@ -2983,7 +2979,7 @@ def test_compose_run_still_refuses_a_changed_container_identity(tmp_path: Path, 
     receipt = list(record["docker_receipts"].values())[-1]
     assert (receipt["state"], receipt["result"]["exit_code"]) == ("unresolved", 5)
     fake.containers["c" * 64][field] = original
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
     assert lifecycle.recover_run(handle._context, _test_directory=services.root / "admission").state == "complete"
 
@@ -3796,7 +3792,7 @@ def test_live_leave_reconciliation_records_a_sibling_oom_kill(tmp_path: Path, re
     assert (record["state"], record["recovery_actor"]) == ("stopping", None)
     assert record["infrastructure_failure"] == "container-oom"
     resume()
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
     assert lifecycle.recover_run(handle._context, _test_directory=services.root / "admission").state == "complete"
 
 
@@ -3807,7 +3803,7 @@ def test_recovery_does_not_record_a_sibling_oom_kill(tmp_path: Path) -> None:
     lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
     _reopen_last_receipt(handle)
     _oom_kill(fake)
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
 
     assert lifecycle.recover_run(handle._context, _test_directory=services.root / "admission").state == "complete"
@@ -3828,7 +3824,7 @@ def test_identity_conflict_never_lists_volatile_container_keys(tmp_path: Path) -
 
     assert raised.value.details["conflict"]["keys"] == ["evidence.created"]
     fake.containers["c" * 64]["Created"] = "container-created"
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
     assert lifecycle.recover_run(handle._context, _test_directory=services.root / "admission").state == "complete"
 
@@ -3874,7 +3870,7 @@ def test_compose_promotion_names_a_recreated_volume(tmp_path: Path, recorded_rem
     if recorded_removed:
         _edit_record(handle, lambda data: data["owned_resources"]["volumes"][volume].update(state="removed"))
     fake.volumes[volume].update(CreatedAt="another", Labels={})
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
 
     with pytest.raises(ResourceError) as raised:
@@ -3986,7 +3982,7 @@ def _stuck_by_a_renamed_container(tmp_path: Path, fake: FakeDockerPort, **arrang
     lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
     _reopen_last_receipt(handle)
     fake.containers["c" * 64]["Name"] = "/renamed"
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
     return services, handle
 
@@ -4081,7 +4077,7 @@ def test_disown_retires_the_endpoint_of_a_disowned_container(tmp_path: Path) -> 
     lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
     _reopen_last_receipt(handle)
     fake.containers["c" * 64]["Name"] = "/renamed"
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
 
     assert _recover(services, handle, (("container", "c" * 64),)).state == "complete"
@@ -4118,7 +4114,7 @@ def test_cleanup_conflict_is_released_by_disown(tmp_path: Path) -> None:
     volume = f"{handle.docker_context.compose_project}_data"
     fake.volumes[volume]["CreatedAt"] = "another"
     kept = copy.deepcopy(fake.volumes[volume])
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
 
     refused = _released(services, handle, (("volume", volume),), "Owned volume identity changed")
@@ -4136,7 +4132,7 @@ def test_recreated_volume_is_released_by_disown(tmp_path: Path) -> None:
     volume = f"{handle.docker_context.compose_project}_data"
     fake.volumes[volume].update(CreatedAt="another", Labels={})
     kept = copy.deepcopy(fake.volumes[volume])
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
 
     _released(services, handle, (("volume", volume),), "Owned volume identity changed")
@@ -4152,7 +4148,7 @@ def test_open_removal_receipt_of_a_disowned_resource_closes_failed(
     fake = FakeDockerPort()
     services, handle, _descriptor = _recovering_run(tmp_path, fake)
     network = next(iter(_record(handle)["owned_resources"]["networks"]))
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
     fake.in_use.add(network)
     with pytest.raises(ResourceError, match="cleanup result is unresolved"):
@@ -4279,7 +4275,7 @@ def test_pending_container_control_drops_a_disowned_target(tmp_path: Path, monke
 
     _edit_record(handle, interrupt_stop)
     fake.containers[target_id]["Name"] = "/renamed"
-    _abandon(services, handle)
+    abandon_run(handle._context, services.root / "admission")
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
     monkeypatch.setattr(lifecycle, "observe_container", _observe_fake_container)  # as the file's other control tests
 
