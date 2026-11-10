@@ -408,15 +408,20 @@ def test_admission_expiry_clamps_a_slow_final_pass_to_the_deadline(tmp_path: Pat
     assert all(item["waited_ns"] <= span for item in waiting)
 
 
-def test_admission_expiry_evidence_is_kept_when_the_requester_left_before_the_write(tmp_path: Path) -> None:
-    services, projects = three_private_projects(tmp_path)
-    _external_capacity_account(services)
-    reached, release = tmp_path / "left.reached", tmp_path / "left.release"
+def _held_at_evidence(tmp_path: Path, name: str) -> tuple[Path, Path, dict]:
+    reached, release = tmp_path / f"{name}.reached", tmp_path / f"{name}.release"
     stages = {
         "admission-expiry-evidence-pending": {
             "action": [{"do": "write-file", "path": str(reached)}, {"do": "wait-file", "path": str(release)}]
         }
     }
+    return reached, release, stages
+
+
+def test_admission_expiry_evidence_is_kept_when_the_requester_left_before_the_write(tmp_path: Path) -> None:
+    services, projects = three_private_projects(tmp_path)
+    _external_capacity_account(services)
+    reached, release, stages = _held_at_evidence(tmp_path, "left")
     run, guardian, _log = _guarded(tmp_path, services, projects[0], "left-before-write", stages, wait_seconds=3)
     try:
         EnterThread(run, existing_attempt=True)
@@ -494,12 +499,7 @@ def test_requester_handoff_reports_diagnostics_not_yet_persisted(tmp_path: Path)
     """The requester's deadline can end before the guardian wrote the evidence: it says so; the record gets it later."""
     services, projects = three_private_projects(tmp_path)
     _external_capacity_account(services)
-    reached, release = tmp_path / "pending.reached", tmp_path / "pending.release"
-    stages = {
-        "admission-expiry-evidence-pending": {
-            "action": [{"do": "write-file", "path": str(reached)}, {"do": "wait-file", "path": str(release)}]
-        }
-    }
+    reached, release, stages = _held_at_evidence(tmp_path, "pending")
     run, guardian, _log = _guarded(tmp_path, services, projects[0], "pending", stages, wait_seconds=3)
     try:
         entering = EnterThread(run, existing_attempt=True)
@@ -515,16 +515,6 @@ def test_requester_handoff_reports_diagnostics_not_yet_persisted(tmp_path: Path)
         reap(guardian)
 
     assert _record(run)["failure_evidence"]["category"] == "admission-expired"
-
-
-def _held_at_evidence(tmp_path: Path, name: str) -> tuple[Path, Path, dict]:
-    reached, release = tmp_path / f"{name}.reached", tmp_path / f"{name}.release"
-    stages = {
-        "admission-expiry-evidence-pending": {
-            "action": [{"do": "write-file", "path": str(reached)}, {"do": "wait-file", "path": str(release)}]
-        }
-    }
-    return reached, release, stages
 
 
 def test_expiry_message_names_the_waits(tmp_path: Path) -> None:
