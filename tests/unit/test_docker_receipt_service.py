@@ -2960,11 +2960,20 @@ def test_compose_run_still_refuses_a_changed_container_identity(tmp_path: Path, 
     original = fake.containers["c" * 64][field]
     fake.containers["c" * 64][field] = value
 
-    with pytest.raises(ResourceError, match="collides with another exact owned identity"):
+    with pytest.raises(ResourceError, match="collides with another exact owned identity") as raised:
         lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
 
     after = json.loads(handle._context.record.read_text())["owned_resources"]["containers"]["c" * 64]
     assert after == before
+    keys = ["evidence.created"] if field == "Created" else ["name"]
+    assert raised.value.reason == "owned-identity-conflict"
+    assert raised.value.details["conflict"] == {
+        "kind": "container",
+        "identifier": "c" * 64,
+        "name": before["name"],
+        "keys": keys,
+    }
+    assert str(raised.value).endswith(f"Resource: container {'c' * 64}; differs: {keys[0]}.")
     fake.containers["c" * 64][field] = original
     _abandon(services, handle)
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
@@ -3789,3 +3798,51 @@ def test_recovery_does_not_record_a_sibling_oom_kill(tmp_path: Path) -> None:
     assert lifecycle.recover_run(handle._context, _test_directory=services.root / "admission").state == "complete"
 
     assert json.loads(handle._context.record.read_text())["infrastructure_failure"] != "container-oom"
+
+
+def test_identity_conflict_never_lists_volatile_container_keys(tmp_path: Path) -> None:
+    """A stopped container with a new start generation and another ``Created``: only the identity key is named."""
+    fake = FakeDockerPort()
+    services, handle, descriptor = _recovering_run(tmp_path, fake)
+    fake.stop_container("c" * 64)
+    fake.containers["c" * 64]["State"]["StartedAt"] = "started-9"
+    fake.containers["c" * 64]["Created"] = "other-created"
+
+    with pytest.raises(ResourceError) as raised:
+        lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+
+    assert raised.value.details["conflict"]["keys"] == ["evidence.created"]
+    fake.containers["c" * 64]["Created"] = "container-created"
+    _abandon(services, handle)
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+    assert lifecycle.recover_run(handle._context, _test_directory=services.root / "admission").state == "complete"
+
+
+def test_buildkit_worker_contradiction_names_the_builder(tmp_path: Path) -> None:
+    """S2 has no public path (the builder's own comparison fires first); the finish seam shows its naming."""
+    fake = FakeDockerPort()
+    handle, descriptor = _entered_run(tmp_path, fake)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("buildx", "create"))
+    record = _record(handle)
+    builder_id, builder = next(iter(record["owned_resources"]["builders"].items()))
+    worker = record["owned_resources"]["containers"][builder["evidence"]["buildkit_container_id"]]
+    receipt = next(item for item in record["docker_receipts"].values() if item["kind"] == "builder-create")
+
+    def reopen(data: dict) -> None:
+        data["docker_receipts"][receipt["id"]].update(state="pending", result=None, resources=[])
+
+    pending = _edit_record(handle, reopen)["docker_receipts"][receipt["id"]]
+    impostor = {**worker, "identifier": "9" * 64}
+    with pytest.raises(ResourceError, match="contradicts its owned builder") as raised:
+        lifecycle._finish_docker_receipt(handle._context, pending, "promoted", DockerResult(0, "", ""), [impostor])
+
+    assert raised.value.reason == "owned-identity-conflict"
+    assert raised.value.details["conflict"] == {
+        "kind": "builder",
+        "identifier": builder_id,
+        "name": builder["name"],
+        "keys": ["evidence.buildkit_container_id"],
+    }
+    _edit_record(handle, lambda data: data["docker_receipts"][receipt["id"]].update(receipt))
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("buildx", "rm", handle.docker_context.builder))
+    assert handle.leave().cleanup_outcome == "complete"

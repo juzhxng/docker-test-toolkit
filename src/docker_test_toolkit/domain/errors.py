@@ -21,6 +21,7 @@ REASONS = frozenset(
         "image-lock-held",
         "lock-deadline",
         "observation-deadline",
+        "owned-identity-conflict",
         "podman-binary-missing",
         "podman-helper-unsupported",
         "podman-machine-not-found",

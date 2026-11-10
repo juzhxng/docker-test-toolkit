@@ -29,7 +29,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from itertools import pairwise
@@ -3683,6 +3683,41 @@ def _promote_docker_result(adapter, receipt: dict, result: DockerResult, data: d
     raise ResourceError("Docker receipt kind cannot be promoted.")
 
 
+def _identity_conflict(sentence: str, resource: dict, keys: Iterable[str]) -> ResourceError:
+    """Name a recorded resource whose observed identity contradicts its record: kind, identifier and what differs.
+
+    ``kind`` and ``identifier`` are what ``run recover`` accepts in ``disown``; ``keys`` are paths, never values.
+    """
+    paths = list(keys) or ["identity"]
+    conflict = {
+        "kind": resource["kind"],
+        "identifier": resource["identifier"],
+        "name": resource["name"],
+        "keys": paths,
+    }
+    return ResourceError(
+        f"{sentence} Resource: {resource['kind']} {resource['identifier']}; differs: {', '.join(paths)}.",
+        reason="owned-identity-conflict",
+        details={"conflict": conflict},
+    )
+
+
+def _evidence_differences(recorded: dict, observed: dict, *, ignore: Iterable[str] = ()) -> list[str]:
+    """Return the paths where two resource entries differ: ``kind``, ``name``, then each top-level evidence key."""
+    paths = [key for key in ("kind", "name") if recorded.get(key) != observed.get(key)]
+    skipped = set(ignore)
+    keys = (set(recorded["evidence"]) | set(observed["evidence"])) - skipped
+    paths += [
+        f"evidence.{key}"
+        for key in sorted(keys)
+        if recorded["evidence"].get(key, _ABSENT) != observed["evidence"].get(key, _ABSENT)
+    ]
+    return paths
+
+
+_ABSENT = object()
+
+
 def _first_sight_of_oom(data: dict, recorded: dict, observed: dict) -> bool:
     """Whether a refreshed container shows an OOM kill the run has not recorded and may still record.
 
@@ -3762,11 +3797,14 @@ def _finish_receipt_locked(
         builder_name = resource["evidence"].get("builder")
         if resource["kind"] == "container" and isinstance(builder_name, str):
             builder = data["owned_resources"]["builders"].get(builder_name)
-            if builder is None or builder["evidence"].get("buildkit_container_id") not in {
-                None,
-                resource["identifier"],
-            }:
+            if builder is None:
                 raise ResourceError("BuildKit worker promotion contradicts its owned builder.")
+            if builder["evidence"].get("buildkit_container_id") not in {None, resource["identifier"]}:
+                raise _identity_conflict(
+                    "BuildKit worker promotion contradicts its owned builder.",
+                    builder,
+                    ["evidence.buildkit_container_id"],
+                )
             builder["evidence"]["buildkit_container_id"] = resource["identifier"]
         existing = data["owned_resources"][plural].get(resource["identifier"])
         if existing is not None:
@@ -3802,7 +3840,16 @@ def _finish_receipt_locked(
             if not replaced and not (
                 same_identity and (existing["evidence"] == resource["evidence"] or container_refresh or image_rebuild)
             ):
-                raise ResourceError("Docker promotion collides with another exact owned identity.")
+                volatile = (
+                    ("bindings", "control")
+                    if resource["kind"] == "container" and receipt["kind"] in {"compose", "compose-run"}
+                    else ()
+                )
+                raise _identity_conflict(
+                    "Docker promotion collides with another exact owned identity.",
+                    existing,
+                    _evidence_differences(existing, resource, ignore=volatile),
+                )
             if not replaced:
                 resource = {**resource, "receipt_id": existing["receipt_id"]}
             if container_refresh and _first_sight_of_oom(data, existing, resource):
