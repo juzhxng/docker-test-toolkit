@@ -215,6 +215,7 @@ from docker_test_toolkit.domain.policy import (
 )
 from docker_test_toolkit.domain.records import (
     is_disowned,
+    owned_key,
     validate_docker_state,
     validate_failure_evidence,
     validate_hold_timeline,
@@ -2040,8 +2041,7 @@ def _exact_control_promotion(adapter, receipt: dict, result: DockerResult) -> tu
 
 
 def _exact_resource_removal_promotion(adapter, receipt: dict) -> tuple[str, list[dict]]:
-    kind = receipt["kind"].removesuffix("-rm")
-    target = receipt["plan"][f"{kind}_id"]
+    kind, target = _owned_target(receipt["kind"], receipt["plan"])
     if kind == "builder":
         return ("removed" if _builder_observation(adapter, target) is None else "unresolved"), []
     if kind == "image":
@@ -2701,7 +2701,7 @@ def _prepare_compose_receipt(
     if any(not re.fullmatch(r"[0-9a-f]{64}", item) or item not in known_containers for item in identifiers):
         raise InvalidInput("Compose project identity collides with an unowned container.")
     for kind, names in (("network", networks), ("volume", volumes)):
-        owned = data["owned_resources"][f"{kind}s"]
+        owned = _owned_bucket(data, kind)
         for name in names:
             observation = adapter.inspect_exact(ExactInspection(kind, name))
             if observation.exists:
@@ -3834,7 +3834,7 @@ def _apply_receipt_result(
     if cache is not None:  # after the pending check: the in-memory pending receipt is never mutated
         current["plan"]["cache"] = {**cache, "finished_ns": NativeClock().read()}
     for resource in resources:
-        plural = _plural(resource["kind"])
+        plural = owned_key(resource["kind"])
         existing = data["owned_resources"][plural].get(resource["identifier"])
         builder_name = resource["evidence"].get("builder")
         builder = data["owned_resources"]["builders"].get(builder_name) if isinstance(builder_name, str) else None
@@ -3911,8 +3911,8 @@ def _apply_receipt_result(
         data["owned_resources"]["containers"][container_id]["state"] = "removed"
         _retire_container_endpoints(data, container_id, data["revision"] + 1)
     elif receipt["kind"] in {"builder-rm", "image-rm", "network-rm", "volume-rm"} and state == "removed":
-        kind, _plural_key, identifier = _owned_target(receipt["kind"], receipt["plan"])
-        _owned_entry(data, kind, identifier)["state"] = "removed"
+        kind, identifier = _owned_target(receipt["kind"], receipt["plan"])
+        _owned_bucket(data, kind)[identifier]["state"] = "removed"
     elif receipt["kind"] in {"container-start", "container-stop"} and state == "promoted":
         container_id = receipt["plan"]["container_id"]
         data["owned_resources"]["containers"][container_id]["state"] = (
@@ -4271,8 +4271,8 @@ def _dispatch_classified(
             finally:
                 released = _close_cache_fail_open(held)
         elif command.kind.endswith("-rm"):
-            resource_kind, plural, target = _owned_target(command.kind, command.plan)
-            resource = data["owned_resources"][plural][target]
+            resource_kind, target = _owned_target(command.kind, command.plan)
+            resource = _owned_bucket(data, resource_kind)[target]
             exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=resource_kind == "builder")
             if exists:
                 child_started = True
@@ -4451,8 +4451,8 @@ def _reconcile_receipt(
             state, resources = "failed", []
     removal_kinds = {"builder-rm", "container-rm", "image-rm", "network-rm", "volume-rm"}
     if state == "unresolved" and receipt["kind"] in removal_kinds:
-        kind, plural, identity = _owned_target(receipt["kind"], receipt["plan"])
-        resource = data["owned_resources"][plural][identity]
+        kind, identity = _owned_target(receipt["kind"], receipt["plan"])
+        resource = _owned_bucket(data, kind)[identity]
         exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=kind == "builder")
         if (
             kind == "image"
@@ -4476,7 +4476,7 @@ def _reconcile_receipt(
     if state == "unresolved":
         sentence = "Docker mutation remains unresolved after exact reconciliation."
         if receipt["kind"] in removal_kinds:
-            raise _unresolved_on(*_owned_target(receipt["kind"], receipt["plan"])[::2], sentence)
+            raise _unresolved_on(*_owned_target(receipt["kind"], receipt["plan"]), sentence)
         raise ResourceError(sentence)
 
 
@@ -5219,16 +5219,11 @@ def _image_identity_paths(adapter, resource: dict, item: dict) -> list[str]:
     return [path for path, differs in checks if differs]
 
 
-def _owned_target(kind: str, plan: dict) -> tuple[str, str, str]:
-    """Return the resource kind, its ``owned_resources`` key and the identifier an owned mutation receipt targets."""
+def _owned_target(kind: str, plan: dict) -> tuple[str, str]:
+    """Return the resource kind and the identifier an exact removal or container control receipt targets."""
     removal = kind.endswith("-rm")
     resource_kind = kind.removesuffix("-rm") if removal else "container"
-    return resource_kind, _plural(resource_kind), str(plan[f"{resource_kind}_id" if removal else "container_id"])
-
-
-def _plural(kind: str) -> str:
-    """The ``owned_resources`` key of a resource kind."""
-    return "builders" if kind == "builder" else f"{kind}s"
+    return resource_kind, str(plan[f"{resource_kind}_id" if removal else "container_id"])
 
 
 def _unresolved_on(kind: str, identifier: str, sentence: str) -> ResourceError:
@@ -5258,10 +5253,10 @@ def _run_owned_mutation(
     )
     adapter = _bound_docker(data)
     timeout = max(0.001, deadline.remaining_ns(NativeClock()) / 1_000_000_000)
-    resource_kind, plural, target = _owned_target(kind, plan)
+    resource_kind, target = _owned_target(kind, plan)
     result: DockerResult | None = None
     try:
-        resource = data["owned_resources"][plural][target]
+        resource = _owned_bucket(data, resource_kind)[target]
         exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=resource_kind == "builder")
         if not exists and kind.endswith("-rm"):
             result = DockerResult(0, "", "")
@@ -11704,28 +11699,26 @@ def _targets_disowned(data: dict, receipt: dict) -> bool:
     """Whether an exact control or removal receipt targets a resource the run has disowned."""
     if receipt["kind"] not in _EXACT_TARGET_KINDS:
         return False
-    kind, _plural_key, identifier = _owned_target(receipt["kind"], receipt["plan"])
+    kind, identifier = _owned_target(receipt["kind"], receipt["plan"])
     resource = _owned_bucket(data, kind).get(identifier)
     return resource is not None and is_disowned(resource)
 
 
 def _owned_bucket(data: dict, kind: str) -> dict:
     """The run's recorded resources of one kind, keyed by identifier."""
-    return data["owned_resources"][_plural(kind)]
-
-
-def _owned_entry(data: dict, kind: str, identifier: str) -> dict:
-    return _owned_bucket(data, kind)[identifier]
+    return data["owned_resources"][owned_key(kind)]
 
 
 def _apply_disown(data: dict, disown: tuple[tuple[str, str], ...]) -> None:
     """Mark each requested resource as no longer the run's: ``removed`` with ``evidence.disowned``; never re-owned."""
-    marked = [entry for entry in disown if not is_disowned(_owned_entry(data, *entry))]
+    marked = [
+        (kind, identifier) for kind, identifier in disown if not is_disowned(_owned_bucket(data, kind)[identifier])
+    ]
     if not marked:
         return
     data["revision"] += 1
     for kind, identifier in marked:
-        resource = _owned_entry(data, kind, identifier)
+        resource = _owned_bucket(data, kind)[identifier]
         resource["state"] = "removed"
         resource["evidence"]["disowned"] = True
         if kind == "container":
@@ -12152,7 +12145,7 @@ def _recover_resource_grant(
                 raise ResourceError("Recovery cannot move original authority to another account domain.")
             _require_disownable(data, disown)
             if data.get("recovery_outcome") == "complete":
-                if any(not is_disowned(_owned_entry(data, *entry)) for entry in disown):
+                if any(not is_disowned(_owned_bucket(data, kind)[identifier]) for kind, identifier in disown):
                     raise InvalidInput("A disown request cannot change a run whose recovery is complete.")
                 return _retire_completed_resource_grant(context, directory, data, deadline_ns)
             pending = data["pending_operation"]

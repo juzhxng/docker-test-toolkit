@@ -4092,7 +4092,7 @@ def _released(services, handle, request: tuple, match: str) -> ResourceError:
     assert _recover(services, handle, request).state == "complete"
     record = _record(handle)
     for kind, identifier in request:
-        assert lifecycle._owned_entry(record, kind, identifier)["evidence"]["disowned"] is True
+        assert lifecycle._owned_bucket(record, kind)[identifier]["evidence"]["disowned"] is True
     return refused.value
 
 

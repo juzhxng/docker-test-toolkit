@@ -228,7 +228,7 @@ def test_renamed_container_is_released_by_disowning_it_and_its_dependencies(tmp_
 
         final = json.loads(handle._context.record.read_text())
         assert all(
-            lifecycle._owned_entry(final, kind, identifier)["evidence"]["disowned"] for kind, identifier in request
+            lifecycle._owned_bucket(final, kind)[identifier]["evidence"]["disowned"] for kind, identifier in request
         )
         assert lifecycle.quiescence_blockers(final) == ()
         inspected = subprocess.run(
