@@ -13,6 +13,7 @@ import signal
 import subprocess
 import time
 import uuid
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ from tests.e2e.conftest import redis_id, remove_run_leftovers
 from tests.integration.account_fixtures import abandon_run
 
 from docker_test_toolkit import ArtifactIdentity, ExternalDockerResource, PhaseBudget, RunSpec
-from docker_test_toolkit.application import lifecycle
+from docker_test_toolkit.application import lifecycle, recovery
 from docker_test_toolkit.domain.errors import ResourceError
 from docker_test_toolkit.factories.cli import bind_docker_adapter, build_docker_adapter
 from docker_test_toolkit.factories.testing import build_test_services
@@ -103,6 +104,17 @@ def _stop_directly(compose_project: str) -> None:
     subprocess.run([_DOCKER, "stop", "-t", "1", *_service_containers(compose_project)], check=True, capture_output=True)
 
 
+def _project_dry_run(context) -> dict:
+    """``cleanup project`` without ``--execute``, against the run's own project and registry."""
+    return recovery.cleanup_project(
+        context.project,
+        build_docker_adapter(),
+        execute=False,
+        verify_run=partial(lifecycle.run_record_loads, context.project.state),
+        locate_run=partial(lifecycle.indexed_run_item, context.project),
+    )
+
+
 def _wait_for_pending_compose_run(record_path: Path, compose_project: str, deadline_s: float = 60) -> None:
     deadline = time.monotonic() + deadline_s
     while time.monotonic() < deadline:
@@ -152,6 +164,7 @@ def test_killed_compose_run_recovers_after_its_containers_stopped(tmp_path: Path
             item["state"] == "removed" for items in record["owned_resources"].values() for item in items.values()
         )
         assert _service_containers(compose_project) == []
+        assert _project_dry_run(handle._context)["clean"] is True  # A-AC2: project cleanup's final dry run is clean
     finally:
         if long_run.poll() is None:
             os.killpg(long_run.pid, signal.SIGKILL)
