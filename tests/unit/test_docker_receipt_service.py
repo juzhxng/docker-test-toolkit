@@ -3436,13 +3436,15 @@ def test_recovery_refuses_an_image_receipt_missing_its_exact_reference_authority
 
 
 @pytest.mark.parametrize(
-    ("kind", "field"),
+    ("kind", "field", "value", "keys"),
     [
-        ("container", "Created"),
-        ("network", "Created"),
-        ("volume", "CreatedAt"),
-        ("image", "RepoTags"),
-        ("builder", "Driver"),
+        ("container", "Created", "foreign", ["evidence.created"]),
+        ("container", "Id", "foreign", ["identifier"]),
+        ("network", "Created", "foreign", ["evidence.created"]),
+        ("volume", "CreatedAt", "foreign", ["evidence.created"]),
+        ("volume", "Labels", None, ["observed.labels"]),
+        ("image", "RepoTags", "foreign", ["evidence.repo_tags"]),
+        ("builder", "Driver", "foreign", ["evidence.driver"]),
     ],
 )
 def test_recovery_refuses_each_changed_owned_removal_identity(
@@ -3450,6 +3452,8 @@ def test_recovery_refuses_each_changed_owned_removal_identity(
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
     field: str,
+    value: object,
+    keys: list[str],
 ) -> None:
     fake = FakeDockerPort()
     handle, descriptor = _entered_run(tmp_path, fake)
@@ -3467,12 +3471,15 @@ def test_recovery_refuses_each_changed_owned_removal_identity(
         "image": fake.images,
         "builder": fake.builders,
     }
-    stores[kind][target][field] = "foreign"
+    stores[kind][target][field] = value
 
-    with pytest.raises(ResourceError, match="identity changed"):
+    with pytest.raises(ResourceError, match="identity changed") as raised:
         lifecycle._reconcile_docker_receipt(handle._context)
 
     refused = json.loads(handle._context.record.read_text())
+    assert raised.value.reason == "owned-identity-conflict"
+    assert raised.value.details["conflict"]["keys"] == keys
+    assert (raised.value.details["conflict"]["kind"], raised.value.details["conflict"]["identifier"]) == (kind, target)
     assert fake.commands.count(command) == 1
     assert refused["owned_resources"][plural][target]["state"] != "removed"
     assert next(item for item in refused["docker_receipts"].values() if item["state"] == "unresolved")
@@ -3846,3 +3853,32 @@ def test_buildkit_worker_contradiction_names_the_builder(tmp_path: Path) -> None
     _edit_record(handle, lambda data: data["docker_receipts"][receipt["id"]].update(receipt))
     lifecycle.dispatch_docker(handle._context, descriptor, fake, ("buildx", "rm", handle.docker_context.builder))
     assert handle.leave().cleanup_outcome == "complete"
+
+
+@pytest.mark.parametrize("recorded_removed", [False, True])
+def test_compose_promotion_names_a_recreated_volume(tmp_path: Path, recorded_removed: bool) -> None:
+    """S4: a volume the run records, replaced by a foreign one under its name, is named; an unrecorded one is not."""
+    fake = FakeDockerPort()
+    services, handle, descriptor = _recovering_run(tmp_path, fake)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+    _reopen_last_receipt(handle)
+    volume = f"{handle.docker_context.compose_project}_data"
+    if recorded_removed:
+        _edit_record(handle, lambda data: data["owned_resources"]["volumes"][volume].update(state="removed"))
+    fake.volumes[volume].update(CreatedAt="another", Labels={})
+    _abandon(services, handle)
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+
+    with pytest.raises(ResourceError) as raised:
+        lifecycle.recover_run(handle._context, _test_directory=services.root / "admission")
+
+    if recorded_removed:
+        assert "conflict" not in raised.value.details
+    else:
+        assert raised.value.reason == "owned-identity-conflict"
+        assert raised.value.details["conflict"] == {
+            "kind": "volume",
+            "identifier": volume,
+            "name": volume,
+            "keys": ["evidence.compose_project", "evidence.created"],
+        }

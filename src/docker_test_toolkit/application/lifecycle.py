@@ -2246,6 +2246,13 @@ def _compose_promotion(adapter, receipt: dict, result: DockerResult, data: dict)
                 and (name in planned_volumes or not _anonymous_volume(name, native_labels))
             )
         ):
+            recorded = data["owned_resources"]["volumes"].get(name)
+            if recorded is not None and recorded["state"] != "removed":  # the run's own volume, replaced under its name
+                raise _identity_conflict(
+                    "Owned volume identity changed before exact mutation.",
+                    recorded,
+                    _volume_identity_paths(recorded, item),
+                )
             return "unresolved", []
         resources.append(
             _owned_resource(
@@ -3688,7 +3695,7 @@ def _identity_conflict(sentence: str, resource: dict, keys: Iterable[str]) -> Re
 
     ``kind`` and ``identifier`` are what ``run recover`` accepts in ``disown``; ``keys`` are paths, never values.
     """
-    paths = list(keys) or ["identity"]
+    paths = sorted(keys) or ["identity"]
     conflict = {
         "kind": resource["kind"],
         "identifier": resource["identifier"],
@@ -5017,34 +5024,65 @@ def _settle_archive_cleanup(context: RunContext, receipt_id: str, deadline_ns: i
         atomic_json(context.record, data)
 
 
+def _label_paths(labels: object, evidence: dict, *, foreign_project_allowed: bool = False) -> list[str]:
+    """Paths of an owned object's label checks that fail: no label map, a recorded label, the compose project."""
+    if not isinstance(labels, dict):
+        return ["observed.labels"]
+    paths = []
+    if isinstance(evidence.get("labels"), dict) and any(
+        labels.get(key) != value for key, value in evidence["labels"].items()
+    ):
+        paths.append("evidence.labels")
+    if (
+        isinstance(evidence.get("compose_project"), str)
+        and labels.get("com.docker.compose.project") != evidence["compose_project"]
+        and not foreign_project_allowed
+    ):
+        paths.append("evidence.compose_project")
+    return paths
+
+
 def _validate_owned_identity(
     adapter, resource: dict, *, allow_absent_buildkit: bool = False, deadline: Deadline | None = None
 ) -> bool:
+    """Return whether the recorded resource exists; raise a named conflict when what Docker reports is not it."""
     kind = resource["kind"]
     evidence = resource["evidence"]
     if kind == "builder":
         item = _builder_observation(adapter, resource["identifier"])
         if item is None:
             return False
-        endpoint_identity = _builder_endpoint_identity(item)
+        paths = [
+            path
+            for path, differs in (
+                ("name", item.get("Name") != resource["name"]),
+                ("evidence.driver", item.get("Driver") != evidence.get("driver")),
+                ("evidence.endpoint_sha256", _builder_endpoint_identity(item) != evidence.get("endpoint_sha256")),
+            )
+            if differs
+        ]
+        if paths:
+            raise _identity_conflict("Owned builder identity changed before exact mutation.", resource, paths)
         container_id = evidence.get("buildkit_container_id")
-        if (
-            item.get("Name") != resource["name"]
-            or item.get("Driver") != evidence.get("driver")
-            or endpoint_identity != evidence.get("endpoint_sha256")
-        ):
-            raise ResourceError("Owned builder identity changed before exact mutation.")
         if isinstance(container_id, str):
             container = adapter.inspect_exact(ExactInspection("container", container_id), deadline=deadline)
             if not container.exists:
                 if allow_absent_buildkit:
                     return True
-                raise ResourceError("Owned BuildKit worker disappeared before exact mutation.")
+                raise _identity_conflict(
+                    "Owned BuildKit worker disappeared before exact mutation.",
+                    resource,
+                    ["evidence.buildkit_container_id"],
+                )
             candidate = container.attributes
             if candidate.get("Id") != container_id or str(candidate.get("Name", "")).lstrip("/") != buildkit_worker(
                 resource["name"]
             ):
-                raise ResourceError("Owned BuildKit worker identity changed before exact mutation.")
+                raise _identity_conflict(
+                    "Owned BuildKit worker identity changed before exact mutation.",
+                    resource,
+                    ["evidence.buildkit_container_id"],
+                )
         return True
     observation = adapter.inspect_exact(ExactInspection(kind, resource["identifier"]), deadline=deadline)
     if not observation.exists:
@@ -5052,102 +5090,94 @@ def _validate_owned_identity(
     item = observation.attributes
     if kind == "container":
         config = item.get("Config")
+        checks = (
+            ("identifier", item.get("Id") != resource["identifier"]),
+            ("name", str(item.get("Name", "")).lstrip("/") != resource["name"]),
+            ("evidence.created", item.get("Created") != evidence.get("created")),
+            ("evidence.image_id", item.get("Image") != evidence.get("image_id")),
+        )
         labels = config.get("Labels") if isinstance(config, dict) else None
-        expected_labels = evidence.get("labels")
-        if (
-            item.get("Id") != resource["identifier"]
-            or str(item.get("Name", "")).lstrip("/") != resource["name"]
-            or item.get("Created") != evidence.get("created")
-            or item.get("Image") != evidence.get("image_id")
-            or not isinstance(labels, dict)
-            or (
-                isinstance(expected_labels, dict)
-                and any(labels.get(key) != value for key, value in expected_labels.items())
-            )
-            or (
-                isinstance(evidence.get("compose_project"), str)
-                and labels.get("com.docker.compose.project") != evidence["compose_project"]
-            )
-        ):
-            raise ResourceError("Owned container identity changed before exact mutation.")
+        paths = [path for path, differs in checks if differs] + _label_paths(labels, evidence)
     elif kind == "network":
-        labels = item.get("Labels")
-        if (
-            item.get("Id") != resource["identifier"]
-            or item.get("Name") != resource["name"]
-            or item.get("Created") != evidence.get("created")
-            or not isinstance(labels, dict)
-            or (
-                isinstance(evidence.get("labels"), dict)
-                and any(labels.get(key) != value for key, value in evidence["labels"].items())
-            )
-            or (
-                isinstance(evidence.get("compose_project"), str)
-                and labels.get("com.docker.compose.project") != evidence["compose_project"]
-            )
-        ):
-            raise ResourceError("Owned network identity changed before exact mutation.")
+        checks = (
+            ("identifier", item.get("Id") != resource["identifier"]),
+            ("name", item.get("Name") != resource["name"]),
+            ("evidence.created", item.get("Created") != evidence.get("created")),
+        )
+        paths = [path for path, differs in checks if differs] + _label_paths(item.get("Labels"), evidence)
     elif kind == "volume":
-        labels = item.get("Labels")
-        if (
-            item.get("Name") != resource["name"]
-            or item.get("CreatedAt") != evidence.get("created")
-            or item.get("Driver") != evidence.get("driver")
-            or not isinstance(labels, dict)
-            or (
-                isinstance(evidence.get("labels"), dict)
-                and any(labels.get(key) != value for key, value in evidence["labels"].items())
-            )
-            or (
-                isinstance(evidence.get("compose_project"), str)
-                and labels.get("com.docker.compose.project") != evidence["compose_project"]
-                and not _anonymous_volume(resource["name"], labels)
-            )
-        ):
-            raise ResourceError("Owned volume identity changed before exact mutation.")
+        paths = _volume_identity_paths(resource, item)
     elif kind == "image":
-        config = item.get("Config")
-        labels = config.get("Labels") if isinstance(config, dict) else None
-        expected_labels = evidence.get("labels")
-        repository_digest = evidence.get("repository_digest")
-        digest_changed = repository_digest is not None and (
-            not isinstance(repository_digest, str)
-            or not isinstance(item.get("RepoDigests"), list)
-            or _repository_digest(repository_digest) not in item["RepoDigests"]
-        )
-        labels_changed = repository_digest is None and (
-            not isinstance(labels, dict)
-            or not isinstance(expected_labels, dict)
-            or any(labels.get(key) != value for key, value in expected_labels.items())
-        )
-        repo_digests = item.get("RepoDigests")
-        if repo_digests is None:
-            repo_digests = []
-        removal_plan = _image_removal(resource)[1] if repository_digest is None else {}
-        recorded_references = removal_plan.get("references")
-        repo_tags = item.get("RepoTags")
-        if repo_tags is None:
-            repo_tags = []
-        references_changed = repository_digest is None and (
-            not isinstance(repo_tags, list)
-            or any(not isinstance(value, str) for value in repo_tags)
-            or not isinstance(repo_digests, list)
-            or any(not isinstance(value, str) for value in repo_digests)
-            or not isinstance(recorded_references, list)
-            or not {*repo_tags, *repo_digests}.issubset(recorded_references)
-        )
-        if not references_changed and isinstance(recorded_references, list):
-            references_changed = any(
-                observation.exists and observation.attributes.get("Id") != resource["identifier"]
-                for observation in (
-                    adapter.inspect_exact(ExactInspection("image", reference)) for reference in recorded_references
-                )
-            )
-        if item.get("Id") != resource["identifier"] or digest_changed or labels_changed or references_changed:
-            raise ResourceError("Owned image identity changed before exact mutation.")
+        paths = _image_identity_paths(adapter, resource, item)
     else:
         raise ResourceError("Owned Docker resource kind is unsupported.")
+    if paths:
+        raise _identity_conflict(f"Owned {kind} identity changed before exact mutation.", resource, paths)
     return True
+
+
+def _volume_identity_paths(resource: dict, item: dict) -> list[str]:
+    """Paths of an owned volume's identity checks that fail against what Docker reports."""
+    evidence = resource["evidence"]
+    labels = item.get("Labels")
+    checks = (
+        ("identifier", item.get("Name") != resource["name"]),
+        ("evidence.created", item.get("CreatedAt") != evidence.get("created")),
+        ("evidence.driver", item.get("Driver") != evidence.get("driver")),
+    )
+    anonymous = isinstance(labels, dict) and _anonymous_volume(resource["name"], labels)
+    return [path for path, differs in checks if differs] + _label_paths(
+        labels, evidence, foreign_project_allowed=anonymous
+    )
+
+
+def _image_identity_paths(adapter, resource: dict, item: dict) -> list[str]:
+    """Paths of an owned image's identity checks that fail (digest-pinned or locally built)."""
+    evidence = resource["evidence"]
+    config = item.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    expected_labels = evidence.get("labels")
+    repository_digest = evidence.get("repository_digest")
+    digest_changed = repository_digest is not None and (
+        not isinstance(repository_digest, str)
+        or not isinstance(item.get("RepoDigests"), list)
+        or _repository_digest(repository_digest) not in item["RepoDigests"]
+    )
+    labels_changed = repository_digest is None and (
+        not isinstance(labels, dict)
+        or not isinstance(expected_labels, dict)
+        or any(labels.get(key) != value for key, value in expected_labels.items())
+    )
+    repo_digests = item.get("RepoDigests")
+    if repo_digests is None:
+        repo_digests = []
+    removal_plan = _image_removal(resource)[1] if repository_digest is None else {}
+    recorded_references = removal_plan.get("references")
+    repo_tags = item.get("RepoTags")
+    if repo_tags is None:
+        repo_tags = []
+    references_changed = repository_digest is None and (
+        not isinstance(repo_tags, list)
+        or any(not isinstance(value, str) for value in repo_tags)
+        or not isinstance(repo_digests, list)
+        or any(not isinstance(value, str) for value in repo_digests)
+        or not isinstance(recorded_references, list)
+        or not {*repo_tags, *repo_digests}.issubset(recorded_references)
+    )
+    if not references_changed and isinstance(recorded_references, list):
+        references_changed = any(
+            observation.exists and observation.attributes.get("Id") != resource["identifier"]
+            for observation in (
+                adapter.inspect_exact(ExactInspection("image", reference)) for reference in recorded_references
+            )
+        )
+    checks = (
+        ("identifier", item.get("Id") != resource["identifier"]),
+        ("evidence.repository_digest", digest_changed),
+        ("evidence.labels", labels_changed),
+        ("evidence.repo_tags", references_changed),
+    )
+    return [path for path, differs in checks if differs]
 
 
 def _run_owned_mutation(
