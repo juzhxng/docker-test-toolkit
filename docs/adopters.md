@@ -178,6 +178,57 @@ integration/E2E/audit lane must have an explicit repository classification.
 Repository adapters own every product command, service, environment name and value, and success meaning; the toolkit
 infers none of them from a project's layout.
 
+## Keeping service logs when a run fails
+
+`leave` removes what the run created, the containers and their logs included. To keep the logs of a failed test, read
+them before `leave`, on the failure path only, so passing runs are not slowed:
+
+- For each service of the adapter's own closure, run `compose logs --no-color --timestamps --tail N <service>` through
+  the run's Docker command and write the output to a file of this run in a directory the adapter owns, outside the
+  run's private root (`leave` removes that root).
+- Read and write each service on its own. A failed read, or a failed directory creation or file write, is noted in the
+  adapter's output and never raised, and `leave` runs in a `finally`, so a capture never changes the test outcome or
+  stops cleanup.
+- A read through the shim is bounded: 30 seconds, 1 MiB per stream, UTF-8 only; anything else is refused. `--tail`
+  selects lines but does not bound bytes, so a noisy service can still be refused; use a smaller N or accept the note.
+  `--follow` is not usable.
+- `compose run`, `run` and `compose exec` output is already relayed live and needs no capture.
+- A crashed run is not covered: nothing is left to read, and recovery removes the containers.
+- To keep the whole stopped stack instead, open the run with `retain` and leave it with `retain(outcome)`; the stopped
+  containers keep their logs until the run is released, and a retained run blocks the project's next run.
+- Logs can carry secrets. The toolkit relays them unredacted; the adapter owns the files, their place, their
+  permissions and their deletion.
+
+```python
+def keep_service_logs(handle, services, directory, tail=200):
+    docker = handle.docker_context
+    target = directory / handle.run_id  # outside handle.private_root
+    for service in services:
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            read = subprocess.run(
+                [str(docker.executable), "compose", "logs", "--no-color", "--timestamps", "--tail", str(tail), service],
+                env=dict(docker.environment),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            (target / f"{service}.log").write_text(read.stdout + read.stderr)
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f"logs of {service} not kept: {error}", file=sys.stderr)
+
+
+outcome = "passed"
+try:
+    run_the_tests()
+except BaseException:
+    keep_service_logs(handle, closure, Path("test-logs"))
+    outcome = "failed"
+    raise
+finally:
+    handle.leave(outcome)
+```
+
 ## Admission across projects
 
 Adapters submit independent ordinary Docker-backed work once and retain the same queued process or handle until the run
@@ -187,7 +238,7 @@ Every adapter repairs only its own project's exact state: an indexed nonterminal
 project is inspected and repaired (`run status`, `run recover`, resume, release, project cleanup) before another ordinary
 run is opened. A dead owner's run in another project is recovered by the toolkit's detached worker; an adapter never
 recovers, releases or cleans a foreign run to make room. The adapter's outer timeout must exceed the toolkit queue
-deadline plus bounded startup and cleanup.
+deadline plus bounded startup and cleanup; an expired admission takes up to 5 more seconds to report why it waited.
 
 When the machine allows shared runs ([Shared runs](operations.md#shared-runs)), two runs, of the same project too, may
 hold the account at once. Adapters change nothing, but three things follow:

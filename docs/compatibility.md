@@ -95,6 +95,17 @@ stderr usually shows which (one toolkit line versus the child's own output), but
 hint, not proof. The share-rule refusal's text changed (rule and outcome first, then `Reason:`); its reason
 `share-rule` and exit 2 did not. Error messages are redacted before they are cut to 512 characters.
 
+0.7.7 changes no record, receipt or queue format. A disowned resource is an ordinary `removed` entry with the additive
+evidence key `disowned`, which older versions load and ignore; finish a recovery with the version that started it (see
+[Disowning a conflicting resource](operations.md#disowning-a-conflicting-resource)). `run recover` accepts the additive
+input field `disown` and returns the additive result key `disowned`; older versions ignore the field. The new reason
+`owned-identity-conflict` reaches an older peer as `unspecified`; its `context.conflict` and message text still name
+the resource. A compose receipt whose container only changed state, start generation or port map now promotes where it
+collided. A conflict found before a command ran ends that receipt `failed` where it ended `unresolved`, and one found
+when a live command's result is applied ends it `unresolved` (`incomplete_cleanup`) where it stayed `pending`. The
+requester of an expired admission now waits up to 5 seconds for its report, and the record keeps an expiry's evidence
+even when the requester left after the deadline.
+
 Protocol `batch:1` versions only the live Python facade and bridge messages. It adds no durable field and does not change
 run, project, account or cleanup record schemas, so a crashed batch has no toolkit batch status or replay operation; its
 recovery is decided solely from its ordinary run records.
