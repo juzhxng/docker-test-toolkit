@@ -200,7 +200,7 @@ them before `leave`, on the failure path only, so passing runs are not slowed:
   permissions and their deletion.
 
 ```python
-def keep_service_logs(handle, services, project, directory, tail=200):
+def keep_service_logs(handle, services, project_root, directory, tail=200):
     docker = handle.docker_context
     target = directory / handle.run_id  # outside handle.private_root
     for service in services:
@@ -208,7 +208,7 @@ def keep_service_logs(handle, services, project, directory, tail=200):
             target.mkdir(parents=True, exist_ok=True)
             read = subprocess.run(
                 [str(docker.executable), "compose", "logs", "--no-color", "--timestamps", "--tail", str(tail), service],
-                cwd=project,
+                cwd=project_root,
                 env=dict(docker.environment),
                 capture_output=True,
                 encoding="utf-8",

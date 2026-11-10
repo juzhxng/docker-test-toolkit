@@ -583,9 +583,11 @@ A Compose command re-observes every container of its project. A container whose 
 name, creation time, image, Compose project, configuration hash, service and whether it is a completed one-shot
 service) is accepted when only its state, start
 generation or port map changed since the run recorded it: a restart, a stop, an engine restart. Recovery of a run
-killed during `compose run` therefore succeeds after its containers stopped. A promotion that is the first to see a
-container killed for memory records `container-oom`, unless a recovery is running or the run already records a failure;
-so does a service that a `compose` command finds already killed for memory when it first records it.
+killed during `compose run` therefore succeeds after its containers stopped. The promotion of a Compose command that
+is the first to see a container killed for memory records `container-oom`, unless a recovery is running or the run
+already records a failure;
+so does a service that a `compose` command (not `compose run`, whose one-off reports through its own exit code) finds
+already killed for memory when it first records it.
 
 When a recorded resource's identity does contradict its record, the refusal has reason `owned-identity-conflict` and
 `error.context.conflict` names it: `kind`, `identifier`, `name` and `keys`, the paths that differ (`identifier`, `name`,

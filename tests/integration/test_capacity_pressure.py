@@ -517,6 +517,29 @@ def test_requester_handoff_reports_diagnostics_not_yet_persisted(tmp_path: Path)
     assert _record(run)["failure_evidence"]["category"] == "admission-expired"
 
 
+def test_report_wait_ends_five_seconds_after_the_deadline_however_late_it_starts(tmp_path: Path) -> None:
+    """A requester that reaches the wait late (a stall across its deadline) does not wait a fresh 5 s."""
+    services, projects = three_private_projects(tmp_path)
+    _external_capacity_account(services)
+    reached, release, stages = _held_at_evidence(tmp_path, "late-entry")
+    run, guardian, _log = _guarded(tmp_path, services, projects[0], "late-entry", stages, wait_seconds=3)
+    try:
+        EnterThread(run, existing_attempt=True)
+        wait_until(reached.exists, message="the guardian decided the expiry and has not written it")
+        clock = lifecycle.NativeClock()
+        now = clock.read()
+        long_past = lifecycle.Deadline(clock.origin, now - 20_000_000_000, 10_000_000_000, now - 10_000_000_000)
+
+        started = clock.read()
+        record = lifecycle._admission_report_record(run._context, long_past, clock)
+
+        assert clock.read() - started < 2_000_000_000  # one final read, not another 5 s
+        assert record["state"] != "complete"  # the held guardian has not written
+    finally:
+        release.write_text("")
+        reap(guardian)
+
+
 def test_expiry_message_names_the_waits(tmp_path: Path) -> None:
     services, projects = three_private_projects(tmp_path)
     _external_capacity_account(services)
