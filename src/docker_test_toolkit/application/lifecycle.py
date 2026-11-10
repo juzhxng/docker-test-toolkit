@@ -3683,6 +3683,10 @@ def _promote_docker_result(adapter, receipt: dict, result: DockerResult, data: d
     raise ResourceError("Docker receipt kind cannot be promoted.")
 
 
+# The evidence keys that identify one compose container for the run's lifetime (rendered config, immutable facts).
+_CONTAINER_IDENTITY_KEYS = ("compose_project", "config_sha256", "created", "image_id", "service", "completed_service")
+
+
 def _finish_docker_receipt(
     context: RunContext,
     receipt: dict,
@@ -3767,25 +3771,18 @@ def _finish_receipt_locked(
                 )
                 and set(existing["evidence"].get("repo_tags", [])) <= set(resource["evidence"]["repo_tags"])
             )
-            compose_container_update = (
-                receipt["kind"] == "compose"
+            # A compose receipt re-observes every container of its project; only the start generation, state and port
+            # map may have changed since the run recorded it (a restart, a stop, an engine restart).
+            container_refresh = (
+                receipt["kind"] in {"compose", "compose-run"}
                 and same_identity
                 and resource["kind"] == "container"
                 and all(
-                    existing["evidence"].get(key) == resource["evidence"].get(key)
-                    for key in (
-                        "compose_project",
-                        "config_sha256",
-                        "created",
-                        "image_id",
-                        "service",
-                        "completed_service",
-                    )
+                    existing["evidence"].get(key) == resource["evidence"].get(key) for key in _CONTAINER_IDENTITY_KEYS
                 )
             )
             if not replaced and not (
-                same_identity
-                and (existing["evidence"] == resource["evidence"] or compose_container_update or image_rebuild)
+                same_identity and (existing["evidence"] == resource["evidence"] or container_refresh or image_rebuild)
             ):
                 raise ResourceError("Docker promotion collides with another exact owned identity.")
             if not replaced:

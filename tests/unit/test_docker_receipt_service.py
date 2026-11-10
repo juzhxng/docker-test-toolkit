@@ -122,7 +122,8 @@ class FakeDockerPort(DockerPort):
         self.compose_anonymous_volume = False
         self.compose_image_volume = False
         self.compose_runtime_image_id = IMAGE_ID
-        self.compose_ports: dict[str, list[dict[str, str]]] = {}
+        self.compose_ports: dict[str, list[dict[str, str]] | None] = {}
+        self._stopped_ports: dict[str, dict] = {}
         self.compose_services = ("fixture",)
         self.compose_run_retained = False
         self.compose_run_exit_code = 0
@@ -183,6 +184,19 @@ class FakeDockerPort(DockerPort):
             _harden(container, network)
         self._mutate(container)
         self.containers[str(container["Id"])] = container
+
+    def stop_container(self, container_id: str) -> None:
+        """Stop a container as Docker does: an exited container reports an empty port map (moby daemon/inspect.go)."""
+        container = self.containers[container_id]
+        container["State"]["Running"] = False
+        self._stopped_ports.setdefault(container_id, container["NetworkSettings"]["Ports"])
+        container["NetworkSettings"]["Ports"] = {}
+
+    def _start(self, container_id: str) -> None:
+        container = self.containers[container_id]
+        container["State"]["Running"] = True
+        if container_id in self._stopped_ports:
+            container["NetworkSettings"]["Ports"] = self._stopped_ports.pop(container_id)
 
     def _mutate(self, container: dict) -> None:
         mutation, self.next_container_mutation = self.next_container_mutation, None
@@ -283,11 +297,12 @@ class FakeDockerPort(DockerPort):
             return DockerResult(0, argv[-1] + "\n", "")
         if argv[:2] in {("container", "start"), ("container", "stop")}:
             container = self.containers[argv[-1]]
-            starting = argv[1] == "start"
-            container["State"]["Running"] = starting
-            if starting:
-                container["State"]["StartedAt"] = f"{container['State']['StartedAt']}-restarted"
-                self._mutate(container)
+            if argv[1] == "stop":
+                self.stop_container(argv[-1])
+                return DockerResult(0, argv[-1] + "\n", "")
+            self._start(argv[-1])
+            container["State"]["StartedAt"] = f"{container['State']['StartedAt']}-restarted"
+            self._mutate(container)
             return DockerResult(0, argv[-1] + "\n", "")
         if argv[:2] == ("network", "connect"):
             assert argv[2] in self.networks and argv[3] in self.containers
@@ -607,7 +622,7 @@ class FakeDockerPort(DockerPort):
         if subcommand in {"restart", "start"}:
             for container in self.containers.values():
                 if container["Config"]["Labels"].get("com.docker.compose.project") == project:
-                    container["State"]["Running"] = True
+                    self._start(container["Id"])
                     container["State"]["StartedAt"] += f"-{subcommand}ed"
                     self._mutate(container)
             return DockerResult(0, "", "")
@@ -2827,6 +2842,113 @@ def test_compose_run_refuses_a_generated_name_collision_before_execution(
     fake.containers.pop("1" * 64)
     lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "down", "--volumes"))
     assert handle.leave("failed").cleanup_outcome == "complete"
+
+
+_COMPOSE_RUN = ("compose", "run", "--rm", "--no-deps", "--entrypoint", "true", "fixture", "true")
+
+
+def _recovering_run(tmp_path: Path, fake: FakeDockerPort):
+    """An entered run with one exposed-port service and a completed ``compose up``."""
+    fake.compose_ports = {"8080/tcp": None}  # exposed, not published: recorded as ``{"8080/tcp": []}``
+    project = tmp_path / "project"
+    project.mkdir()
+    services = build_test_services(tmp_path / "state")
+    handle = services.open_run(_spec(project), docker_factory=lambda: fake, admit_docker=True).enter()
+    _ = handle.docker_context
+    descriptor = json.loads((handle.private_root / "docker-authority.json").read_text())
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "up", "--detach"))
+    return services, handle, descriptor
+
+
+def _reopen_last_receipt(handle) -> dict:
+    """Leave the last receipt as a crash between dispatch and finish leaves it: ``pending``, nothing recorded."""
+    data = json.loads(handle._context.record.read_text())
+    receipt = list(data["docker_receipts"].values())[-1]
+    receipt.update(state="pending", result=None, resources=[])
+    data["revision"] += 1
+    lifecycle.atomic_json(handle._context.record, data)
+    return receipt
+
+
+def _abandon(services, handle) -> None:
+    """The run's guardian and requester are gone, as after a kill."""
+    kill_guardian(handle._context)
+    retire_actor(
+        handle._context.project.state, current_identity(), dead_identity(), account=services.root / "admission"
+    )
+
+
+def test_recovery_finishes_a_pending_compose_run_after_its_siblings_stopped(tmp_path: Path) -> None:
+    """The field case: killed during ``compose run``, the engine stopped every container, then ``run recover``."""
+    fake = FakeDockerPort()
+    services, handle, descriptor = _recovering_run(tmp_path, fake)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+    receipt = _reopen_last_receipt(handle)
+    fake.stop_container("c" * 64)  # an exited container reports ``Ports {}``
+    _abandon(services, handle)
+
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+    status = lifecycle.recover_run(handle._context, _test_directory=services.root / "admission")
+
+    record = json.loads(handle._context.record.read_text())
+    assert status.state == "complete"
+    assert lifecycle.quiescence_blockers(record) == ()
+    assert record["docker_receipts"][receipt["id"]]["state"] not in {"pending", "unresolved"}
+    assert all(item["state"] == "removed" for items in record["owned_resources"].values() for item in items.values())
+    assert "c" * 64 not in fake.containers
+
+
+def test_live_compose_run_accepts_a_sibling_that_stopped(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    _services, handle, descriptor = _recovering_run(tmp_path, fake)
+    fake.stop_container("c" * 64)
+
+    result = lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+
+    record = json.loads(handle._context.record.read_text())
+    sibling = record["owned_resources"]["containers"]["c" * 64]
+    assert result.exit_code == 0
+    assert list(record["docker_receipts"].values())[-1]["state"] == "promoted"
+    assert (sibling["state"], sibling["evidence"]["bindings"]) == ("stopped", {})
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "down", "--volumes"))
+    assert handle.leave().cleanup_outcome == "complete"
+
+
+def test_live_compose_run_accepts_a_sibling_that_restarted(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    _services, handle, descriptor = _recovering_run(tmp_path, fake)
+    fake.containers["c" * 64]["State"]["StartedAt"] = "started-1"
+    fake.containers["c" * 64]["RestartCount"] = 1
+
+    result = lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+
+    control = json.loads(handle._context.record.read_text())["owned_resources"]["containers"]["c" * 64]["evidence"][
+        "control"
+    ]
+    assert result.exit_code == 0
+    assert (control["started_at"], control["restart_count"]) == ("started-1", 1)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "down", "--volumes"))
+    assert handle.leave().cleanup_outcome == "complete"
+
+
+@pytest.mark.parametrize(("field", "value"), [("Created", "other-created"), ("Name", "/renamed")])
+def test_compose_run_still_refuses_a_changed_container_identity(tmp_path: Path, field: str, value: str) -> None:
+    """A different container under a recorded identifier is not the run's: the refusal stays (AC4)."""
+    fake = FakeDockerPort()
+    services, handle, descriptor = _recovering_run(tmp_path, fake)
+    before = json.loads(handle._context.record.read_text())["owned_resources"]["containers"]["c" * 64]
+    original = fake.containers["c" * 64][field]
+    fake.containers["c" * 64][field] = value
+
+    with pytest.raises(ResourceError, match="collides with another exact owned identity"):
+        lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+
+    after = json.loads(handle._context.record.read_text())["owned_resources"]["containers"]["c" * 64]
+    assert after == before
+    fake.containers["c" * 64][field] = original
+    _abandon(services, handle)
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+    assert lifecycle.recover_run(handle._context, _test_directory=services.root / "admission").state == "complete"
 
 
 def test_compose_run_refuses_an_unexpected_project_container_after_execution(tmp_path: Path) -> None:
