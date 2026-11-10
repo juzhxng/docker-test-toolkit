@@ -277,6 +277,7 @@ class EnterThread:
 
     def __init__(self, handle: RunHandle, *, existing_attempt: bool = False) -> None:
         self.error: BaseException | None = None
+        self.ended_tick: int | None = None  # the requester's monotonic tick when its entry returned or raised
         self._thread = threading.Thread(target=self._run, args=(handle, existing_attempt))
         self._thread.start()
 
@@ -288,6 +289,8 @@ class EnterThread:
                 handle.enter()
         except BaseException as error:  # the test inspects it
             self.error = error
+        finally:
+            self.ended_tick = lifecycle.NativeClock().read()
 
     def join(self, timeout: float = 20.0) -> None:
         self._thread.join(timeout)

@@ -7347,9 +7347,7 @@ def enter_run(context: RunContext, *, _test_directory: Path | None = None) -> Ru
             revoke_ungranted(context, _test_directory=_test_directory)
             continue
         time.sleep(min(100_000_000, deadline.remaining_ns(clock)) / 1_000_000_000)
-    data = _load_run(
-        context
-    )  # the one re-read after the deadline: the guardian may have written its evidence meanwhile
+    data = _admission_report_record(context, deadline, clock)
     if data["generation"]:
         raise ResourceError("Admission response missed a published grant; original recovery is required.")
     if data.get("guardian") == asdict(actor):
@@ -7358,6 +7356,34 @@ def enter_run(context: RunContext, *, _test_directory: Path | None = None) -> Ru
     if not detail and data["state"] != "complete":
         detail = " (admission diagnostics not yet persisted by the guardian)"
     raise ResourceError(f"Original admission deadline expired before a grant{detail}.")
+
+
+# How long a requester whose queue deadline passed waits for its guardian to write why the admission ended.
+_ADMISSION_REPORT_NS = 5_000_000_000
+
+
+def _admission_report_record(context: RunContext, deadline: Deadline, clock: NativeClock) -> dict:
+    """Return the record an expired requester reports from, after waiting at most 5 s for the guardian's write.
+
+    The guardian notices the expiry only at its next loop head and writes under two locks, so its report usually
+    lands just after the deadline; there is no ordering between the two. This reads without a lock every 100 ms and
+    stops at once when the record is complete or a granted generation appears; it stops early when no guardian is
+    recorded or the recorded one is no longer executing. Any stop without completion is followed by one final read,
+    because the write can land between the last read and that decision.
+    """
+    report_end = clock.read() + _ADMISSION_REPORT_NS
+    while True:
+        data = _load_run(context)
+        if data["state"] == "complete" or data["generation"]:
+            return data
+        guardian = data.get("guardian")
+        gone = guardian is None or observe_process(_identity_from_json(guardian)) != "executing"
+        remaining = report_end - clock.read()
+        if gone or remaining <= 0:
+            failpoint("admission-report-final-read")
+            return _load_run(context)
+        failpoint("admission-report-read")
+        time.sleep(min(100_000_000, remaining) / 1_000_000_000)
 
 
 def retention_after_release(
@@ -8990,32 +9016,24 @@ def _revoke_ended_wait(
     waits: _AdmissionWaits,
     data: dict,
     *,
-    requester_left: bool,
     expired: bool,
     failure_reason: str | None = None,
 ) -> RunStatus:
-    """Revoke a run whose admission wait ended; a queue-deadline expiry (with its requester still there) records why.
+    """Revoke a run whose admission wait ended (its budget, or its requester left); a budget expiry records why.
 
     The last pass is accounted only up to the queue deadline, so a pass that ran past it never exceeds the budget. The
-    requester's presence is decided again under the revoke's locks, where the evidence is built.
+    requester's presence does not matter once the deadline passed: the record always keeps an expiry's reasons, and a
+    requester that gave up waiting for them is the normal sequel, not a sign nobody wants them.
     """
     waits.close(min(NativeClock().read(), data["queue_deadline"]["expires_ns"]))
-    expiry = expired and not requester_left
-    if expiry:
+    if expired:
         failpoint("admission-expiry-evidence-pending")
-
-    def evidence(record: dict) -> dict | None:
-        """Build the expiry evidence unless the requester has left since the loop head decided."""
-        if observe_process(_identity_from_json(record["requester"])) != "executing":
-            return None
-        return waits.evidence(record)
-
     return revoke_ungranted(
         context,
         capacity,
         _test_directory=test_directory,
         _failure_reason=failure_reason,
-        _admission_evidence=evidence if expiry else None,
+        _admission_evidence=waits.evidence if expired else None,
     )
 
 
@@ -9095,9 +9113,7 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
             requester_left = observe_process(_identity_from_json(data["requester"])) != "executing"
             expired = not deadline.remaining_ns(clock)
             if requester_left or expired:
-                return _revoke_ended_wait(
-                    context, capacity_stack, test_directory, waits, data, requester_left=requester_left, expired=expired
-                )
+                return _revoke_ended_wait(context, capacity_stack, test_directory, waits, data, expired=expired)
             waits.begin(clock.read())
             pass_sample: HostMemoryObservation | None = None
             try:
@@ -9195,7 +9211,6 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                     test_directory,
                     waits,
                     data,
-                    requester_left=requester_left,
                     expired=expired,
                 )
             waits.begin(clock.read())

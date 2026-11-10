@@ -16,7 +16,7 @@ from docker_test_toolkit import PhaseBudget, RunSpec
 from docker_test_toolkit.application import lifecycle, sharing
 from docker_test_toolkit.application.recovery import Context, lock
 from docker_test_toolkit.domain.records import canonical_json_bytes
-from docker_test_toolkit.factories.testing import bind_test_capacity
+from docker_test_toolkit.factories.testing import bind_test_capacity, install_failpoint
 from tests.integration.account_fixtures import (
     EnterThread,
     current_identity,
@@ -408,7 +408,7 @@ def test_admission_expiry_clamps_a_slow_final_pass_to_the_deadline(tmp_path: Pat
     assert all(item["waited_ns"] <= span for item in waiting)
 
 
-def test_admission_expiry_evidence_is_dropped_when_the_requester_left_before_the_write(tmp_path: Path) -> None:
+def test_admission_expiry_evidence_is_kept_when_the_requester_left_before_the_write(tmp_path: Path) -> None:
     services, projects = three_private_projects(tmp_path)
     _external_capacity_account(services)
     reached, release = tmp_path / "left.reached", tmp_path / "left.release"
@@ -430,7 +430,7 @@ def test_admission_expiry_evidence_is_dropped_when_the_requester_left_before_the
 
     record = _record(run)
     assert (record["state"], record["admission"]) == ("complete", "revoked")
-    assert "failure_evidence" not in record  # the requester's absence is decided at the write, not at the loop head
+    assert record["failure_evidence"]["category"] == "admission-expired"  # the record always keeps an expiry's reason
 
 
 def test_admission_classified_requester_left_writes_no_evidence(tmp_path: Path) -> None:
@@ -451,8 +451,8 @@ def test_admission_classified_requester_left_writes_no_evidence(tmp_path: Path) 
     assert "failure_evidence" not in record  # nobody was left to be told: not an expiry, not a classified fault
 
 
-def test_admission_classified_requester_left_after_the_deadline_writes_no_evidence(tmp_path: Path) -> None:
-    """Both ended the wait (the budget and the requester): the requester's absence decides, so nothing is written."""
+def test_admission_expiry_after_the_deadline_keeps_its_evidence_without_a_requester(tmp_path: Path) -> None:
+    """Both ended the wait (the budget and the requester): the expiry decides, so its reason is written."""
     services, projects = three_private_projects(tmp_path)
     _external_capacity_account(services)
     stages = {"admission-capacity-read": {"action": {"do": "sleep", "seconds": 4}, "occurrence": 2}}
@@ -468,7 +468,7 @@ def test_admission_classified_requester_left_after_the_deadline_writes_no_eviden
 
     record = _record(run)
     assert (record["state"], record["admission"]) == ("complete", "revoked")
-    assert "failure_evidence" not in record
+    assert record["failure_evidence"]["category"] == "admission-expired"
 
 
 def test_admission_expiry_inside_publication_revokes_with_the_report_not_a_guardian_error(tmp_path: Path) -> None:
@@ -505,7 +505,9 @@ def test_requester_handoff_reports_diagnostics_not_yet_persisted(tmp_path: Path)
         entering = EnterThread(run, existing_attempt=True)
         wait_until(reached.exists, message="the guardian decided the expiry and has not written it")
         entering.join(timeout=40)
+        late_ns = entering.ended_tick - _record(run)["queue_deadline"]["expires_ns"]
         assert "admission diagnostics not yet persisted by the guardian" in str(entering.error)
+        assert 5_000_000_000 <= late_ns <= 8_000_000_000  # it waited its stated 5 s for the report, and no longer
         assert "failure_evidence" not in _record(run)
         release.write_text("")
         assert guardian.wait(timeout=30) == 0
@@ -513,6 +515,113 @@ def test_requester_handoff_reports_diagnostics_not_yet_persisted(tmp_path: Path)
         reap(guardian)
 
     assert _record(run)["failure_evidence"]["category"] == "admission-expired"
+
+
+def _held_at_evidence(tmp_path: Path, name: str) -> tuple[Path, Path, dict]:
+    reached, release = tmp_path / f"{name}.reached", tmp_path / f"{name}.release"
+    stages = {
+        "admission-expiry-evidence-pending": {
+            "action": [{"do": "write-file", "path": str(reached)}, {"do": "wait-file", "path": str(release)}]
+        }
+    }
+    return reached, release, stages
+
+
+def test_expiry_message_names_the_waits(tmp_path: Path) -> None:
+    services, projects = three_private_projects(tmp_path)
+    _external_capacity_account(services)
+    run = services.open_run(_spec(projects[0], "expiry-message", 1, wait_seconds=3))
+    entering = EnterThread(run)
+    entering.join(timeout=40)
+
+    assert "Original admission deadline expired before a grant (waited: external-capacity" in str(entering.error)
+
+
+def test_expiry_message_waits_for_a_late_guardian_write(tmp_path: Path) -> None:
+    services, projects = three_private_projects(tmp_path)
+    _external_capacity_account(services)
+    stages = {"admission-expiry-evidence-pending": {"action": {"do": "sleep", "seconds": 1}}}
+    run, guardian, _log = _guarded(tmp_path, services, projects[0], "late-writer", stages, wait_seconds=3)
+    try:
+        entering = EnterThread(run, existing_attempt=True)
+        entering.join(timeout=40)
+        assert guardian.wait(timeout=30) == 0
+    finally:
+        reap(guardian)
+
+    assert "(waited: external-capacity" in str(entering.error)
+
+
+def test_expiry_message_ends_at_once_when_the_guardian_died(tmp_path: Path) -> None:
+    services, projects = three_private_projects(tmp_path)
+    _external_capacity_account(services)
+    stages = {"admission-expiry-evidence-pending": {"action": {"do": "sigkill"}}}
+    run, guardian, _log = _guarded(tmp_path, services, projects[0], "dead-writer", stages, wait_seconds=3)
+    try:
+        entering = EnterThread(run, existing_attempt=True)
+        entering.join(timeout=40)
+    finally:
+        reap(guardian)
+
+    late_ns = entering.ended_tick - _record(run)["queue_deadline"]["expires_ns"]
+    assert "admission diagnostics not yet persisted by the guardian" in str(entering.error)
+    assert late_ns < 4_000_000_000  # no waiting out the 5 s for a guardian that is gone
+
+
+@pytest.mark.parametrize("stage", ["admission-report-read", "admission-report-final-read"])
+def test_expiry_message_reports_a_write_that_lands_between_reads(tmp_path: Path, stage: str) -> None:
+    """The write can land just before the guardian exits or just before the cutoff: the final read reports it."""
+    services, projects = three_private_projects(tmp_path)
+    _external_capacity_account(services)
+    _reached, release, stages = _held_at_evidence(tmp_path, f"between-{stage}")
+    run, guardian, _log = _guarded(tmp_path, services, projects[0], f"between-{stage}", stages, wait_seconds=3)
+    released = []
+
+    def land_the_write(name: str) -> None:
+        if name == stage and not released:
+            released.append(True)
+            release.write_text("")
+            assert guardian.wait(timeout=30) == 0  # the write is in and the guardian is gone
+
+    install_failpoint(land_the_write)
+    try:
+        entering = EnterThread(run, existing_attempt=True)
+        entering.join(timeout=60)
+    finally:
+        install_failpoint(None)
+        release.write_text("")
+        reap(guardian)
+
+    assert released
+    assert "(waited: external-capacity" in str(entering.error)
+
+
+def test_expiry_wait_surfaces_an_unreadable_record(tmp_path: Path) -> None:
+    services, projects = three_private_projects(tmp_path)
+    _external_capacity_account(services)
+    _reached, release, stages = _held_at_evidence(tmp_path, "unreadable")
+    run, guardian, _log = _guarded(tmp_path, services, projects[0], "unreadable", stages, wait_seconds=3)
+    saved: list[bytes] = []
+
+    def break_the_record(name: str) -> None:
+        if name == "admission-report-read" and not saved:
+            saved.append(run._context.record.read_bytes())
+            lifecycle.atomic_json(run._context.record, {})
+
+    install_failpoint(break_the_record)
+    try:
+        entering = EnterThread(run, existing_attempt=True)
+        entering.join(timeout=40)
+    finally:
+        install_failpoint(None)
+        if saved:
+            run._context.record.write_bytes(saved[0])
+        release.write_text("")
+        reap(guardian)
+
+    assert saved
+    assert "admission diagnostics not yet persisted" not in str(entering.error)
+    assert isinstance(entering.error, lifecycle.ResourceError)
 
 
 def _host_reserve_spec(project: Path, purpose: str) -> RunSpec:
