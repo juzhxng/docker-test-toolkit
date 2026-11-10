@@ -4096,12 +4096,8 @@ def _released(services, handle, request: tuple, match: str) -> ResourceError:
     assert _recover(services, handle, request).state == "complete"
     record = _record(handle)
     for kind, identifier in request:
-        assert _owned_entry(record, kind, identifier)["evidence"]["disowned"] is True
+        assert lifecycle._owned_entry(record, kind, identifier)["evidence"]["disowned"] is True
     return refused.value
-
-
-def _owned_entry(record: dict, kind: str, identifier: str) -> dict:
-    return record["owned_resources"]["builders" if kind == "builder" else f"{kind}s"][identifier]
 
 
 def test_renamed_container_is_released_by_disown(tmp_path: Path) -> None:

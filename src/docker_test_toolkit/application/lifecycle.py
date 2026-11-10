@@ -5221,8 +5221,12 @@ def _owned_target(kind: str, plan: dict) -> tuple[str, str, str]:
     """Return the resource kind, its ``owned_resources`` key and the identifier an owned mutation receipt targets."""
     removal = kind.endswith("-rm")
     resource_kind = kind.removesuffix("-rm") if removal else "container"
-    plural = "builders" if resource_kind == "builder" else f"{resource_kind}s"
-    return resource_kind, plural, str(plan[f"{resource_kind}_id" if removal else "container_id"])
+    return resource_kind, _plural(resource_kind), str(plan[f"{resource_kind}_id" if removal else "container_id"])
+
+
+def _plural(kind: str) -> str:
+    """The ``owned_resources`` key of a resource kind."""
+    return "builders" if kind == "builder" else f"{kind}s"
 
 
 def _unresolved_on(kind: str, identifier: str, sentence: str) -> ResourceError:
@@ -11673,7 +11677,7 @@ def _is_disowned(resource: dict) -> bool:
 def _require_disownable(data: dict, disown: tuple[tuple[str, str], ...]) -> None:
     """Each entry must be a resource this run records as its own (not removed), or one it already disowned."""
     for kind, identifier in disown:
-        resource = data["owned_resources"]["builders" if kind == "builder" else f"{kind}s"].get(identifier)
+        resource = _owned_bucket(data, kind).get(identifier)
         if resource is None or (resource["state"] == "removed" and not _is_disowned(resource)):
             raise InvalidInput(f"Disown names a resource this run does not own: {kind} {identifier}.")
 
@@ -11687,13 +11691,18 @@ def _targets_disowned(data: dict, receipt: dict) -> bool:
     """Whether an exact control or removal receipt targets a resource the run has disowned."""
     if receipt["kind"] not in _EXACT_TARGET_KINDS:
         return False
-    _kind, plural, identifier = _owned_target(receipt["kind"], receipt["plan"])
-    resource = data["owned_resources"][plural].get(identifier)
+    kind, _plural_key, identifier = _owned_target(receipt["kind"], receipt["plan"])
+    resource = _owned_bucket(data, kind).get(identifier)
     return resource is not None and _is_disowned(resource)
 
 
+def _owned_bucket(data: dict, kind: str) -> dict:
+    """The run's recorded resources of one kind, keyed by identifier."""
+    return data["owned_resources"][_plural(kind)]
+
+
 def _owned_entry(data: dict, kind: str, identifier: str) -> dict:
-    return data["owned_resources"]["builders" if kind == "builder" else f"{kind}s"][identifier]
+    return _owned_bucket(data, kind)[identifier]
 
 
 def _apply_disown(data: dict, disown: tuple[tuple[str, str], ...]) -> None:
