@@ -3683,6 +3683,24 @@ def _promote_docker_result(adapter, receipt: dict, result: DockerResult, data: d
     raise ResourceError("Docker receipt kind cannot be promoted.")
 
 
+def _first_sight_of_oom(data: dict, recorded: dict, observed: dict) -> bool:
+    """Whether a refreshed container shows an OOM kill the run has not recorded and may still record.
+
+    The observation pass is paused while a compose receipt is open, so its promotion can be the first to see it. Not
+    during recovery (its outcome is fixed) and not over an earlier failure, which keeps its own cause.
+    """
+    seen = observed["evidence"].get("control") or {}
+    known = recorded["evidence"].get("control") or {}
+    same_generation = all(known.get(key) == seen.get(key) for key in ("started_at", "restart_count"))
+    return (
+        seen.get("oom_killed") is True
+        and not (same_generation and known.get("oom_killed") is True)
+        and data["recovery_actor"] is None
+        and data["state"] in ("active", "stopping")
+        and data["infrastructure_failure"] is None
+    )
+
+
 # The evidence keys that identify one compose container for the run's lifetime (rendered config, immutable facts).
 _CONTAINER_IDENTITY_KEYS = ("compose_project", "config_sha256", "created", "image_id", "service", "completed_service")
 
@@ -3787,6 +3805,8 @@ def _finish_receipt_locked(
                 raise ResourceError("Docker promotion collides with another exact owned identity.")
             if not replaced:
                 resource = {**resource, "receipt_id": existing["receipt_id"]}
+            if container_refresh and _first_sight_of_oom(data, existing, resource):
+                _set_container_oom(data)
         data["owned_resources"][plural][resource["identifier"]] = resource
         if receipt["kind"] == "image-pull" and resource["kind"] == "image":
             data["image_bindings"][receipt["plan"]["reference"]] = {

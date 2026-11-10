@@ -37,6 +37,7 @@ from tests.integration.account_fixtures import (
     dead_identity,
     kill_guardian,
     pause_guardian,
+    prewrite_withdrawal,
     resume_guardian,
     retire_actor,
 )
@@ -3671,3 +3672,100 @@ def test_a_podman_build_still_refuses_another_repository(tmp_path: Path) -> None
         lifecycle.dispatch_docker(
             handle._context, descriptor, fake, ("buildx", "build", "--tag", "fixture:latest", ".")
         )
+
+
+def _oom_kill(fake: FakeDockerPort, container_id: str = "c" * 64) -> None:
+    fake.containers[container_id]["State"]["OOMKilled"] = True
+    fake.stop_container(container_id)
+
+
+def _end_after_oom(handle, descriptor, fake: FakeDockerPort) -> None:
+    """Clear the recorded OOM (it fails any leave) and end the run cleanly."""
+    recorded = json.loads(handle._context.record.read_text())
+    recorded["infrastructure_failure"] = None
+    recorded.pop("failure_evidence", None)
+    lifecycle.atomic_json(handle._context.record, recorded)  # one atomic replacement: the guardian reads it live
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "down", "--volumes"))
+    handle.leave("failed")
+
+
+def test_compose_run_promotion_records_a_sibling_oom_kill(tmp_path: Path) -> None:
+    """Nothing observes the services while a compose run is open: its promotion is the first to see the OOM."""
+    fake = FakeDockerPort()
+    _services, handle, descriptor = _recovering_run(tmp_path, fake)
+    _oom_kill(fake)
+
+    result = lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+
+    record = json.loads(handle._context.record.read_text())
+    assert result.exit_code == 0
+    assert record["infrastructure_failure"] == "container-oom"
+    assert (record["failure_evidence"]["category"], record["failure_evidence"]["observer"]) == ("breach", "container")
+    assert record["failure_evidence"]["first_observed"]["state"] == "active"
+    _end_after_oom(handle, descriptor, fake)
+
+
+def test_promotion_oom_counts_a_container_without_recorded_control(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    _services, handle, descriptor = _recovering_run(tmp_path, fake)
+    record = json.loads(handle._context.record.read_text())
+    record["owned_resources"]["containers"]["c" * 64]["evidence"].pop("control")
+    lifecycle.atomic_json(handle._context.record, record)  # one atomic replacement: the guardian reads it live
+    _oom_kill(fake)
+
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+
+    assert json.loads(handle._context.record.read_text())["infrastructure_failure"] == "container-oom"
+    _end_after_oom(handle, descriptor, fake)
+
+
+def test_promotion_oom_keeps_an_earlier_failure(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    _services, handle, descriptor = _recovering_run(tmp_path, fake)
+    record = json.loads(handle._context.record.read_text())
+    record["infrastructure_failure"] = "compose-up-failed"
+    lifecycle.atomic_json(handle._context.record, record)  # one atomic replacement: the guardian reads it live
+    _oom_kill(fake)
+
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+
+    record = json.loads(handle._context.record.read_text())
+    assert record["infrastructure_failure"] == "compose-up-failed"
+    assert "failure_evidence" not in record
+    _end_after_oom(handle, descriptor, fake)
+
+
+def test_live_leave_reconciliation_records_a_sibling_oom_kill(tmp_path: Path, request: pytest.FixtureRequest) -> None:
+    """An ordinary leave: the guardian reconciles the open compose run in ``stopping``; the OOM is still recorded."""
+    fake = FakeDockerPort()
+    services, handle, descriptor = _recovering_run(tmp_path, fake)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+    resume = _pause_for_invalid_records(request, handle._context)
+    _reopen_last_receipt(handle)
+    prewrite_withdrawal(handle._context, "passed", 30)
+    _oom_kill(fake)
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+
+    lifecycle._reconcile_docker_receipt(handle._context)  # the guardian's call in its ``stopping`` branch
+
+    record = json.loads(handle._context.record.read_text())
+    assert (record["state"], record["recovery_actor"]) == ("stopping", None)
+    assert record["infrastructure_failure"] == "container-oom"
+    resume()
+    _abandon(services, handle)
+    assert lifecycle.recover_run(handle._context, _test_directory=services.root / "admission").state == "complete"
+
+
+def test_recovery_does_not_record_a_sibling_oom_kill(tmp_path: Path) -> None:
+    """Recovery's outcome and failure are already fixed: the refreshed values are stored, nothing more."""
+    fake = FakeDockerPort()
+    services, handle, descriptor = _recovering_run(tmp_path, fake)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+    _reopen_last_receipt(handle)
+    _oom_kill(fake)
+    _abandon(services, handle)
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+
+    assert lifecycle.recover_run(handle._context, _test_directory=services.root / "admission").state == "complete"
+
+    assert json.loads(handle._context.record.read_text())["infrastructure_failure"] != "container-oom"
