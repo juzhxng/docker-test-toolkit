@@ -88,10 +88,11 @@ def test_run_recover_reports_disowned_resources(monkeypatch: pytest.MonkeyPatch)
         [{"kind": "pod", "identifier": "v"}],
         [{"kind": "volume"}],
         [{"kind": "volume", "identifier": 1}],
+        [{"kind": [], "identifier": "v"}],
         ["volume"],
         [{"kind": "volume", "identifier": str(index)} for index in range(65)],
     ],
-    ids=["object", "string", "kind", "missing", "type", "entry", "too-many"],
+    ids=["object", "string", "kind", "missing", "type", "unhashable-kind", "entry", "too-many"],
 )
 def test_run_recover_refuses_a_malformed_disown_request(monkeypatch: pytest.MonkeyPatch, disown: object) -> None:
     with pytest.raises(InvalidInput, match="disown request"):

@@ -200,7 +200,7 @@ them before `leave`, on the failure path only, so passing runs are not slowed:
   permissions and their deletion.
 
 ```python
-def keep_service_logs(handle, services, directory, tail=200):
+def keep_service_logs(handle, services, project, directory, tail=200):
     docker = handle.docker_context
     target = directory / handle.run_id  # outside handle.private_root
     for service in services:
@@ -208,25 +208,27 @@ def keep_service_logs(handle, services, directory, tail=200):
             target.mkdir(parents=True, exist_ok=True)
             read = subprocess.run(
                 [str(docker.executable), "compose", "logs", "--no-color", "--timestamps", "--tail", str(tail), service],
+                cwd=project,
                 env=dict(docker.environment),
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=60,
             )
             if read.returncode:
                 print(f"logs of {service} not kept: exit {read.returncode}: {read.stderr[-500:]}", file=sys.stderr)
                 continue
-            (target / f"{service}.log").write_text(read.stdout)
-        except (OSError, subprocess.SubprocessError) as error:
-            print(f"logs of {service} not kept: {error}", file=sys.stderr)
+            (target / f"{service}.log").write_text(read.stdout, encoding="utf-8")
+        except Exception as error:  # a capture never changes the outcome or stops cleanup
+            print(f"logs of {service} not kept: {error!r}", file=sys.stderr)
 
 
 outcome = "passed"
 try:
     run_the_tests()
 except BaseException:
-    keep_service_logs(handle, closure, Path("test-logs"))
-    outcome = "failed"
+    outcome = "failed"  # first, so nothing below can turn a failure into a passed leave
+    keep_service_logs(handle, closure, project_root, Path("test-logs"))
     raise
 finally:
     handle.leave(outcome)

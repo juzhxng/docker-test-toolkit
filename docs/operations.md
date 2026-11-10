@@ -285,8 +285,9 @@ the report below. Its `infrastructure_failure` stays empty. The run record carri
 - `reason` is the waiting reason that began first. `pressure` is the last host and daemon sample the admission took
   (headroom, swap used and total, swap-out rate over the window, daemon memory), or `null` when it took none, for
   example while it only waited behind an earlier ticket.
-- A run whose requester left before the queue deadline, or that expired before its first pass, records no evidence. An
-  expiry keeps its evidence even when the requester has gone by the time the guardian writes it.
+- A run whose guardian found the requester gone while the queue deadline had not passed, or that expired before its
+  first pass, records no evidence. Once the guardian finds the deadline passed, the expiry keeps its evidence whether or
+  not the requester is still there.
 
 The requester's `Admission ended before grant` message names the longest waiting reasons. The guardian notices the
 expiry only after its current pass, so after its own deadline the requester waits up to 5 seconds for the guardian's
@@ -579,10 +580,12 @@ names the run and the last completed phase (`claim`, `operation`, `receipts`, `c
 `publish`); the claim and the recovery actor stay, and the same command resumes once the claimant is gone.
 
 A Compose command re-observes every container of its project. A container whose identity is unchanged (identifier,
-name, creation time, image, Compose project, configuration hash, service) is accepted when only its state, start
+name, creation time, image, Compose project, configuration hash, service and whether it is a completed one-shot
+service) is accepted when only its state, start
 generation or port map changed since the run recorded it: a restart, a stop, an engine restart. Recovery of a run
 killed during `compose run` therefore succeeds after its containers stopped. A promotion that is the first to see a
-container killed for memory records `container-oom`, unless a recovery is running or the run already records a failure.
+container killed for memory records `container-oom`, unless a recovery is running or the run already records a failure;
+so does a service that a `compose` command finds already killed for memory when it first records it.
 
 When a recorded resource's identity does contradict its record, the refusal has reason `owned-identity-conflict` and
 `error.context.conflict` names it: `kind`, `identifier`, `name` and `keys`, the paths that differ (`identifier`, `name`,
@@ -605,8 +608,12 @@ example a volume replaced by another one under its name, `run recover` can relea
   is retained, never reached a grant, is a release recovery, or is already complete with an entry not yet disowned, is
   `invalid_input` and writes nothing.
 - Recovery marks the entries in its first write (`state removed`, `evidence.disowned`) and then leaves those objects on
-  the daemon untouched: no inspection, stop, removal or re-adoption, and a receipt or interrupted container control that
-  targets one ends without a Docker call. The result lists every disowned resource under `disowned`.
+  the daemon unchanged: it may still read one, but it never stops, removes or re-adopts it, and a receipt or interrupted
+  container control that targets one ends without a Docker call. The result lists every disowned resource under
+  `disowned`.
+- A BuildKit worker container is disowned only together with its builder (removing the builder would delete the
+  worker); a disowned builder does not take its worker along, so list both. While the run has a disowned volume, its
+  containers are removed without `-v`, so a disowned anonymous volume is kept.
 - A network or volume still used by a disowned container cannot be removed; that refusal names it in
   `error.context.resource`. Add it to the next request; nothing is disowned implicitly.
 - A disowned object is the operator's from then on. `cleanup project` still lists, and on `--execute` removes, an

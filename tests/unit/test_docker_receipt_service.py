@@ -2905,7 +2905,7 @@ def test_recovery_finishes_a_pending_compose_run_after_its_siblings_stopped(tmp_
     record = json.loads(handle._context.record.read_text())
     assert status.state == "complete"
     assert lifecycle.quiescence_blockers(record) == ()
-    assert record["docker_receipts"][receipt["id"]]["state"] not in {"pending", "unresolved"}
+    assert record["docker_receipts"][receipt["id"]]["state"] == "failed"  # its one-off is gone: nothing to promote
     assert all(item["state"] == "removed" for items in record["owned_resources"].values() for item in items.values())
     assert "c" * 64 not in fake.containers
 
@@ -4052,7 +4052,8 @@ def test_disown_is_refused_for_a_retained_run(tmp_path: Path) -> None:
     assert handle._context.record.read_bytes() == before
 
 
-def test_disown_is_refused_for_a_run_that_never_reached_a_grant(tmp_path: Path) -> None:
+def test_disown_on_a_run_that_never_reached_a_grant_names_nothing_it_owns(tmp_path: Path) -> None:
+    """An ungranted run owns no resource, so any request fails the ownership check before anything is written."""
     fake = FakeDockerPort()
     project = tmp_path / "project"
     project.mkdir()
@@ -4060,7 +4061,7 @@ def test_disown_is_refused_for_a_run_that_never_reached_a_grant(tmp_path: Path) 
     run = services.open_run(_spec(project), docker_factory=lambda: fake, admit_docker=True)
     before = run._context.record.read_bytes()
 
-    with pytest.raises(InvalidInput, match=r"(?i)disown"):
+    with pytest.raises(InvalidInput, match="does not own"):
         lifecycle.recover_run(
             run._context, disown=(("container", "c" * 64),), _test_directory=services.root / "admission"
         )
@@ -4287,3 +4288,112 @@ def test_pending_container_control_drops_a_disowned_target(tmp_path: Path, monke
     assert record["pending_operation"] is None
     assert record["last_operation"]["outcome"] == "failed"
     assert target_id in fake.containers
+
+
+# config_sha256 is refused earlier, before any receipt, by the configuration drift guard (InvalidInput).
+@pytest.mark.parametrize("key", ["service", "image_id", "compose_project", "completed_service"])
+def test_compose_run_refuses_a_change_of_any_identity_key(tmp_path: Path, key: str) -> None:
+    """AC4 for every stable key: a recorded value that no longer matches is a different container, not a refresh."""
+    fake = FakeDockerPort()
+    services, handle, descriptor = _recovering_run(tmp_path, fake)
+    original = _record(handle)["owned_resources"]["containers"]["c" * 64]["evidence"][key]
+    changed = (not original) if isinstance(original, bool) else f"{original}-recorded-other"
+    _edit_record(
+        handle, lambda data: data["owned_resources"]["containers"]["c" * 64]["evidence"].update({key: changed})
+    )
+
+    with pytest.raises(IncompleteCleanup, match="collides") as raised:
+        lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
+
+    assert raised.value.details["conflict"]["keys"] == [f"evidence.{key}"]
+    _edit_record(
+        handle, lambda data: data["owned_resources"]["containers"]["c" * 64]["evidence"].update({key: original})
+    )
+    abandon_run(handle._context, services.root / "admission")
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+    assert _recover(services, handle).state == "complete"
+
+
+def test_dispatcher_conflict_before_the_receipt_writes_none(tmp_path: Path) -> None:
+    """The pre-receipt guard of a compose command names the recorded network and journals nothing."""
+    fake = FakeDockerPort()
+    handle, descriptor = _entered_run(tmp_path, fake)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "up", "--detach"))
+    network_id = next(iter(_record(handle)["owned_resources"]["networks"]))
+    receipts = len(_record(handle)["docker_receipts"])
+    fake.networks[network_id]["Created"] = "foreign"
+
+    with pytest.raises(ResourceError, match="Owned network identity changed") as raised:
+        lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "restart", "fixture"))
+
+    assert raised.value.reason == "owned-identity-conflict"
+    assert raised.value.details["conflict"]["identifier"] == network_id
+    assert len(_record(handle)["docker_receipts"]) == receipts
+    fake.networks[network_id]["Created"] = "compose-network"
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "down", "--volumes"))
+    assert handle.leave().cleanup_outcome == "complete"
+
+
+def test_a_repeated_disown_and_a_plain_rerun_change_nothing(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    services, handle = _stuck_by_a_renamed_container(tmp_path, fake)
+    request = (("container", "c" * 64),)
+    assert _recover(services, handle, request).state == "complete"
+    owned = _record(handle)["owned_resources"]
+
+    assert _recover(services, handle, request).state == "complete"
+    assert _recover(services, handle).state == "complete"
+
+    assert _record(handle)["owned_resources"] == owned
+
+
+def test_disowning_a_buildkit_worker_requires_its_builder(tmp_path: Path) -> None:
+    """Removing the builder would delete its worker: a worker is disowned only together with its builder."""
+    fake = FakeDockerPort()
+    project = tmp_path / "project"
+    project.mkdir()
+    services = build_test_services(tmp_path / "state")
+    handle = services.open_run(_spec(project), docker_factory=lambda: fake, admit_docker=True).enter()
+    _ = handle.docker_context
+    descriptor = json.loads((handle.private_root / "docker-authority.json").read_text())
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("buildx", "create"))
+    builder_id, builder = next(iter(_record(handle)["owned_resources"]["builders"].items()))
+    worker_id = builder["evidence"]["buildkit_container_id"]
+    abandon_run(handle._context, services.root / "admission")
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+    before = handle._context.record.read_bytes()
+
+    with pytest.raises(InvalidInput, match=f"builder {builder_id}"):
+        _recover(services, handle, (("container", worker_id),))
+    assert handle._context.record.read_bytes() == before
+
+    assert _recover(services, handle, (("container", worker_id), ("builder", builder_id))).state == "complete"
+    assert worker_id in fake.containers
+
+
+def test_container_removal_keeps_a_disowned_anonymous_volume(tmp_path: Path) -> None:
+    """``container rm -v`` would delete an anonymous volume the run disowned: the run then removes without ``-v``."""
+    fake = FakeDockerPort()
+    fake.compose_image_volume = True
+    services, handle, _descriptor = _recovering_run(tmp_path, fake)
+    abandon_run(handle._context, services.root / "admission")
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+
+    assert _recover(services, handle, (("volume", "7" * 64),)).state == "complete"
+
+    removals = [command for command in fake.commands if command[:2] == ("container", "rm")]
+    assert removals and all("-v" not in command for command in removals)
+    assert "7" * 64 in fake.volumes
+
+
+def test_compose_promotion_records_an_oom_kill_of_a_new_container(tmp_path: Path) -> None:
+    """A service killed for memory before its first promotion is stored stopped: nothing would observe it again."""
+    fake = FakeDockerPort()
+    handle, descriptor = _entered_run(tmp_path, fake)
+    fake.next_container_mutation = lambda container: container["State"].update(OOMKilled=True, Running=False)
+
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "up", "--detach"))
+
+    record = _record(handle)
+    assert record["infrastructure_failure"] == "container-oom"
+    _end_after_oom(handle, descriptor, fake)

@@ -3899,6 +3899,14 @@ def _apply_receipt_result(
                 resource = {**resource, "receipt_id": existing["receipt_id"]}
             if container_refresh and _first_sight_of_oom(data, existing, resource):
                 _set_container_oom(data)
+        elif (
+            # a service killed before its first promotion is stored stopped and never observed again; a compose run's
+            # one-off is the caller's own task, whose exit code already reports its fate
+            resource["kind"] == "container"
+            and receipt["kind"] == "compose"
+            and _first_sight_of_oom(data, {"evidence": {}}, resource)
+        ):
+            _set_container_oom(data)
         data["owned_resources"][plural][resource["identifier"]] = resource
         if receipt["kind"] == "image-pull" and resource["kind"] == "image":
             data["image_bindings"][receipt["plan"]["reference"]] = {
@@ -4355,11 +4363,20 @@ def _docker_receipts_terminal(data: dict) -> bool:
     return all(receipt["state"] not in {"pending", "unresolved"} for receipt in data["docker_receipts"].values())
 
 
-def _owned_removal_command(kind: str, identity: str, reference: str | None = None) -> tuple[str, ...]:
+def _disowned_any_volume(data: dict) -> bool:
+    return any(is_disowned(volume) for volume in data["owned_resources"]["volumes"].values())
+
+
+def _owned_removal_command(
+    kind: str, identity: str, reference: str | None = None, *, keep_anonymous_volumes: bool = False
+) -> tuple[str, ...]:
     if kind == "builder":
         return "buildx", "rm", identity
     if kind == "container":
-        return "container", "rm", "-f", "-v", identity
+        # ``-v`` also deletes the container's anonymous volumes; a run that disowned one must not delete it that way
+        return (
+            ("container", "rm", "-f", identity) if keep_anonymous_volumes else ("container", "rm", "-f", "-v", identity)
+        )
     if kind == "image" and reference is not None:
         return "image", "rm", "--force", reference
     return kind, "rm", identity
@@ -4469,7 +4486,7 @@ def _reconcile_receipt(
                 if (key in receipt["plan"]) != (key in expected) or receipt["plan"].get(key) != expected.get(key):
                     raise ResourceError("Docker image removal receipt changed exact authority.")
         else:
-            argv = _owned_removal_command(kind, identity)
+            argv = _owned_removal_command(kind, identity, keep_anonymous_volumes=_disowned_any_volume(data))
         result = adapter.execute(argv, timeout_seconds=30, hold_fd=hold_fd) if exists else DockerResult(0, "", "")
         state, resources = _promote_docker_result(adapter, receipt, result, data)
     _finish_docker_receipt(context, receipt, state, result, resources, deadline_ns)
@@ -5346,7 +5363,7 @@ def _remove_owned(
                 argv, image_plan = _image_removal(resource)
                 plan.update(image_plan)
             else:
-                argv = _owned_removal_command(kind, identity)
+                argv = _owned_removal_command(kind, identity, keep_anonymous_volumes=_disowned_any_volume(current))
             _run_owned_mutation(context, argv, f"{kind}-rm", plan, deadline_ns, hold_fd)
 
 
@@ -7368,7 +7385,7 @@ def _admission_report_record(context: RunContext, deadline: Deadline, clock: Nat
     recorded or the recorded one is no longer executing. Any stop without completion is followed by one final read,
     because the write can land between the last read and that decision.
     """
-    report_end = clock.read() + _ADMISSION_REPORT_NS
+    report_end = deadline.expires_ns + _ADMISSION_REPORT_NS  # at most 5 s after the deadline, however late we start
     while True:
         data = _load_run(context)
         if data["state"] == "complete" or data["generation"]:
@@ -11684,10 +11701,20 @@ def _grant_bears_resources(data: dict) -> bool:
 
 def _require_disownable(data: dict, disown: tuple[tuple[str, str], ...]) -> None:
     """Each entry must be a resource this run records as its own (not removed), or one it already disowned."""
+    requested = set(disown)
     for kind, identifier in disown:
         resource = _owned_bucket(data, kind).get(identifier)
         if resource is None or (resource["state"] == "removed" and not is_disowned(resource)):
             raise InvalidInput(f"Disown names a resource this run does not own: {kind} {identifier}.")
+        builder = resource["evidence"].get("builder") if kind == "container" else None
+        if (
+            isinstance(builder, str)
+            and builder in data["owned_resources"]["builders"]
+            and not is_disowned(data["owned_resources"]["builders"][builder])
+            and ("builder", builder) not in requested
+        ):
+            # removing the builder would delete its worker: a worker leaves the run only with its builder
+            raise InvalidInput(f"Disown the BuildKit worker {identifier} together with its builder {builder}.")
 
 
 _EXACT_TARGET_KINDS = frozenset(

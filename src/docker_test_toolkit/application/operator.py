@@ -62,7 +62,8 @@ def _disown_request(payload: dict) -> tuple[tuple[str, str], ...]:
     for entry in entries:
         if (
             not isinstance(entry, dict)
-            or entry.get("kind") not in _DISOWN_KINDS
+            or not isinstance(entry.get("kind"), str)
+            or entry["kind"] not in _DISOWN_KINDS
             or not isinstance(entry.get("identifier"), str)
             or not entry["identifier"]
         ):
