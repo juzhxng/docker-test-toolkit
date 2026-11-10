@@ -19,6 +19,7 @@ from docker_test_toolkit.domain.policy import (
     NAME,
     short_options,
 )
+from docker_test_toolkit.domain.records import owned_key
 from docker_test_toolkit.domain.share_policy import memory_bytes
 
 _CONTAINER_ID = re.compile(r"[0-9a-f]{64}\Z")
@@ -660,8 +661,7 @@ def classify_command(
         if len(argv) != 3:
             raise InvalidInput("Docker removal accepts exactly one exact owned target.")
         kind = "builder" if argv[0] == "buildx" else argv[0]
-        plural = "builders" if kind == "builder" else f"{kind}s"
-        _owned_resource(owned, plural, argv[2])
+        _owned_resource(owned, owned_key(kind), argv[2])
         return ClassifiedDockerCommand(f"{kind}-rm", argv, {f"{kind}_id": argv[2]})
     raise InvalidInput("Docker command is outside the classified toolkit surface.")
 

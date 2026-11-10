@@ -95,6 +95,16 @@ stderr usually shows which (one toolkit line versus the child's own output), but
 hint, not proof. The share-rule refusal's text changed (rule and outcome first, then `Reason:`); its reason
 `share-rule` and exit 2 did not. Error messages are redacted before they are cut to 512 characters.
 
+0.7.7 changes no record, receipt or queue format. Everything it adds is additive: the evidence key `disowned` on an
+ordinary `removed` resource, which older versions load and ignore; the `run recover` input field `disown`, which older
+versions ignore; the result key `disowned`; and the reason `owned-identity-conflict`, which reaches an older peer as
+`unspecified` while `context.conflict` and the message still name the resource. Receipts may end in another existing
+state than before (`failed` or `unresolved` instead of `pending` for an identity conflict), and an expired admission's
+report timing changed; [Operations](operations.md#dead-owners-and-the-takeover-worker) and
+[Admission expiry report](operations.md#admission-expiry-report) describe the behaviour. An older version that
+resumes a recovery a 0.7.7 recoverer began does not know the marker; finish a recovery with the version that started
+it.
+
 Protocol `batch:1` versions only the live Python facade and bridge messages. It adds no durable field and does not change
 run, project, account or cleanup record schemas, so a crashed batch has no toolkit batch status or replay operation; its
 recovery is decided solely from its ordinary run records.

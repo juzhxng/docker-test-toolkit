@@ -294,6 +294,29 @@ def test_retention_probe_containers_remove_a_recorded_leftover_on_its_own_daemon
         _docker("rm", "-f", name)
 
 
+def test_retention_keeps_a_disowned_builders_state_volume(tmp_path: Path, volumes: list[str]) -> None:
+    """A disowned builder is no longer the run's: its state volume stays, reported as such, not as unpromoted."""
+    account, registry = _world(tmp_path)
+    docker = build_docker_adapter()
+    builder = f"dtt-{uuid.uuid4().hex[:12]}-disowned"
+    volume = f"buildx_buildkit_{builder}0_state"
+    volumes.append(volume)
+    assert _docker("volume", "create", volume).returncode == 0
+    created_at = _docker("volume", "inspect", "--format", "{{.CreatedAt}}", volume).stdout.strip()
+    _run_record(
+        registry,
+        docker.observe_daemon().daemon_id,
+        builder,
+        {"state_volume": {"name": volume, "created_at": created_at}, "disowned": True},
+    )
+
+    kinds = _pass(account, registry, docker=docker)
+
+    assert _docker("volume", "inspect", volume).returncode == 0
+    skipped = {item["id"]: item["reason"] for item in kinds["builder_volumes"]["skipped"]}
+    assert skipped[volume] == "disowned"
+
+
 def test_retention_reports_an_unpromoted_builder_volume_and_keeps_it(tmp_path: Path, volumes: list[str]) -> None:
     # A run killed between `buildx create` and promotion: a name and a client clock cannot prove the volume is ours.
     account, registry = _world(tmp_path)

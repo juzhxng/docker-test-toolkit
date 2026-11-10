@@ -285,12 +285,17 @@ the report below. Its `infrastructure_failure` stays empty. The run record carri
 - `reason` is the waiting reason that began first. `pressure` is the last host and daemon sample the admission took
   (headroom, swap used and total, swap-out rate over the window, daemon memory), or `null` when it took none, for
   example while it only waited behind an earlier ticket.
-- A run whose requester left, or that expired before its first pass, records no evidence.
+- A run whose guardian found the requester gone while the queue deadline had not passed, or that expired before its
+  first pass, records no evidence. Once the guardian finds the deadline passed, the expiry keeps its evidence whether or
+  not the requester is still there.
 
-The requester's `Admission ended before grant` message names the longest waiting reasons. If the requester's own deadline
-ends first it says `admission diagnostics not yet persisted by the guardian`; the evidence appears in the record when the
-guardian finishes. The accounting is kept in the guardian's memory: if the guardian dies, recovery records `guardian-lost`
-and the report is lost.
+The requester's `Admission ended before grant` message names the longest waiting reasons. The guardian notices the
+expiry only after its current pass, so after its own deadline the requester waits up to 5 seconds for the guardian's
+write, reading the record every 100 ms, and reports the waits as soon as they are there. It stops at once when the
+guardian is gone, and reads the record once more whenever it stops without them. If they are still not written it says
+`admission diagnostics not yet persisted by the guardian`; the evidence then appears in the record when the guardian
+finishes. A pass slowed by Docker reads under memory pressure can take longer than 5 seconds. The accounting is kept in
+the guardian's memory: if the guardian dies, recovery records `guardian-lost` and the report is lost.
 
 An observation that fails while a run waits is classified the same way as for an active run. A late read, or co-holder
 records that stay unstable, is only another waiting reason: the next pass decides from fresh inputs. An unreadable
@@ -423,7 +428,7 @@ records name; everything it cannot prove is its own is reported, never deleted.
 | `build_cache` | whole generations, oldest first across every project, while the store exceeds `clamp(filesystem / 64, 4 GiB, 32 GiB)`; an orphaned project's generations get no priority | a generation a build is reading (`busy`; the next oldest goes instead, and `over-cap-protected` with bytes when the busy ones keep the store over its cap) |
 | `archives` | archived run records whose bytes match the digest in their name, older than 90 days (by the later of mtime and ctime), then the oldest while the archive store exceeds `clamp(filesystem / 1024, 64 MiB, 1 GiB)` | a file with an archive name whose bytes do not verify (`unverified`) |
 | `session_roots` | in a session a project record names and no project has an indexed run in: that project's own empty folder, then the session folder once empty and older than a day | a session folder still holding the project's content (`has-content`), one no record names (`unrecorded`); a session of a live or retained run is not entered, and other entries in a session folder are left |
-| `builder_volumes` | a completed run's Buildx state volume on its own daemon whose creation time still matches the recorded one | another incarnation (`identity-changed`), a builder killed before promotion (`unpromoted`), a toolkit-named volume no record names (`unrecorded`), a volume in use (`in-use`) |
+| `builder_volumes` | a completed run's Buildx state volume on its own daemon whose creation time still matches the recorded one | another incarnation (`identity-changed`), a builder killed before promotion (`unpromoted`), a toolkit-named volume no record names (`unrecorded`), a volume in use (`in-use`), the volume of a builder a recovery disowned (`disowned`) |
 | `probe_containers` | a probe container left by a killed process, recorded on this daemon, older than 60 s | another daemon's (`other-daemon`), a record that is not a private regular file of a probe's name (`unreadable`) |
 | `pending_images` | a handed-off image nobody uses any more, with the leave drain's identity checks | an image that carries a tag its hand-off did not record (`re-tagged`; its entry is dropped) |
 
@@ -573,6 +578,57 @@ granted, all inside its own queue deadline; choose the deadline, and the outer t
 Recovery has one deadline (the run's cleanup budget plus 60 seconds). When it ends, the error is `lock-deadline` and
 names the run and the last completed phase (`claim`, `operation`, `receipts`, `consumers`, `resources`, `private-root`,
 `publish`); the claim and the recovery actor stay, and the same command resumes once the claimant is gone.
+
+A Compose command re-observes every container of its project. A container whose identity is unchanged (identifier,
+name, creation time, image, Compose project, configuration hash, service and whether it is a completed one-shot
+service) is accepted when only its state, start
+generation or port map changed since the run recorded it: a restart, a stop, an engine restart. Recovery of a run
+killed during `compose run` therefore succeeds after its containers stopped. The promotion of a Compose command that
+is the first to see a container killed for memory records `container-oom`, unless a recovery is running or the run
+already records a failure;
+so does a service that a `compose` command (not `compose run`, whose one-off reports through its own exit code) finds
+already killed for memory when it first records it.
+
+When a recorded resource's identity does contradict its record, the refusal has reason `owned-identity-conflict` and
+`error.context.conflict` names it: `kind`, `identifier`, `name` and `keys`, the paths that differ (`identifier`, `name`,
+`evidence.<key>`, or `observed.labels` for a label map Docker no longer reports; never values). A conflict found before
+a command ran ends that command's receipt `failed`; one found after a command ran ends it `unresolved`, and a live
+command then fails with `incomplete_cleanup` carrying the same conflict. A removal that stays unresolved names its
+target in `error.context.resource`.
+
+#### Disowning a conflicting resource
+
+Fix the cause and rerun `run recover` when you can. When a recorded object can no longer be proven the run's own, for
+example a volume replaced by another one under its name, `run recover` can release exactly that run. Copy `kind` and
+`identifier` from the refusal into the input:
+
+```json
+{"context": {"...the run's six locator fields...": "..."}, "disown": [{"kind": "volume", "identifier": "<name>"}]}
+```
+
+- At most 64 entries; each must be a resource this run records as its own. Anything else, or a request on a run that
+  is retained, never reached a grant, is a release recovery, or is already complete with an entry not yet disowned, is
+  `invalid_input` and writes nothing.
+- Recovery marks the entries in its first write (`state removed`, `evidence.disowned`) and then leaves those objects on
+  the daemon unchanged: it may still read one, but it never stops, removes or re-adopts it, and a receipt or interrupted
+  container control that targets one ends without a Docker call. The result lists every disowned resource under
+  `disowned`.
+- A BuildKit worker container is disowned only together with its builder (removing the builder would delete the
+  worker), unless the builder is already removed; a disowned builder does not take its worker along, so list both.
+  While the run has a disowned anonymous volume, its containers are removed without `-v`, so that volume is kept.
+- A network or volume still used by a disowned container cannot be removed; that refusal names it in
+  `error.context.resource`. Add it to the next request; nothing is disowned implicitly.
+- A disowned object is the operator's from then on. `cleanup project` still lists, and on `--execute` removes, an
+  object that carries this project's toolkit labels (a container started from an image the run built does), as for any
+  object labelled as the project's.
+- Finish a recovery with the toolkit version that started it: an older version does not know the marker and could
+  adopt a new object under a disowned name or remove a disowned builder's state volume.
+- A disown does not withdraw an image hand-off to the account's pending deletions written before it.
+- Recover from the machine and process namespace that ran the run, or after its processes are known to be gone: a
+  recoverer in another PID namespace observes them as gone.
+
+This is the one supported exception to "never force" and to "do not delete records or resources manually": it changes
+only the named entries of the one run's record and no Docker object.
 
 ### Unverified history
 
@@ -856,6 +912,9 @@ exact project cleanup, which reconciles every recorded ordinary run. Start a new
     same command. For `leave` see [Leaving a run](#leaving-a-run).
   - `retirement-incomplete`: `leave` saw the guardian's acknowledgment, but the guardian died before it retired the
     run's queue or index reference; run `run recover` on the run (see [Leaving a run](#leaving-a-run)).
+  - `owned-identity-conflict`: an object recorded as the run's own no longer matches its record; `context.conflict`
+    names its kind, identifier and the differing keys. Fix the cause and rerun, or release the run with `disown` (see
+    [Disowning a conflicting resource](#disowning-a-conflicting-resource)).
   - `toolkit-upgraded`: another version was installed after this process loaded the toolkit; restart the process.
   - `state-format-newer`: a newer toolkit wrote the account; install a version with that state format or newer.
   - `toolkit-not-installed`, `toolkit-load-unresolved`: no installation runs this code, or it was imported through

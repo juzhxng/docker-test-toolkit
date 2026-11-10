@@ -229,6 +229,31 @@ def test_envelope_carries_observation_reasons(reason: str) -> None:
     assert envelope["error"]["context"]["reason"] == reason
 
 
+def test_envelope_carries_the_identity_conflict() -> None:
+    conflict = {"kind": "volume", "identifier": "v", "name": "v", "keys": ["evidence.created"]}
+
+    envelope, _ = error_envelope(
+        "run.recover", ResourceError("x", reason="owned-identity-conflict", details={"conflict": conflict})
+    )
+
+    assert envelope["error"]["context"]["reason"] == "owned-identity-conflict"
+    assert envelope["error"]["context"]["conflict"] == conflict
+
+
+def test_identity_conflict_message_keeps_its_resource_within_the_cut() -> None:
+    resource = {"kind": "container", "identifier": "c" * 64, "name": "n"}
+    error = lifecycle._identity_conflict(
+        "Docker promotion collides with another exact owned identity.",
+        resource,
+        [f"evidence.key{index:02d}" for index in range(40)],
+    )
+
+    envelope, _ = error_envelope("run.recover", error)
+
+    assert len(envelope["error"]["message"]) == 512
+    assert f"Resource: container {'c' * 64};" in envelope["error"]["message"]
+
+
 def test_every_reason_the_toolkit_raises_is_in_the_closed_vocabulary() -> None:
     import re
     from pathlib import Path

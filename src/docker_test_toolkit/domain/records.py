@@ -367,3 +367,14 @@ def validate_hold_timeline(value: object) -> None:
         or (release_origin == value["origin"] and released_ns < ticks[2])
     ):
         raise invalid
+
+
+def is_disowned(resource: object) -> bool:
+    """Whether a recorded owned resource carries the disown marker: no longer the run's, never touched for it."""
+    evidence = resource.get("evidence") if isinstance(resource, dict) else None
+    return isinstance(evidence, dict) and evidence.get("disowned") is True
+
+
+def owned_key(kind: str) -> str:
+    """The ``owned_resources`` key of a resource kind (``builder`` -> ``builders``)."""
+    return "builders" if kind == "builder" else f"{kind}s"

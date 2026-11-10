@@ -277,6 +277,7 @@ class EnterThread:
 
     def __init__(self, handle: RunHandle, *, existing_attempt: bool = False) -> None:
         self.error: BaseException | None = None
+        self.ended_tick: int | None = None  # the requester's monotonic tick when its entry returned or raised
         self._thread = threading.Thread(target=self._run, args=(handle, existing_attempt))
         self._thread.start()
 
@@ -288,6 +289,8 @@ class EnterThread:
                 handle.enter()
         except BaseException as error:  # the test inspects it
             self.error = error
+        finally:
+            self.ended_tick = lifecycle.NativeClock().read()
 
     def join(self, timeout: float = 20.0) -> None:
         self._thread.join(timeout)
@@ -852,6 +855,12 @@ def retire_actor(registry: Path, identity: dict, replacement: dict, *, account: 
     if account is not None:
         queue = json.loads((account / "queue.json").read_text())
         write_raw_queue(account, canonical_json_bytes(replace_identity(queue, identity, replacement)))
+
+
+def abandon_run(context: lifecycle.RunContext, account: Path) -> None:
+    """Model a killed run: its guardian is killed and the test process, its requester, counts as dead."""
+    kill_guardian(context)
+    retire_actor(context.project.state, current_identity(), dead_identity(), account=account)
 
 
 def start_live_actor(name: str = "actor") -> tuple[subprocess.Popen[str], dict]:

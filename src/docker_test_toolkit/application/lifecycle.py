@@ -29,12 +29,12 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Callable, ParamSpec, TextIO, TypeVar, cast
+from typing import BinaryIO, Callable, ParamSpec, TextIO, TypeGuard, TypeVar, cast
 
 from docker_test_toolkit.application import admission as account_queue
 from docker_test_toolkit.application import build_cache, image_archive, retention
@@ -213,7 +213,13 @@ from docker_test_toolkit.domain.policy import (
     version_at_least,
     vm_disk_host_directory,
 )
-from docker_test_toolkit.domain.records import validate_docker_state, validate_failure_evidence, validate_hold_timeline
+from docker_test_toolkit.domain.records import (
+    is_disowned,
+    owned_key,
+    validate_docker_state,
+    validate_failure_evidence,
+    validate_hold_timeline,
+)
 from docker_test_toolkit.domain.share_policy import (
     DAEMON_SOCKETS,
     BindFact,
@@ -2035,8 +2041,7 @@ def _exact_control_promotion(adapter, receipt: dict, result: DockerResult) -> tu
 
 
 def _exact_resource_removal_promotion(adapter, receipt: dict) -> tuple[str, list[dict]]:
-    kind = receipt["kind"].removesuffix("-rm")
-    target = receipt["plan"][f"{kind}_id"]
+    kind, target = _owned_target(receipt["kind"], receipt["plan"])
     if kind == "builder":
         return ("removed" if _builder_observation(adapter, target) is None else "unresolved"), []
     if kind == "image":
@@ -2102,6 +2107,8 @@ def _compose_promotion(adapter, receipt: dict, result: DockerResult, data: dict)
     for container_id in identifiers:
         if not re.fullmatch(r"[0-9a-f]{64}", container_id):
             return "unresolved", []
+        if container_id in known_containers and is_disowned(known_containers[container_id]):
+            continue  # no longer the run's: not inspected, not emitted
         inspection = adapter.inspect_exact(ExactInspection("container", container_id))
         item = inspection.attributes
         config = item.get("Config")
@@ -2230,7 +2237,8 @@ def _compose_promotion(adapter, receipt: dict, result: DockerResult, data: dict)
             )
         )
     planned_volumes = set(plan["volumes"])
-    for name in sorted(planned_volumes | attached_volumes):
+    disowned_volumes = {name for name, item in data["owned_resources"]["volumes"].items() if is_disowned(item)}
+    for name in sorted((planned_volumes | attached_volumes) - disowned_volumes):
         inspection = adapter.inspect_exact(ExactInspection("volume", name))
         if not inspection.exists:
             continue
@@ -2246,6 +2254,13 @@ def _compose_promotion(adapter, receipt: dict, result: DockerResult, data: dict)
                 and (name in planned_volumes or not _anonymous_volume(name, native_labels))
             )
         ):
+            recorded = data["owned_resources"]["volumes"].get(name)
+            if recorded is not None and recorded["state"] != "removed":  # the run's own volume, replaced under its name
+                raise _identity_conflict(
+                    "Owned volume identity changed before exact mutation.",
+                    recorded,
+                    _volume_identity_paths(recorded, item),
+                )
             return "unresolved", []
         resources.append(
             _owned_resource(
@@ -2266,7 +2281,11 @@ def _compose_promotion(adapter, receipt: dict, result: DockerResult, data: dict)
     for owned in data["owned_resources"].values():
         for previous in owned.values():
             identity = (previous["kind"], previous["identifier"])
-            if previous["evidence"].get("compose_project") != project or identity in live_identities:
+            if (
+                previous["evidence"].get("compose_project") != project
+                or identity in live_identities
+                or is_disowned(previous)
+            ):
                 continue
             if adapter.inspect_exact(ExactInspection(*identity)).exists:
                 if previous["kind"] == "volume" and _validate_owned_identity(adapter, previous):
@@ -2682,7 +2701,7 @@ def _prepare_compose_receipt(
     if any(not re.fullmatch(r"[0-9a-f]{64}", item) or item not in known_containers for item in identifiers):
         raise InvalidInput("Compose project identity collides with an unowned container.")
     for kind, names in (("network", networks), ("volume", volumes)):
-        owned = data["owned_resources"][f"{kind}s"]
+        owned = _owned_bucket(data, kind)
         for name in names:
             observation = adapter.inspect_exact(ExactInspection(kind, name))
             if observation.exists:
@@ -3683,6 +3702,67 @@ def _promote_docker_result(adapter, receipt: dict, result: DockerResult, data: d
     raise ResourceError("Docker receipt kind cannot be promoted.")
 
 
+def _identity_conflict(sentence: str, resource: dict, keys: Iterable[str]) -> ResourceError:
+    """Name a recorded resource whose observed identity contradicts its record: kind, identifier and what differs.
+
+    ``kind`` and ``identifier`` are what ``run recover`` accepts in ``disown``; ``keys`` are paths, never values.
+    """
+    paths = sorted(keys) or ["identity"]
+    conflict = {
+        "kind": resource["kind"],
+        "identifier": resource["identifier"],
+        "name": resource["name"],
+        "keys": paths,
+    }
+    return ResourceError(
+        f"{sentence} Resource: {resource['kind']} {resource['identifier']}; differs: {', '.join(paths)}.",
+        reason="owned-identity-conflict",
+        details={"conflict": conflict},
+    )
+
+
+def _is_identity_conflict(error: BaseException) -> TypeGuard[ResourceError]:
+    return isinstance(error, ResourceError) and error.reason == "owned-identity-conflict"
+
+
+_ABSENT = object()
+
+
+def _evidence_differences(recorded: dict, observed: dict, *, ignore: Iterable[str] = ()) -> list[str]:
+    """Return the paths where two resource entries differ: ``kind``, ``name``, then each top-level evidence key."""
+    paths = [key for key in ("kind", "name") if recorded.get(key) != observed.get(key)]
+    skipped = set(ignore)
+    keys = (set(recorded["evidence"]) | set(observed["evidence"])) - skipped
+    paths += [
+        f"evidence.{key}"
+        for key in sorted(keys)
+        if recorded["evidence"].get(key, _ABSENT) != observed["evidence"].get(key, _ABSENT)
+    ]
+    return paths
+
+
+def _first_sight_of_oom(data: dict, recorded: dict, observed: dict) -> bool:
+    """Whether a refreshed container shows an OOM kill the run has not recorded and may still record.
+
+    The observation pass is paused while a compose receipt is open, so its promotion can be the first to see it. Not
+    during recovery (its outcome is fixed) and not over an earlier failure, which keeps its own cause.
+    """
+    seen = observed["evidence"].get("control") or {}
+    known = recorded["evidence"].get("control") or {}
+    keys = ("started_at", "restart_count", "oom_killed")
+    return (
+        seen.get("oom_killed") is True
+        and tuple(known.get(key) for key in keys) != tuple(seen.get(key) for key in keys)
+        and data["recovery_actor"] is None
+        and data["state"] in ("active", "stopping")
+        and data["infrastructure_failure"] is None
+    )
+
+
+# The evidence keys that identify one compose container for the run's lifetime (rendered config, immutable facts).
+_CONTAINER_IDENTITY_KEYS = ("compose_project", "config_sha256", "created", "image_id", "service", "completed_service")
+
+
 def _finish_docker_receipt(
     context: RunContext,
     receipt: dict,
@@ -3720,7 +3800,25 @@ def _finish_receipt_locked(
     cache: dict | None = None,
     precheck: Callable[[], None] | None = None,
 ) -> None:
-    """Apply one receipt result to a freshly loaded record while the caller holds the run lock."""
+    """Apply one receipt result to a freshly loaded record and write it, while the caller holds the run lock."""
+    _apply_receipt_result(data, receipt, state, result, resources, archive=archive, cache=cache, precheck=precheck)
+    failpoint("finish-before-replace")
+    atomic_json(context.record, data)
+    failpoint("finish-record-replaced")
+
+
+def _apply_receipt_result(
+    data: dict,
+    receipt: dict,
+    state: str,
+    result: DockerResult,
+    resources: list[dict],
+    *,
+    archive: dict | None = None,
+    cache: dict | None = None,
+    precheck: Callable[[], None] | None = None,
+) -> None:
+    """Apply one receipt result to ``data`` in memory; raise, changing nothing durable, when it cannot apply."""
     current = data["docker_receipts"].get(receipt["id"])
     if current != receipt or current["state"] not in {"pending", "unresolved"}:
         raise _record_changed()
@@ -3736,17 +3834,24 @@ def _finish_receipt_locked(
     if cache is not None:  # after the pending check: the in-memory pending receipt is never mutated
         current["plan"]["cache"] = {**cache, "finished_ns": NativeClock().read()}
     for resource in resources:
-        plural = "builders" if resource["kind"] == "builder" else f"{resource['kind']}s"
-        builder_name = resource["evidence"].get("builder")
-        if resource["kind"] == "container" and isinstance(builder_name, str):
-            builder = data["owned_resources"]["builders"].get(builder_name)
-            if builder is None or builder["evidence"].get("buildkit_container_id") not in {
-                None,
-                resource["identifier"],
-            }:
-                raise ResourceError("BuildKit worker promotion contradicts its owned builder.")
-            builder["evidence"]["buildkit_container_id"] = resource["identifier"]
+        plural = owned_key(resource["kind"])
         existing = data["owned_resources"][plural].get(resource["identifier"])
+        builder_name = resource["evidence"].get("builder")
+        builder = data["owned_resources"]["builders"].get(builder_name) if isinstance(builder_name, str) else None
+        if (existing is not None and is_disowned(existing)) or (
+            resource["kind"] == "container" and builder is not None and is_disowned(builder)
+        ):
+            continue  # a disowned object, or the worker of a disowned builder, is never re-adopted
+        if resource["kind"] == "container" and isinstance(builder_name, str):
+            if builder is None:
+                raise ResourceError("BuildKit worker promotion contradicts its owned builder.")
+            if builder["evidence"].get("buildkit_container_id") not in {None, resource["identifier"]}:
+                raise _identity_conflict(
+                    "BuildKit worker promotion contradicts its owned builder.",
+                    builder,
+                    ["evidence.buildkit_container_id"],
+                )
+            builder["evidence"]["buildkit_container_id"] = resource["identifier"]
         if existing is not None:
             replaced = (
                 existing["state"] == "removed"
@@ -3767,29 +3872,41 @@ def _finish_receipt_locked(
                 )
                 and set(existing["evidence"].get("repo_tags", [])) <= set(resource["evidence"]["repo_tags"])
             )
-            compose_container_update = (
-                receipt["kind"] == "compose"
+            # A compose receipt re-observes every container of its project; only its volatile evidence (start
+            # generation and port map) may have changed since it was recorded: a restart, a stop, an engine restart.
+            container_refresh = (
+                receipt["kind"] in {"compose", "compose-run"}
                 and same_identity
                 and resource["kind"] == "container"
                 and all(
-                    existing["evidence"].get(key) == resource["evidence"].get(key)
-                    for key in (
-                        "compose_project",
-                        "config_sha256",
-                        "created",
-                        "image_id",
-                        "service",
-                        "completed_service",
-                    )
+                    existing["evidence"].get(key) == resource["evidence"].get(key) for key in _CONTAINER_IDENTITY_KEYS
                 )
             )
             if not replaced and not (
-                same_identity
-                and (existing["evidence"] == resource["evidence"] or compose_container_update or image_rebuild)
+                same_identity and (existing["evidence"] == resource["evidence"] or container_refresh or image_rebuild)
             ):
-                raise ResourceError("Docker promotion collides with another exact owned identity.")
+                volatile = (
+                    ("bindings", "control")
+                    if resource["kind"] == "container" and receipt["kind"] in {"compose", "compose-run"}
+                    else ()
+                )
+                raise _identity_conflict(
+                    "Docker promotion collides with another exact owned identity.",
+                    existing,
+                    _evidence_differences(existing, resource, ignore=volatile),
+                )
             if not replaced:
                 resource = {**resource, "receipt_id": existing["receipt_id"]}
+            if container_refresh and _first_sight_of_oom(data, existing, resource):
+                _set_container_oom(data)
+        elif (
+            # a service killed before its first promotion is stored stopped and never observed again; a compose run's
+            # one-off is the caller's own task, whose exit code already reports its fate
+            resource["kind"] == "container"
+            and receipt["kind"] == "compose"
+            and _first_sight_of_oom(data, {"evidence": {}}, resource)
+        ):
+            _set_container_oom(data)
         data["owned_resources"][plural][resource["identifier"]] = resource
         if receipt["kind"] == "image-pull" and resource["kind"] == "image":
             data["image_bindings"][receipt["plan"]["reference"]] = {
@@ -3800,24 +3917,17 @@ def _finish_receipt_locked(
     if receipt["kind"] == "container-rm" and state == "removed":
         container_id = receipt["plan"]["container_id"]
         data["owned_resources"]["containers"][container_id]["state"] = "removed"
-        for history in data["endpoints"].values():
-            for endpoint in history:
-                if endpoint["active"] and endpoint["container_id"] == container_id:
-                    endpoint.update(active=False, retired_revision=data["revision"] + 1)
+        _retire_container_endpoints(data, container_id, data["revision"] + 1)
     elif receipt["kind"] in {"builder-rm", "image-rm", "network-rm", "volume-rm"} and state == "removed":
-        kind = receipt["kind"].removesuffix("-rm")
-        plural = "builders" if kind == "builder" else f"{kind}s"
-        data["owned_resources"][plural][receipt["plan"][f"{kind}_id"]]["state"] = "removed"
+        kind, identifier = _owned_target(receipt["kind"], receipt["plan"])
+        _owned_bucket(data, kind)[identifier]["state"] = "removed"
     elif receipt["kind"] in {"container-start", "container-stop"} and state == "promoted":
         container_id = receipt["plan"]["container_id"]
         data["owned_resources"]["containers"][container_id]["state"] = (
             "running" if receipt["kind"] == "container-start" else "stopped"
         )
         if receipt["kind"] == "container-stop":
-            for history in data["endpoints"].values():
-                for endpoint in history:
-                    if endpoint["active"] and endpoint["container_id"] == container_id:
-                        endpoint.update(active=False, retired_revision=data["revision"] + 1)
+            _retire_container_endpoints(data, container_id, data["revision"] + 1)
     elif receipt["kind"] == "compose" and state == "removed":
         for items in data["owned_resources"].values():
             for resource in items.values():
@@ -3832,9 +3942,6 @@ def _finish_receipt_locked(
     }
     current["resources"] = [item["identifier"] for item in resources]
     data["revision"] += 1
-    failpoint("finish-before-replace")
-    atomic_json(context.record, data)
-    failpoint("finish-record-replaced")
 
 
 def _bind_existing_image(
@@ -4096,6 +4203,7 @@ def _dispatch_classified(
     seconds = _dispatch_seconds(command)
     deadline = Deadline.after(NativeClock(), seconds)
     appended = False
+    conflict: ResourceError | None = None
     try:
         receipt = _append_docker_receipt(
             context, descriptor, operation_id, command, deadline, image_lock_wait=image_lock_wait
@@ -4171,10 +4279,8 @@ def _dispatch_classified(
             finally:
                 released = _close_cache_fail_open(held)
         elif command.kind.endswith("-rm"):
-            resource_kind = command.kind.removesuffix("-rm")
-            plural = "builders" if resource_kind == "builder" else f"{resource_kind}s"
-            target = command.plan[f"{resource_kind}_id"]
-            resource = data["owned_resources"][plural][target]
+            resource_kind, target = _owned_target(command.kind, command.plan)
+            resource = _owned_bucket(data, resource_kind)[target]
             exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=resource_kind == "builder")
             if exists:
                 child_started = True
@@ -4192,6 +4298,9 @@ def _dispatch_classified(
             )
         current = _load_run(context)
         state, resources = _promote_docker_result(adapter, receipt, result, current)
+        # Apply to this throwaway copy first: an identity conflict is found here, before the cache outcome and the
+        # builder restore below, and ends the receipt unresolved like every other reconciliation failure.
+        _apply_receipt_result(current, receipt, state, result, resources)
     except InvalidInput as error:
         if child_started:
             _finish_docker_receipt(context, receipt, "unresolved", DockerResult(5, "", ""), [])
@@ -4206,6 +4315,7 @@ def _dispatch_classified(
                 context, receipt, "failed", DockerResult(5, "", ""), [], cache=_failed_build_cache(cache_plan)
             )
             raise
+        conflict = error if _is_identity_conflict(error) else None
         step = "the command did not finish" if result is None else "reconciling its result failed"
         # Toolkit errors carry fixed texts; an OS error is named by its type, since its text may hold paths.
         unresolved_cause = f"{step}: {type(error).__name__ if isinstance(error, OSError) else error}"
@@ -4229,7 +4339,9 @@ def _dispatch_classified(
     _finish_docker_receipt(context, receipt, state, result, resources, cache=cache)
     if state == "unresolved":
         raise IncompleteCleanup(
-            f"Docker mutation may have created or changed an unbound resource ({command.kind}: {unresolved_cause})."
+            f"Docker mutation may have created or changed an unbound resource ({command.kind}: {unresolved_cause}).",
+            reason="unspecified" if conflict is None else conflict.reason,
+            details=None if conflict is None else conflict.details,
         )
     if invalid_builder:
         current = _load_run(context)
@@ -4251,11 +4363,24 @@ def _docker_receipts_terminal(data: dict) -> bool:
     return all(receipt["state"] not in {"pending", "unresolved"} for receipt in data["docker_receipts"].values())
 
 
-def _owned_removal_command(kind: str, identity: str, reference: str | None = None) -> tuple[str, ...]:
+def _disowned_anonymous_volume(data: dict) -> bool:
+    """Whether the run disowned an anonymous volume: the only kind ``container rm -v`` can delete."""
+    return any(
+        is_disowned(volume) and re.fullmatch(r"[0-9a-f]{64}", name)
+        for name, volume in data["owned_resources"]["volumes"].items()
+    )
+
+
+def _owned_removal_command(
+    kind: str, identity: str, reference: str | None = None, *, keep_anonymous_volumes: bool = False
+) -> tuple[str, ...]:
     if kind == "builder":
         return "buildx", "rm", identity
     if kind == "container":
-        return "container", "rm", "-f", "-v", identity
+        # ``-v`` also deletes the container's anonymous volumes; a run that disowned one must not delete it that way
+        return (
+            ("container", "rm", "-f", identity) if keep_anonymous_volumes else ("container", "rm", "-f", "-v", identity)
+        )
     if kind == "image" and reference is not None:
         return "image", "rm", "--force", reference
     return kind, "rm", identity
@@ -4328,6 +4453,10 @@ def _reconcile_receipt(
     context: RunContext, data: dict, receipt: dict, deadline_ns: int | None, hold_fd: int | None = None
 ) -> None:
     """Promote or finish one interrupted non-archive receipt through its exact key (``_reconcile_docker_receipt``)."""
+    if _targets_disowned(data, receipt):
+        # Its target is no longer the run's: whatever the command did left the run nothing it owns. No Docker call.
+        _finish_docker_receipt(context, receipt, "failed", DockerResult(5, "", ""), [], deadline_ns)
+        return
     adapter = _bound_docker(data)
     recorded = receipt["result"]
     result = DockerResult(recorded["exit_code"], "", "") if recorded is not None else DockerResult(5, "", "")
@@ -4343,10 +4472,8 @@ def _reconcile_receipt(
             state, resources = "failed", []
     removal_kinds = {"builder-rm", "container-rm", "image-rm", "network-rm", "volume-rm"}
     if state == "unresolved" and receipt["kind"] in removal_kinds:
-        kind = receipt["kind"].removesuffix("-rm")
-        identity = cast(str, receipt["plan"][f"{kind}_id"])
-        plural = "builders" if kind == "builder" else f"{kind}s"
-        resource = data["owned_resources"][plural][identity]
+        kind, identity = _owned_target(receipt["kind"], receipt["plan"])
+        resource = _owned_bucket(data, kind)[identity]
         exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=kind == "builder")
         if (
             kind == "image"
@@ -4363,12 +4490,15 @@ def _reconcile_receipt(
                 if (key in receipt["plan"]) != (key in expected) or receipt["plan"].get(key) != expected.get(key):
                     raise ResourceError("Docker image removal receipt changed exact authority.")
         else:
-            argv = _owned_removal_command(kind, identity)
+            argv = _owned_removal_command(kind, identity, keep_anonymous_volumes=_disowned_anonymous_volume(data))
         result = adapter.execute(argv, timeout_seconds=30, hold_fd=hold_fd) if exists else DockerResult(0, "", "")
         state, resources = _promote_docker_result(adapter, receipt, result, data)
     _finish_docker_receipt(context, receipt, state, result, resources, deadline_ns)
     if state == "unresolved":
-        raise ResourceError("Docker mutation remains unresolved after exact reconciliation.")
+        sentence = "Docker mutation remains unresolved after exact reconciliation."
+        if receipt["kind"] in removal_kinds:
+            raise _unresolved_on(*_owned_target(receipt["kind"], receipt["plan"]), sentence)
+        raise ResourceError(sentence)
 
 
 # --- Archive export: ``image-save`` -------------------------------------------------------------------------
@@ -4953,137 +5083,176 @@ def _settle_archive_cleanup(context: RunContext, receipt_id: str, deadline_ns: i
         atomic_json(context.record, data)
 
 
+def _label_paths(labels: object, evidence: dict, *, foreign_project_allowed: bool = False) -> list[str]:
+    """Paths of an owned object's label checks that fail: no label map, a recorded label, the compose project."""
+    if not isinstance(labels, dict):
+        return ["observed.labels"]
+    paths = []
+    if isinstance(evidence.get("labels"), dict) and any(
+        labels.get(key) != value for key, value in evidence["labels"].items()
+    ):
+        paths.append("evidence.labels")
+    if (
+        isinstance(evidence.get("compose_project"), str)
+        and labels.get("com.docker.compose.project") != evidence["compose_project"]
+        and not foreign_project_allowed
+    ):
+        paths.append("evidence.compose_project")
+    return paths
+
+
 def _validate_owned_identity(
     adapter, resource: dict, *, allow_absent_buildkit: bool = False, deadline: Deadline | None = None
 ) -> bool:
+    """Return whether the recorded resource exists; raise a named conflict when what Docker reports is not it."""
     kind = resource["kind"]
     evidence = resource["evidence"]
     if kind == "builder":
         item = _builder_observation(adapter, resource["identifier"])
         if item is None:
             return False
-        endpoint_identity = _builder_endpoint_identity(item)
+        paths = [
+            path
+            for path, differs in (
+                ("name", item.get("Name") != resource["name"]),
+                ("evidence.driver", item.get("Driver") != evidence.get("driver")),
+                ("evidence.endpoint_sha256", _builder_endpoint_identity(item) != evidence.get("endpoint_sha256")),
+            )
+            if differs
+        ]
+        if paths:
+            raise _identity_conflict("Owned builder identity changed before exact mutation.", resource, paths)
         container_id = evidence.get("buildkit_container_id")
-        if (
-            item.get("Name") != resource["name"]
-            or item.get("Driver") != evidence.get("driver")
-            or endpoint_identity != evidence.get("endpoint_sha256")
-        ):
-            raise ResourceError("Owned builder identity changed before exact mutation.")
         if isinstance(container_id, str):
             container = adapter.inspect_exact(ExactInspection("container", container_id), deadline=deadline)
             if not container.exists:
                 if allow_absent_buildkit:
                     return True
-                raise ResourceError("Owned BuildKit worker disappeared before exact mutation.")
+                raise _identity_conflict(
+                    "Owned BuildKit worker disappeared before exact mutation.",
+                    resource,
+                    ["evidence.buildkit_container_id"],
+                )
             candidate = container.attributes
             if candidate.get("Id") != container_id or str(candidate.get("Name", "")).lstrip("/") != buildkit_worker(
                 resource["name"]
             ):
-                raise ResourceError("Owned BuildKit worker identity changed before exact mutation.")
+                raise _identity_conflict(
+                    "Owned BuildKit worker identity changed before exact mutation.",
+                    resource,
+                    ["evidence.buildkit_container_id"],
+                )
         return True
     observation = adapter.inspect_exact(ExactInspection(kind, resource["identifier"]), deadline=deadline)
     if not observation.exists:
         return False
     item = observation.attributes
+    checks: tuple[tuple[str, bool], ...]
     if kind == "container":
         config = item.get("Config")
+        checks = (
+            ("identifier", item.get("Id") != resource["identifier"]),
+            ("name", str(item.get("Name", "")).lstrip("/") != resource["name"]),
+            ("evidence.created", item.get("Created") != evidence.get("created")),
+            ("evidence.image_id", item.get("Image") != evidence.get("image_id")),
+        )
         labels = config.get("Labels") if isinstance(config, dict) else None
-        expected_labels = evidence.get("labels")
-        if (
-            item.get("Id") != resource["identifier"]
-            or str(item.get("Name", "")).lstrip("/") != resource["name"]
-            or item.get("Created") != evidence.get("created")
-            or item.get("Image") != evidence.get("image_id")
-            or not isinstance(labels, dict)
-            or (
-                isinstance(expected_labels, dict)
-                and any(labels.get(key) != value for key, value in expected_labels.items())
-            )
-            or (
-                isinstance(evidence.get("compose_project"), str)
-                and labels.get("com.docker.compose.project") != evidence["compose_project"]
-            )
-        ):
-            raise ResourceError("Owned container identity changed before exact mutation.")
+        paths = [path for path, differs in checks if differs] + _label_paths(labels, evidence)
     elif kind == "network":
-        labels = item.get("Labels")
-        if (
-            item.get("Id") != resource["identifier"]
-            or item.get("Name") != resource["name"]
-            or item.get("Created") != evidence.get("created")
-            or not isinstance(labels, dict)
-            or (
-                isinstance(evidence.get("labels"), dict)
-                and any(labels.get(key) != value for key, value in evidence["labels"].items())
-            )
-            or (
-                isinstance(evidence.get("compose_project"), str)
-                and labels.get("com.docker.compose.project") != evidence["compose_project"]
-            )
-        ):
-            raise ResourceError("Owned network identity changed before exact mutation.")
+        checks = (
+            ("identifier", item.get("Id") != resource["identifier"]),
+            ("name", item.get("Name") != resource["name"]),
+            ("evidence.created", item.get("Created") != evidence.get("created")),
+        )
+        paths = [path for path, differs in checks if differs] + _label_paths(item.get("Labels"), evidence)
     elif kind == "volume":
-        labels = item.get("Labels")
-        if (
-            item.get("Name") != resource["name"]
-            or item.get("CreatedAt") != evidence.get("created")
-            or item.get("Driver") != evidence.get("driver")
-            or not isinstance(labels, dict)
-            or (
-                isinstance(evidence.get("labels"), dict)
-                and any(labels.get(key) != value for key, value in evidence["labels"].items())
-            )
-            or (
-                isinstance(evidence.get("compose_project"), str)
-                and labels.get("com.docker.compose.project") != evidence["compose_project"]
-                and not _anonymous_volume(resource["name"], labels)
-            )
-        ):
-            raise ResourceError("Owned volume identity changed before exact mutation.")
+        paths = _volume_identity_paths(resource, item)
     elif kind == "image":
-        config = item.get("Config")
-        labels = config.get("Labels") if isinstance(config, dict) else None
-        expected_labels = evidence.get("labels")
-        repository_digest = evidence.get("repository_digest")
-        digest_changed = repository_digest is not None and (
-            not isinstance(repository_digest, str)
-            or not isinstance(item.get("RepoDigests"), list)
-            or _repository_digest(repository_digest) not in item["RepoDigests"]
-        )
-        labels_changed = repository_digest is None and (
-            not isinstance(labels, dict)
-            or not isinstance(expected_labels, dict)
-            or any(labels.get(key) != value for key, value in expected_labels.items())
-        )
-        repo_digests = item.get("RepoDigests")
-        if repo_digests is None:
-            repo_digests = []
-        removal_plan = _image_removal(resource)[1] if repository_digest is None else {}
-        recorded_references = removal_plan.get("references")
-        repo_tags = item.get("RepoTags")
-        if repo_tags is None:
-            repo_tags = []
-        references_changed = repository_digest is None and (
-            not isinstance(repo_tags, list)
-            or any(not isinstance(value, str) for value in repo_tags)
-            or not isinstance(repo_digests, list)
-            or any(not isinstance(value, str) for value in repo_digests)
-            or not isinstance(recorded_references, list)
-            or not {*repo_tags, *repo_digests}.issubset(recorded_references)
-        )
-        if not references_changed and isinstance(recorded_references, list):
-            references_changed = any(
-                observation.exists and observation.attributes.get("Id") != resource["identifier"]
-                for observation in (
-                    adapter.inspect_exact(ExactInspection("image", reference)) for reference in recorded_references
-                )
-            )
-        if item.get("Id") != resource["identifier"] or digest_changed or labels_changed or references_changed:
-            raise ResourceError("Owned image identity changed before exact mutation.")
+        paths = _image_identity_paths(adapter, resource, item)
     else:
         raise ResourceError("Owned Docker resource kind is unsupported.")
+    if paths:
+        raise _identity_conflict(f"Owned {kind} identity changed before exact mutation.", resource, paths)
     return True
+
+
+def _volume_identity_paths(resource: dict, item: dict) -> list[str]:
+    """Paths of an owned volume's identity checks that fail against what Docker reports."""
+    evidence = resource["evidence"]
+    labels = item.get("Labels")
+    checks = (
+        ("identifier", item.get("Name") != resource["name"]),
+        ("evidence.created", item.get("CreatedAt") != evidence.get("created")),
+        ("evidence.driver", item.get("Driver") != evidence.get("driver")),
+    )
+    anonymous = isinstance(labels, dict) and _anonymous_volume(resource["name"], labels)
+    return [path for path, differs in checks if differs] + _label_paths(
+        labels, evidence, foreign_project_allowed=anonymous
+    )
+
+
+def _image_identity_paths(adapter, resource: dict, item: dict) -> list[str]:
+    """Paths of an owned image's identity checks that fail (digest-pinned or locally built)."""
+    evidence = resource["evidence"]
+    config = item.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    expected_labels = evidence.get("labels")
+    repository_digest = evidence.get("repository_digest")
+    digest_changed = repository_digest is not None and (
+        not isinstance(repository_digest, str)
+        or not isinstance(item.get("RepoDigests"), list)
+        or _repository_digest(repository_digest) not in item["RepoDigests"]
+    )
+    labels_changed = repository_digest is None and (
+        not isinstance(labels, dict)
+        or not isinstance(expected_labels, dict)
+        or any(labels.get(key) != value for key, value in expected_labels.items())
+    )
+    repo_digests = item.get("RepoDigests")
+    if repo_digests is None:
+        repo_digests = []
+    removal_plan = _image_removal(resource)[1] if repository_digest is None else {}
+    recorded_references = removal_plan.get("references")
+    repo_tags = item.get("RepoTags")
+    if repo_tags is None:
+        repo_tags = []
+    references_changed = repository_digest is None and (
+        not isinstance(repo_tags, list)
+        or any(not isinstance(value, str) for value in repo_tags)
+        or not isinstance(repo_digests, list)
+        or any(not isinstance(value, str) for value in repo_digests)
+        or not isinstance(recorded_references, list)
+        or not {*repo_tags, *repo_digests}.issubset(recorded_references)
+    )
+    if not references_changed and isinstance(recorded_references, list):
+        references_changed = any(
+            observation.exists and observation.attributes.get("Id") != resource["identifier"]
+            for observation in (
+                adapter.inspect_exact(ExactInspection("image", reference)) for reference in recorded_references
+            )
+        )
+    checks = (
+        ("identifier", item.get("Id") != resource["identifier"]),
+        ("evidence.repository_digest", digest_changed),
+        ("evidence.labels", labels_changed),
+        ("evidence.repo_tags", references_changed),
+    )
+    return [path for path, differs in checks if differs]
+
+
+def _owned_target(kind: str, plan: dict) -> tuple[str, str]:
+    """Return the resource kind and the identifier an exact removal or container control receipt targets."""
+    removal = kind.endswith("-rm")
+    resource_kind = kind.removesuffix("-rm") if removal else "container"
+    return resource_kind, str(plan[f"{resource_kind}_id" if removal else "container_id"])
+
+
+def _unresolved_on(kind: str, identifier: str, sentence: str) -> ResourceError:
+    """Name the target of an owned mutation that stayed unresolved, so an operator can act on exactly it."""
+    return ResourceError(
+        f"{sentence} Resource: {kind} {identifier}.",
+        details={"resource": {"kind": kind, "identifier": identifier}},
+    )
 
 
 def _run_owned_mutation(
@@ -5105,11 +5274,10 @@ def _run_owned_mutation(
     )
     adapter = _bound_docker(data)
     timeout = max(0.001, deadline.remaining_ns(NativeClock()) / 1_000_000_000)
+    resource_kind, target = _owned_target(kind, plan)
+    result: DockerResult | None = None
     try:
-        resource_kind = kind.removesuffix("-rm").removeprefix("container-") if kind.endswith("-rm") else "container"
-        plural = "builders" if resource_kind == "builder" else f"{resource_kind}s"
-        target_key = f"{resource_kind}_id" if kind.endswith("-rm") else "container_id"
-        resource = data["owned_resources"][plural][plan[target_key]]
+        resource = _owned_bucket(data, resource_kind)[target]
         exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=resource_kind == "builder")
         if not exists and kind.endswith("-rm"):
             result = DockerResult(0, "", "")
@@ -5119,12 +5287,16 @@ def _run_owned_mutation(
             result = adapter.execute(argv, timeout_seconds=timeout, hold_fd=hold_fd)
         current = _load_run(context)
         state, resources = _promote_docker_result(adapter, receipt, result, current)
-    except (InfrastructureFailure, OSError, ResourceError):
+    except (InfrastructureFailure, OSError, ResourceError) as error:
+        if result is None and _is_identity_conflict(error):
+            # Nothing ran: the receipt ends failed, so it does not block a recovery that disowns the resource.
+            _finish_docker_receipt(context, receipt, "failed", DockerResult(5, "", ""), [], deadline_ns)
+            raise
         result = DockerResult(5, "", "")
         state, resources = "unresolved", []
     _finish_docker_receipt(context, receipt, state, result, resources, deadline_ns)
     if state == "unresolved":
-        raise ResourceError("Exact Docker cleanup result is unresolved.")
+        raise _unresolved_on(resource_kind, target, "Exact Docker cleanup result is unresolved.")
 
 
 def _stop_owned_docker_resources(context: RunContext, deadline_ns: int | None = None) -> None:
@@ -5195,7 +5367,9 @@ def _remove_owned(
                 argv, image_plan = _image_removal(resource)
                 plan.update(image_plan)
             else:
-                argv = _owned_removal_command(kind, identity)
+                argv = _owned_removal_command(
+                    kind, identity, keep_anonymous_volumes=_disowned_anonymous_volume(current)
+                )
             _run_owned_mutation(context, argv, f"{kind}-rm", plan, deadline_ns, hold_fd)
 
 
@@ -7193,9 +7367,7 @@ def enter_run(context: RunContext, *, _test_directory: Path | None = None) -> Ru
             revoke_ungranted(context, _test_directory=_test_directory)
             continue
         time.sleep(min(100_000_000, deadline.remaining_ns(clock)) / 1_000_000_000)
-    data = _load_run(
-        context
-    )  # the one re-read after the deadline: the guardian may have written its evidence meanwhile
+    data = _admission_report_record(context, deadline, clock)
     if data["generation"]:
         raise ResourceError("Admission response missed a published grant; original recovery is required.")
     if data.get("guardian") == asdict(actor):
@@ -7204,6 +7376,34 @@ def enter_run(context: RunContext, *, _test_directory: Path | None = None) -> Ru
     if not detail and data["state"] != "complete":
         detail = " (admission diagnostics not yet persisted by the guardian)"
     raise ResourceError(f"Original admission deadline expired before a grant{detail}.")
+
+
+# How long a requester whose queue deadline passed waits for its guardian to write why the admission ended.
+_ADMISSION_REPORT_NS = 5_000_000_000
+
+
+def _admission_report_record(context: RunContext, deadline: Deadline, clock: NativeClock) -> dict:
+    """Return the record an expired requester reports from, after waiting at most 5 s for the guardian's write.
+
+    The guardian notices the expiry only at its next loop head and writes under two locks, so its report usually
+    lands just after the deadline; there is no ordering between the two. This reads without a lock every 100 ms and
+    stops at once when the record is complete or a granted generation appears; it stops early when no guardian is
+    recorded or the recorded one is no longer executing. Any stop without completion is followed by one final read,
+    because the write can land between the last read and that decision.
+    """
+    report_end = deadline.expires_ns + _ADMISSION_REPORT_NS  # at most 5 s after the deadline, however late we start
+    while True:
+        data = _load_run(context)
+        if data["state"] == "complete" or data["generation"]:
+            return data
+        guardian = data.get("guardian")
+        gone = guardian is None or observe_process(_identity_from_json(guardian)) != "executing"
+        remaining = report_end - clock.read()
+        if gone or remaining <= 0:
+            failpoint("admission-report-final-read")
+            return _load_run(context)
+        failpoint("admission-report-read")
+        time.sleep(min(100_000_000, remaining) / 1_000_000_000)
 
 
 def retention_after_release(
@@ -8836,32 +9036,24 @@ def _revoke_ended_wait(
     waits: _AdmissionWaits,
     data: dict,
     *,
-    requester_left: bool,
     expired: bool,
     failure_reason: str | None = None,
 ) -> RunStatus:
-    """Revoke a run whose admission wait ended; a queue-deadline expiry (with its requester still there) records why.
+    """Revoke a run whose admission wait ended (its budget, or its requester left); a budget expiry records why.
 
     The last pass is accounted only up to the queue deadline, so a pass that ran past it never exceeds the budget. The
-    requester's presence is decided again under the revoke's locks, where the evidence is built.
+    requester's presence does not matter once the deadline passed: the record always keeps an expiry's reasons, and a
+    requester that gave up waiting for them is the normal sequel, not a sign nobody wants them.
     """
     waits.close(min(NativeClock().read(), data["queue_deadline"]["expires_ns"]))
-    expiry = expired and not requester_left
-    if expiry:
+    if expired:
         failpoint("admission-expiry-evidence-pending")
-
-    def evidence(record: dict) -> dict | None:
-        """Build the expiry evidence unless the requester has left since the loop head decided."""
-        if observe_process(_identity_from_json(record["requester"])) != "executing":
-            return None
-        return waits.evidence(record)
-
     return revoke_ungranted(
         context,
         capacity,
         _test_directory=test_directory,
         _failure_reason=failure_reason,
-        _admission_evidence=evidence if expiry else None,
+        _admission_evidence=waits.evidence if expired else None,
     )
 
 
@@ -8941,9 +9133,7 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
             requester_left = observe_process(_identity_from_json(data["requester"])) != "executing"
             expired = not deadline.remaining_ns(clock)
             if requester_left or expired:
-                return _revoke_ended_wait(
-                    context, capacity_stack, test_directory, waits, data, requester_left=requester_left, expired=expired
-                )
+                return _revoke_ended_wait(context, capacity_stack, test_directory, waits, data, expired=expired)
             waits.begin(clock.read())
             pass_sample: HostMemoryObservation | None = None
             try:
@@ -9041,7 +9231,6 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                     test_directory,
                     waits,
                     data,
-                    requester_left=requester_left,
                     expired=expired,
                 )
             waits.begin(clock.read())
@@ -10962,6 +11151,16 @@ def _reconcile_pending_compose(context: RunContext, deadline_ns: int | None = No
         atomic_json(context.record, current)
 
 
+def _controlled_targets(data: dict, operation: dict) -> tuple[str, ...]:
+    """An interrupted container control's targets, without those the run has disowned since."""
+    containers = data["owned_resources"]["containers"]
+    return tuple(
+        target
+        for target in operation["plan"]["targets"]
+        if target not in containers or not is_disowned(containers[target])
+    )
+
+
 def _reconcile_pending_container_control(context: RunContext, deadline_ns: int | None = None) -> None:
     """Record the observed result of an interrupted exact stop/start without compensating."""
     with _locked_run(context, deadline_ns):
@@ -10991,7 +11190,7 @@ def _reconcile_pending_container_control(context: RunContext, deadline_ns: int |
         docker = _bound_docker(data)
         if docker.observe_daemon().daemon_id != data["grant"]["daemon_id"]:
             raise ResourceError("Docker daemon changed before container control reconciliation.")
-        observed = _observe_owned_control(data, docker, tuple(operation["plan"]["targets"]), deadline)
+        observed = _observe_owned_control(data, docker, _controlled_targets(data, operation), deadline)
     oom = any(
         item["observation"]["oom_killed"] or item["observation"]["oom_events"]
         for item in observed["containers"].values()
@@ -11003,7 +11202,7 @@ def _reconcile_pending_container_control(context: RunContext, deadline_ns: int |
         if current["resources"]:
             current["resources"] = observed
         else:
-            _publish_owned_control(current, observed, tuple(operation["plan"]["targets"]))
+            _publish_owned_control(current, observed, _controlled_targets(current, operation))
         current["revision"] += 1
         current["last_operation"] = {
             **operation,
@@ -11469,6 +11668,7 @@ def recover_run(
     *,
     drain_live_consumers: bool = True,
     takeover_attempt: str | None = None,
+    disown: tuple[tuple[str, str], ...] = (),
     _test_directory: Path | None = None,
     _deadline_ns: int | None = None,
 ) -> RunStatus:
@@ -11480,9 +11680,14 @@ def recover_run(
     them instead. Every blocking lock wait and every phase boundary honors one recovery deadline (the leave budget plus
     60 s, or the test-only ``_deadline_ns``); when it expires the error names the run and the last completed phase, and
     the claim and ``recovery_actor`` stay so a later recoverer resumes after the claimant is proven dead.
+
+    ``disown`` names exact ``(kind, identifier)`` resources of this run that stop being the run's: they are marked in
+    recovery's first write and left on the daemon untouched. It applies only to the resource-cleaning recovery of a
+    run that does not end retained; anywhere else, or for a resource the run does not own, it raises ``InvalidInput``
+    before anything is written.
     """
     try:
-        return _recover_run(context, drain_live_consumers, takeover_attempt, _test_directory, _deadline_ns)
+        return _recover_run(context, drain_live_consumers, takeover_attempt, disown, _test_directory, _deadline_ns)
     except ResourceBusy as error:
         if error.reason != "lock-deadline":
             raise
@@ -11492,16 +11697,91 @@ def recover_run(
         ) from error
 
 
+def _grant_bears_resources(data: dict) -> bool:
+    return bool(
+        any(data.get(key) for key in ("resources", "endpoints", "consumers", "pending_operation", "last_operation"))
+        or data["docker_receipts"]
+        or any(data["owned_resources"].values())
+    )
+
+
+def _require_disownable(data: dict, disown: tuple[tuple[str, str], ...]) -> None:
+    """Each entry must be a resource this run records as its own (not removed), or one it already disowned."""
+    requested = set(disown)
+    for kind, identifier in disown:
+        resource = _owned_bucket(data, kind).get(identifier)
+        if resource is None or (resource["state"] == "removed" and not is_disowned(resource)):
+            raise InvalidInput(f"Disown names a resource this run does not own: {kind} {identifier}.")
+        builder = resource["evidence"].get("builder") if kind == "container" else None
+        if (
+            isinstance(builder, str)
+            and builder in data["owned_resources"]["builders"]
+            and data["owned_resources"]["builders"][builder]["state"] != "removed"  # a removed builder deletes nothing
+            and ("builder", builder) not in requested
+        ):
+            # removing the builder would delete its worker: a worker leaves the run only with its builder
+            raise InvalidInput(f"Disown the BuildKit worker {identifier} together with its builder {builder}.")
+
+
+_EXACT_TARGET_KINDS = frozenset(
+    {"builder-rm", "container-rm", "image-rm", "network-rm", "volume-rm", "container-start", "container-stop"}
+)
+
+
+def _targets_disowned(data: dict, receipt: dict) -> bool:
+    """Whether an exact control or removal receipt targets a resource the run has disowned."""
+    if receipt["kind"] not in _EXACT_TARGET_KINDS:
+        return False
+    kind, identifier = _owned_target(receipt["kind"], receipt["plan"])
+    resource = _owned_bucket(data, kind).get(identifier)
+    return resource is not None and is_disowned(resource)
+
+
+def _owned_bucket(data: dict, kind: str) -> dict:
+    """The run's recorded resources of one kind, keyed by identifier."""
+    return data["owned_resources"][owned_key(kind)]
+
+
+def _apply_disown(data: dict, disown: tuple[tuple[str, str], ...]) -> None:
+    """Mark each requested resource as no longer the run's: ``removed`` with ``evidence.disowned``; never re-owned."""
+    marked = [
+        (kind, identifier) for kind, identifier in disown if not is_disowned(_owned_bucket(data, kind)[identifier])
+    ]
+    if not marked:
+        return
+    data["revision"] += 1
+    for kind, identifier in marked:
+        resource = _owned_bucket(data, kind)[identifier]
+        resource["state"] = "removed"
+        resource["evidence"]["disowned"] = True
+        if kind == "container":
+            _retire_container_endpoints(data, identifier, data["revision"])
+
+
+def _retire_container_endpoints(data: dict, container_id: str, revision: int) -> None:
+    for history in data["endpoints"].values():
+        for endpoint in history:
+            if endpoint["active"] and endpoint["container_id"] == container_id:
+                endpoint.update(active=False, retired_revision=revision)
+
+
 def _recover_run(
     context: RunContext,
     drain_live_consumers: bool,
     takeover_attempt: str | None,
+    disown: tuple[tuple[str, str], ...],
     _test_directory: Path | None,
     _deadline_ns: int | None,
 ) -> RunStatus:
     # Revocation may need the account lock. Finish it before taking this run lock
     # again; no nested run locks and no private deletion while either actor lives.
     data = _load_run(context)
+    _require_disownable(data, disown)  # a fast fail; checked again under the run lock before the marker write
+    resource_cleaning = bool(data["generation"]) and data.get("retained_grant") is None and _grant_bears_resources(data)
+    if disown and (not resource_cleaning or data["retain"]):
+        raise InvalidInput(
+            "A disown request applies only to the resource-cleaning recovery of a run that is not retained."
+        )
     deadline_ns = (
         _deadline_ns
         if _deadline_ns is not None
@@ -11520,16 +11800,13 @@ def _recover_run(
             _deadline_ns=deadline_ns,
         )
     if data["generation"]:
-        if (
-            any(data.get(key) for key in ("resources", "endpoints", "consumers", "pending_operation", "last_operation"))
-            or data["docker_receipts"]
-            or any(data["owned_resources"].values())
-        ):
+        if _grant_bears_resources(data):
             return _recover_resource_grant(
                 context,
                 _test_directory=_test_directory,
                 drain_live_consumers=drain_live_consumers,
                 takeover_attempt=takeover_attempt,
+                disown=disown,
                 deadline_ns=deadline_ns,
             )
         recovered = _recover_empty_grant(
@@ -11872,6 +12149,7 @@ def _recover_resource_grant(
     _test_directory: Path | None = None,
     drain_live_consumers: bool = True,
     takeover_attempt: str | None = None,
+    disown: tuple[tuple[str, str], ...] = (),
     deadline_ns: int | None = None,
 ) -> RunStatus:
     """Drain an ended guardian's exact recorded consumers/resources and publish the terminal record.
@@ -11898,7 +12176,10 @@ def _recover_resource_grant(
             data = _load_run(context)
             if data["account_directory"] != str(directory):
                 raise ResourceError("Recovery cannot move original authority to another account domain.")
+            _require_disownable(data, disown)
             if data.get("recovery_outcome") == "complete":
+                if any(not is_disowned(_owned_bucket(data, kind)[identifier]) for kind, identifier in disown):
+                    raise InvalidInput("A disown request cannot change a run whose recovery is complete.")
                 return _retire_completed_resource_grant(context, directory, data, deadline_ns)
             pending = data["pending_operation"]
             if pending is not None and pending["kind"] not in _RECONCILABLE_OPERATION_KINDS:
@@ -11930,6 +12211,8 @@ def _recover_resource_grant(
                 state = _load_queue(directory, anchor)
                 entry = state.entries.get(context.run_id)
                 if release_shape:
+                    if disown:
+                        raise InvalidInput("A disown request does not apply to a release recovery.")
                     if _release_authority_changed(state, context):
                         raise ResourceError("Release authority changed before exact recovery.")
                     _hold_capacity_fence(held, account)  # release recovery excludes every other run
@@ -11943,6 +12226,7 @@ def _recover_resource_grant(
                     raise ResourceError("Original grant lost its account recovery reference.")
                 if not release_recovery:
                     _begin_recovery_record(data, actor, False, None)
+                    _apply_disown(data, disown)  # in the same write: a crash leaves all markers or none
                     atomic_json(context.record, data)
                     failpoint("recovery-record-written")
                     if entry is not None and entry.takeover is not None:
