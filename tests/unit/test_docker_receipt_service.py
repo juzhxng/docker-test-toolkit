@@ -4432,3 +4432,26 @@ def test_a_disowned_named_volume_keeps_container_removal_with_its_anonymous_volu
     removals = [command for command in fake.commands if command[:2] == ("container", "rm")]
     assert removals and all("-v" in command for command in removals)
     assert named in fake.volumes
+
+
+def test_a_worker_can_be_disowned_after_its_builder_was_disowned_earlier(tmp_path: Path) -> None:
+    """A disowned builder is recorded removed: its worker alone is accepted later, and naming the builder again is a
+    no-op."""
+    fake = FakeDockerPort()
+    project = tmp_path / "project"
+    project.mkdir()
+    services = build_test_services(tmp_path / "state")
+    handle = services.open_run(_spec(project), docker_factory=lambda: fake, admit_docker=True).enter()
+    _ = handle.docker_context
+    descriptor = json.loads((handle.private_root / "docker-authority.json").read_text())
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("buildx", "create"))
+    builder_id, builder = next(iter(_record(handle)["owned_resources"]["builders"].items()))
+    worker_id = builder["evidence"]["buildkit_container_id"]
+    _edit_record(handle, lambda data: lifecycle._apply_disown(data, (("builder", builder_id),)))
+    abandon_run(handle._context, services.root / "admission")
+    lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
+
+    lifecycle._require_disownable(_record(handle), (("container", worker_id),))
+    lifecycle._require_disownable(_record(handle), (("container", worker_id), ("builder", builder_id)))
+    assert _recover(services, handle, (("container", worker_id),)).state == "complete"
+    assert worker_id in fake.containers
