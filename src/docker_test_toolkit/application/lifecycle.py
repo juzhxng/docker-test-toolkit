@@ -3784,7 +3784,25 @@ def _finish_receipt_locked(
     cache: dict | None = None,
     precheck: Callable[[], None] | None = None,
 ) -> None:
-    """Apply one receipt result to a freshly loaded record while the caller holds the run lock."""
+    """Apply one receipt result to a freshly loaded record and write it, while the caller holds the run lock."""
+    _apply_receipt_result(data, receipt, state, result, resources, archive=archive, cache=cache, precheck=precheck)
+    failpoint("finish-before-replace")
+    atomic_json(context.record, data)
+    failpoint("finish-record-replaced")
+
+
+def _apply_receipt_result(
+    data: dict,
+    receipt: dict,
+    state: str,
+    result: DockerResult,
+    resources: list[dict],
+    *,
+    archive: dict | None = None,
+    cache: dict | None = None,
+    precheck: Callable[[], None] | None = None,
+) -> None:
+    """Apply one receipt result to ``data`` in memory; raise, changing nothing durable, when it cannot apply."""
     current = data["docker_receipts"].get(receipt["id"])
     if current != receipt or current["state"] not in {"pending", "unresolved"}:
         raise _record_changed()
@@ -3903,9 +3921,6 @@ def _finish_receipt_locked(
     }
     current["resources"] = [item["identifier"] for item in resources]
     data["revision"] += 1
-    failpoint("finish-before-replace")
-    atomic_json(context.record, data)
-    failpoint("finish-record-replaced")
 
 
 def _bind_existing_image(
@@ -4167,6 +4182,7 @@ def _dispatch_classified(
     seconds = _dispatch_seconds(command)
     deadline = Deadline.after(NativeClock(), seconds)
     appended = False
+    conflict: ResourceError | None = None
     try:
         receipt = _append_docker_receipt(
             context, descriptor, operation_id, command, deadline, image_lock_wait=image_lock_wait
@@ -4263,6 +4279,9 @@ def _dispatch_classified(
             )
         current = _load_run(context)
         state, resources = _promote_docker_result(adapter, receipt, result, current)
+        # Apply to this throwaway copy first: an identity conflict is found here, before the cache outcome and the
+        # builder restore below, and ends the receipt unresolved like every other reconciliation failure.
+        _apply_receipt_result(current, receipt, state, result, resources)
     except InvalidInput as error:
         if child_started:
             _finish_docker_receipt(context, receipt, "unresolved", DockerResult(5, "", ""), [])
@@ -4277,6 +4296,7 @@ def _dispatch_classified(
                 context, receipt, "failed", DockerResult(5, "", ""), [], cache=_failed_build_cache(cache_plan)
             )
             raise
+        conflict = error if isinstance(error, ResourceError) and error.reason == "owned-identity-conflict" else None
         step = "the command did not finish" if result is None else "reconciling its result failed"
         # Toolkit errors carry fixed texts; an OS error is named by its type, since its text may hold paths.
         unresolved_cause = f"{step}: {type(error).__name__ if isinstance(error, OSError) else error}"
@@ -4300,7 +4320,9 @@ def _dispatch_classified(
     _finish_docker_receipt(context, receipt, state, result, resources, cache=cache)
     if state == "unresolved":
         raise IncompleteCleanup(
-            f"Docker mutation may have created or changed an unbound resource ({command.kind}: {unresolved_cause})."
+            f"Docker mutation may have created or changed an unbound resource ({command.kind}: {unresolved_cause}).",
+            reason="unspecified" if conflict is None else conflict.reason,
+            details=None if conflict is None else conflict.details,
         )
     if invalid_builder:
         current = _load_run(context)
@@ -4438,6 +4460,13 @@ def _reconcile_receipt(
         result = adapter.execute(argv, timeout_seconds=30, hold_fd=hold_fd) if exists else DockerResult(0, "", "")
         state, resources = _promote_docker_result(adapter, receipt, result, data)
     _finish_docker_receipt(context, receipt, state, result, resources, deadline_ns)
+    if state == "unresolved" and receipt["kind"] in removal_kinds:
+        kind = receipt["kind"].removesuffix("-rm")
+        identifier = receipt["plan"][f"{kind}_id"]
+        raise ResourceError(
+            f"Docker mutation remains unresolved after exact reconciliation. Resource: {kind} {identifier}.",
+            details={"resource": {"kind": kind, "identifier": identifier}},
+        )
     if state == "unresolved":
         raise ResourceError("Docker mutation remains unresolved after exact reconciliation.")
 
@@ -5088,6 +5117,7 @@ def _validate_owned_identity(
     if not observation.exists:
         return False
     item = observation.attributes
+    checks: tuple[tuple[str, bool], ...]
     if kind == "container":
         config = item.get("Config")
         checks = (
@@ -5199,12 +5229,18 @@ def _run_owned_mutation(
     )
     adapter = _bound_docker(data)
     timeout = max(0.001, deadline.remaining_ns(NativeClock()) / 1_000_000_000)
+    resource_kind = kind.removesuffix("-rm").removeprefix("container-") if kind.endswith("-rm") else "container"
+    plural = "builders" if resource_kind == "builder" else f"{resource_kind}s"
+    target = str(plan[f"{resource_kind}_id" if kind.endswith("-rm") else "container_id"])
+    resource = data["owned_resources"][plural][target]
+    before_command: ResourceError | None = None
     try:
-        resource_kind = kind.removesuffix("-rm").removeprefix("container-") if kind.endswith("-rm") else "container"
-        plural = "builders" if resource_kind == "builder" else f"{resource_kind}s"
-        target_key = f"{resource_kind}_id" if kind.endswith("-rm") else "container_id"
-        resource = data["owned_resources"][plural][plan[target_key]]
-        exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=resource_kind == "builder")
+        try:
+            exists = _validate_owned_identity(adapter, resource, allow_absent_buildkit=resource_kind == "builder")
+        except ResourceError as error:
+            if error.reason == "owned-identity-conflict":
+                before_command = error
+            raise
         if not exists and kind.endswith("-rm"):
             result = DockerResult(0, "", "")
         else:
@@ -5213,12 +5249,19 @@ def _run_owned_mutation(
             result = adapter.execute(argv, timeout_seconds=timeout, hold_fd=hold_fd)
         current = _load_run(context)
         state, resources = _promote_docker_result(adapter, receipt, result, current)
-    except (InfrastructureFailure, OSError, ResourceError):
+    except (InfrastructureFailure, OSError, ResourceError) as error:
+        if error is before_command:
+            # Nothing ran: the receipt ends failed, so it does not block a recovery that disowns the resource.
+            _finish_docker_receipt(context, receipt, "failed", DockerResult(5, "", ""), [], deadline_ns)
+            raise
         result = DockerResult(5, "", "")
         state, resources = "unresolved", []
     _finish_docker_receipt(context, receipt, state, result, resources, deadline_ns)
     if state == "unresolved":
-        raise ResourceError("Exact Docker cleanup result is unresolved.")
+        raise ResourceError(
+            f"Exact Docker cleanup result is unresolved. Resource: {resource_kind} {target}.",
+            details={"resource": {"kind": resource_kind, "identifier": target}},
+        )
 
 
 def _stop_owned_docker_resources(context: RunContext, deadline_ns: int | None = None) -> None:

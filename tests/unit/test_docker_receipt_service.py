@@ -126,6 +126,7 @@ class FakeDockerPort(DockerPort):
         self.compose_runtime_image_id = IMAGE_ID
         self.compose_ports: dict[str, list[dict[str, str]] | None] = {}
         self._stopped_ports: dict[str, dict] = {}
+        self.in_use: set[str] = set()  # networks Docker refuses to remove because something still uses them
         self.compose_services = ("fixture",)
         self.compose_run_retained = False
         self.compose_run_exit_code = 0
@@ -322,6 +323,8 @@ class FakeDockerPort(DockerPort):
             if self.fail_before_remove_kind == "network":
                 self.fail_before_remove_kind = None
                 raise OSError("synthetic interruption before network removal")
+            if argv[-1] in self.in_use:
+                return DockerResult(1, "", "network is in use\n")  # Docker refuses; the network stays
             self.networks.pop(argv[-1], None)
             return DockerResult(0, argv[-1] + "\n", "")
         if argv[:2] == ("volume", "create"):
@@ -2960,11 +2963,11 @@ def test_compose_run_still_refuses_a_changed_container_identity(tmp_path: Path, 
     original = fake.containers["c" * 64][field]
     fake.containers["c" * 64][field] = value
 
-    with pytest.raises(ResourceError, match="collides with another exact owned identity") as raised:
+    with pytest.raises(IncompleteCleanup, match="collides with another exact owned identity") as raised:
         lifecycle.dispatch_docker(handle._context, descriptor, fake, _COMPOSE_RUN)
 
-    after = json.loads(handle._context.record.read_text())["owned_resources"]["containers"]["c" * 64]
-    assert after == before
+    record = _record(handle)
+    assert record["owned_resources"]["containers"]["c" * 64] == before
     keys = ["evidence.created"] if field == "Created" else ["name"]
     assert raised.value.reason == "owned-identity-conflict"
     assert raised.value.details["conflict"] == {
@@ -2973,7 +2976,9 @@ def test_compose_run_still_refuses_a_changed_container_identity(tmp_path: Path, 
         "name": before["name"],
         "keys": keys,
     }
-    assert str(raised.value).endswith(f"Resource: container {'c' * 64}; differs: {keys[0]}.")
+    assert f"Resource: container {'c' * 64}; differs: {keys[0]}." in str(raised.value)
+    receipt = list(record["docker_receipts"].values())[-1]
+    assert (receipt["state"], receipt["result"]["exit_code"]) == ("unresolved", 5)
     fake.containers["c" * 64][field] = original
     _abandon(services, handle)
     lifecycle.configure_docker_factories(lambda: fake, lambda _identity: fake)
@@ -3882,3 +3887,87 @@ def test_compose_promotion_names_a_recreated_volume(tmp_path: Path, recorded_rem
             "name": volume,
             "keys": ["evidence.compose_project", "evidence.created"],
         }
+
+
+def test_dispatcher_conflict_before_the_child_fails_the_receipt(tmp_path: Path) -> None:
+    fake = FakeDockerPort()
+    handle, descriptor = _entered_run(tmp_path, fake)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("network", "create"))
+    network_id = next(iter(_record(handle)["owned_resources"]["networks"]))
+    fake.networks[network_id]["Created"] = "foreign"
+
+    with pytest.raises(ResourceError, match="Owned network identity changed") as raised:
+        lifecycle.dispatch_docker(handle._context, descriptor, fake, ("network", "rm", network_id))
+
+    assert not isinstance(raised.value, IncompleteCleanup)
+    assert raised.value.details["conflict"]["keys"] == ["evidence.created"]
+    assert list(_record(handle)["docker_receipts"].values())[-1]["state"] == "failed"
+    assert ("network", "rm", network_id) not in fake.commands
+    fake.networks[network_id]["Created"] = "network-created"
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("network", "rm", network_id))
+    assert handle.leave().cleanup_outcome == "complete"
+
+
+def test_cleanup_conflict_fails_its_receipt_and_names_the_resource(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No command ran: the receipt ends ``failed``, so it does not block a later recovery that disowns the resource."""
+    fake = FakeDockerPort()
+    handle, descriptor = _entered_run(tmp_path, fake)
+    monkeypatch.setattr(lifecycle, "_BOUND_DOCKER_FACTORY", lambda _identity: fake)
+    _plural, target, command = _prepare_owned_removal(handle, descriptor, fake, "container")
+    fake.containers[target]["Name"] = "/renamed"
+
+    with pytest.raises(ResourceError, match="Owned container identity changed") as raised:
+        lifecycle._cleanup_owned_docker_resources(handle._context)
+
+    record = _record(handle)
+    assert raised.value.details["conflict"]["keys"] == ["name"]
+    assert next(item for item in record["docker_receipts"].values() if item["kind"] == "container-rm")["state"] == (
+        "failed"
+    )
+    assert all(item["state"] not in {"pending", "unresolved"} for item in record["docker_receipts"].values())
+    assert command not in fake.commands
+    fake.containers[target]["Name"] = record["owned_resources"]["containers"][target]["name"]
+    lifecycle._cleanup_owned_docker_resources(handle._context)  # the failed receipt does not block the next attempt
+    assert handle.leave("failed").cleanup_outcome == "complete"
+
+
+def test_unresolved_removal_names_its_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeDockerPort()
+    handle, descriptor = _entered_run(tmp_path, fake)
+    monkeypatch.setattr(lifecycle, "_BOUND_DOCKER_FACTORY", lambda _identity: fake)
+    _plural, target, _command = _prepare_owned_removal(handle, descriptor, fake, "network")
+    fake.fail_before_remove_kind = "network"
+
+    with pytest.raises(ResourceError, match="cleanup result is unresolved") as raised:
+        lifecycle._cleanup_owned_docker_resources(handle._context)
+
+    assert raised.value.details["resource"] == {"kind": "network", "identifier": target}
+    assert str(raised.value).endswith(f"Resource: network {target}.")
+    assert (
+        next(item for item in _record(handle)["docker_receipts"].values() if item["kind"] == "network-rm")["state"]
+        == "unresolved"
+    )
+    lifecycle._reconcile_docker_receipt(handle._context)
+    assert handle.leave("failed").cleanup_outcome == "complete"
+
+
+def test_reconciliation_that_stays_unresolved_names_its_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A removal Docker keeps refusing (an object still in use) names what to disown on the next recovery."""
+    fake = FakeDockerPort()
+    handle, descriptor = _entered_run(tmp_path, fake)
+    monkeypatch.setattr(lifecycle, "_BOUND_DOCKER_FACTORY", lambda _identity: fake)
+    _plural, target, _command = _prepare_owned_removal(handle, descriptor, fake, "network")
+    fake.in_use.add(target)
+    with pytest.raises(ResourceError, match="cleanup result is unresolved"):
+        lifecycle._cleanup_owned_docker_resources(handle._context)
+
+    with pytest.raises(ResourceError, match="remains unresolved after exact reconciliation") as raised:
+        lifecycle._reconcile_docker_receipt(handle._context)
+
+    assert raised.value.details["resource"] == {"kind": "network", "identifier": target}
+    assert str(raised.value).endswith(f"Resource: network {target}.")
+    fake.in_use.clear()
+    lifecycle._reconcile_docker_receipt(handle._context)
+    assert handle.leave("failed").cleanup_outcome == "complete"
