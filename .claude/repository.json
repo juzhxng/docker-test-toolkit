@@ -1,0 +1,6 @@
+{
+  "module_line_ceiling": 1500,
+  "oversize_modules": {
+    "src/docker_test_toolkit/application/lifecycle.py": 14715
+  }
+}
