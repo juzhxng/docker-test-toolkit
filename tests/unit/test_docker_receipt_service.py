@@ -2415,10 +2415,12 @@ def test_multi_tag_build_cleanup_removes_each_exact_owned_reference(tmp_path: Pa
     handle.leave()
 
 
-def test_multi_tag_cleanup_preserves_a_foreign_container_using_the_image(
+def test_an_explicit_rm_of_an_image_a_foreign_container_uses_hands_it_off_in_an_exclusive_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An exclusive owner's own `image rm` takes K and hands the image off like its leave: Docker would untag every
+    reference but the last before refusing, under another account's container."""
     fake = FakeDockerPort()
     handle, descriptor = _entered_run(tmp_path, fake)
     monkeypatch.setattr(lifecycle, "_BOUND_DOCKER_FACTORY", lambda _identity: fake)
@@ -2431,18 +2433,21 @@ def test_multi_tag_cleanup_preserves_a_foreign_container_using_the_image(
     )
     foreign_id = "d" * 64
     fake.containers[foreign_id] = _container(foreign_id, "foreign", {}, image_id=BUILT_IMAGE_ID)
+    account = Path(json.loads(handle._context.record.read_text())["account_directory"])
 
-    with pytest.raises(IncompleteCleanup, match=r"unbound resource \(image-rm: its result could not be reconciled\)"):
-        lifecycle.dispatch_docker(handle._context, descriptor, fake, ("image", "rm", BUILT_IMAGE_ID))
+    result = lifecycle.dispatch_docker(handle._context, descriptor, fake, ("image", "rm", BUILT_IMAGE_ID))
 
-    # Docker untags while another reference remains and refuses the last one: the image survives, still named
-    assert "fixture:first" not in fake.images
+    assert result.exit_code == 0
+    assert fake.images["fixture:first"]["Id"] == BUILT_IMAGE_ID  # no reference untagged
     assert fake.images["fixture:second"]["Id"] == BUILT_IMAGE_ID
-    assert fake.containers[foreign_id]["Image"] == BUILT_IMAGE_ID
+    assert not any(command[:2] == ("image", "rm") for command in fake.commands)
+    assert [entry.image_id for entry in sharing.read_pending(account)] == [BUILT_IMAGE_ID]
     fake.containers.pop(foreign_id)
-    lifecycle._reconcile_docker_receipt(handle._context)
     lifecycle.dispatch_docker(handle._context, descriptor, fake, ("buildx", "rm", handle.docker_context.builder))
-    handle.leave()
+    lifecycle._cleanup_owned_docker_resources(handle._context)  # the last user drains the hand-off
+    assert "fixture:first" not in fake.images and "fixture:second" not in fake.images
+    assert sharing.read_pending(account) == []
+    assert handle.leave().cleanup_outcome == "complete"
 
 
 def test_multi_tag_recovery_accepts_nonzero_after_removing_the_surviving_reference(

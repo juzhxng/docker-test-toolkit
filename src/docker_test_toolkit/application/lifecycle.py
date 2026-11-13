@@ -2012,6 +2012,7 @@ def _compose_promotion(adapter, receipt: dict, result: DockerResult, data: dict)
                     "service": service,
                     "bindings": bindings,
                     "completed_service": service in set(plan.get("completed_services", ())),
+                    "memory_bytes": (item.get("HostConfig") or {}).get("Memory"),  # the OOM limit (additive key)
                     "control": {
                         "started_at": state["StartedAt"],
                         "restart_count": item["RestartCount"],
@@ -3907,10 +3908,10 @@ def dispatch_docker(
     )
     if command.kind in _ARCHIVE_KINDS:
         return _dispatch_archive(context, descriptor, adapter, command, data, operation_id, test_seams)
-    if command.kind not in _IMAGE_LOCK_SECONDS or _record_mode(data) != AdmissionMode.SHARED:
+    if not _takes_image_lock(command.kind, data):
         return _dispatch_classified(context, descriptor, adapter, argv, data, command, operation_id, test_seams)
-    # A shared run's image operation holds the account image lock K from before its preparation until its receipt is
-    # finished, and its Docker child inherits K; exclusive runs never take K for their own operations.
+    # An image operation that takes K holds it from before its preparation until its receipt is finished, and its
+    # Docker child inherits K.
     clock = NativeClock()
     first = clock.read()
     account = Path(data["account_directory"])
@@ -3925,6 +3926,14 @@ def dispatch_docker(
 
 # K waits within each image operation's own bound; expiry is ResourceBusy lock-deadline.
 _IMAGE_LOCK_SECONDS = {"build": 1200, "image-pull": 1200, "builder-create": 30, "image-rm": 30}
+
+
+def _takes_image_lock(kind: str, data: dict) -> bool:
+    """Whether an image operation runs under K: every one of a shared run; an image removal in every mode, because
+    its hand-off to another account's container needs K (an exclusive run's other operations never take K)."""
+    return kind in _IMAGE_LOCK_SECONDS and (_record_mode(data) == AdmissionMode.SHARED or kind == "image-rm")
+
+
 IMAGE_LOCK_WAIT = "image-lock"
 SHARED_GRANTS_UNREADABLE = "shared-grants-unreadable"
 
@@ -3971,9 +3980,15 @@ def _dispatch_classified(
         removed_id = str(command.plan["image_id"])
         resource = data["owned_resources"]["images"][removed_id]
         if hold_fd is not None and _hand_off_if_in_use(
-            context, data, removed_id, resource, None, image_lock_wait=image_lock_wait
+            context,
+            data,
+            removed_id,
+            resource,
+            None,
+            image_lock_wait=image_lock_wait,
+            engine=lambda: engine_images(adapter),
         ):
-            return DockerResult(0, "", "")  # a shared owner's rm of an image another run uses hands it off
+            return DockerResult(0, "", "")  # an owner's rm of an image another run or container uses hands it off
         argv, plan = _image_removal(resource)
         command = ClassifiedDockerCommand(command.kind, argv, {**command.plan, **plan})
     command = _enforce_share_rules(context, data, adapter, command, argv, config, bound_inputs)
@@ -4228,7 +4243,7 @@ def _reconcile_docker_receipt(context: RunContext, deadline_ns: int | None = Non
     if receipt["kind"] in _ARCHIVE_KINDS:
         _reconcile_archive_receipt(context, data, deadline_ns)
         return
-    if receipt["kind"] not in _IMAGE_LOCK_SECONDS or _record_mode(data) != AdmissionMode.SHARED:
+    if not _takes_image_lock(receipt["kind"], data):
         _reconcile_receipt(context, data, receipt, deadline_ns)
         return
     # A shared run's image receipt is reconciled under K, taken first: acquiring it proves the operation's Docker
@@ -4268,7 +4283,9 @@ def _reconcile_receipt(
             kind == "image"
             and hold_fd is not None
             and exists
-            and _hand_off_if_in_use(context, data, identity, resource, deadline_ns)
+            and _hand_off_if_in_use(
+                context, data, identity, resource, deadline_ns, engine=lambda: engine_images(adapter)
+            )
         ):
             # Another run bound the image after the owner journaled its removal: hand it off, never delete.
             _finish_docker_receipt(context, receipt, "removed", DockerResult(0, "", ""), [], deadline_ns)
@@ -7662,12 +7679,23 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
     tick = (clock.origin, clock.read())
     if breach is not None and fault is not None:
         reason, observer = breach
+
+        def with_this_pass(record: dict) -> dict:
+            """The record with this pass's successful reads applied, as a clean pass publishes them: an OOM measured
+            before a later read failed carries its own figures."""
+            record = copy.deepcopy(record)
+            for container_id, observation in observations.items():
+                record["resources"]["containers"][container_id]["observation"] = asdict(observation)
+            if owned_observations is not None:
+                _publish_owned_control(record, owned_observations, owned_targets)
+            return record
+
         _record_active_failure(
             context,
             reason,
             revision,
             lambda record: _observation_evidence(
-                record,
+                with_this_pass(record),
                 category="breach",
                 reason=reason,
                 observer=observer,

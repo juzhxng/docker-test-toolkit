@@ -55,8 +55,30 @@ REASON_KEYS: Mapping[tuple[str, str], frozenset[str]] = {
         {"host_memory_bytes", "baseline_host_memory_bytes", "swapout_bytes", "baseline_swapout_bytes"}
     ),
     ("container-oom", ""): frozenset({"container_limit_bytes", "oom_events"}),
-    ("queue-position", ""): frozenset({"holders"}),  # every positional wait records these (``holder_numbers``)
-    ("queue-position", "limit"): frozenset({"holders", "limit"}),
+    # every positional wait records the queue figures (``holder_numbers``), with the account's limit when one is set
+    **{
+        (reason, operand): frozenset({"holders", "limit"} if operand else {"holders"})
+        for reason in (
+            "queue-position",
+            "exclusive-holder",
+            "older-version-entry",
+            "other-repository",
+            "parallel-limit",
+        )
+        for operand in ("", "limit")
+    },
+    # reasons that compare no quantity: an explicit empty row (design K3); such a record stays schema 1
+    **{
+        (reason, ""): frozenset()
+        for reason in (
+            "runtime-unqualified",
+            "unknown-daemon-relationship",
+            "toolkit-not-installed",
+            "toolkit-upgraded",
+            "coholder-record-unreadable",
+            "incomplete-pressure-window",
+        )
+    },
 }
 NUMBER_KEYS = frozenset().union(*REASON_KEYS.values())
 
@@ -110,8 +132,9 @@ def render_numbers(numbers: Mapping[str, int]) -> str:
 def oom_numbers(record: Mapping[str, Any]) -> dict[str, int]:
     """The OOM figures a record holds: the largest limit among its containers that recorded one, and their events.
 
-    Managed containers keep their limit beside their observation; owned control containers keep only their control
-    evidence, so they add events but no limit. A record without such a container gives ``{}``.
+    Managed containers keep their limit beside their observation; owned containers keep it in their evidence
+    (``memory_bytes``, recorded at promotion; absent in records of versions before 0.8.0). A record without such a
+    container gives ``{}``.
     """
     limits, events = [], 0
     for resource in _items(record, "resources"):
@@ -127,6 +150,8 @@ def oom_numbers(record: Mapping[str, Any]) -> dict[str, int]:
         control = evidence.get("control") if isinstance(evidence, Mapping) else None
         if isinstance(control, Mapping) and (control.get("oom_killed") is True or _positive(control, "oom_events")):
             events += control["oom_events"] if non_negative_int(control.get("oom_events")) else 0
+            if isinstance(evidence, Mapping) and _positive(evidence, "memory_bytes"):
+                limits.append(evidence["memory_bytes"])
     found = {"oom_events": events} if events or limits else {}
     return numbers_for("container-oom", {**found, "container_limit_bytes": max(limits)} if limits else found)
 

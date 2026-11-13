@@ -767,9 +767,10 @@ host memory only; accelerator memory (VRAM, Apple unified memory used by a host-
   variant only. A clean run of the other variant no longer teaches the request shared over the refusal; once any run
   of a request broke a share rule, its runs stay exclusive until the share rules change or the entry leaves the store
   by its per-project bound.
-- **A build runs inside its phase's budget**: the Buildx worker (2 GiB, 2 CPUs, hard limits) is one of the run's own
-  containers. Creating it is checked like starting a service (share rule R12), and a phase change is refused while the
-  live worker and the run's other containers exceed the new phase's budget; remove the builder first. A phase that
+- **A shared run builds inside its phase's budget**: the Buildx worker (2 GiB, 2 CPUs, hard limits) is one of the
+  run's own containers. In a shared run, creating it is checked like starting a service (share rule R12), and a phase
+  change is refused while the live worker and the run's other containers exceed the new phase's budget; remove the
+  builder first. An exclusive run holds the machine alone, so its worker is bounded by its own hard limits only. A phase that
   builds declares room for the worker beside the containers it runs at the same time. A build that runs out of memory
   is a build failure.
 - **Share scope**: `install --share-scope machine|repository` (default `machine`: any runs that fit

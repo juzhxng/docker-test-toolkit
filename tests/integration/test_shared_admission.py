@@ -144,7 +144,9 @@ def test_exclusive_prediction_admits_exclusive_and_waits_shared_joiner(tmp_path:
     wait_until(lambda: joiner.status().state == "queued", message="the joiner queued")
     assert "sharing" not in _record(exclusive)
     assert _capacity_mode(account) == "EX"
-    assert queue_phases(account)[joiner.run_id] == "queued"
+    # "queued" is written before the joiner's first pass decides: hold the holder through several passes, as the
+    # siblings do, so the joiner records its exclusive-holder wait before the holder leaves
+    _holds_for(1.5, lambda: queue_phases(account)[joiner.run_id] == "queued")
     exclusive.leave()
     waiting.join(30)
 

@@ -539,6 +539,7 @@ def test_observation_pass_container_oom_survives_later_container_timeout(
     assert failure == "container-oom"
     assert evidence is not None
     assert (evidence["category"], evidence["reason"], evidence["observer"]) == ("breach", "container-oom", "container")
+    assert evidence["schema"] == 2 and set(evidence["numbers"]) == {"oom_events", "container_limit_bytes"}  # AC2
     assert late.count == 0
 
 
@@ -556,6 +557,7 @@ def test_observation_pass_owned_control_oom_survives_later_owned_timeout(
     assert failure == "container-oom"
     assert evidence is not None
     assert evidence["observer"] == "container"
+    assert evidence["schema"] == 2 and set(evidence["numbers"]) == {"oom_events", "container_limit_bytes"}  # AC2
     assert late.count == 0
 
 
