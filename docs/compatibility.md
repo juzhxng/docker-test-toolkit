@@ -110,7 +110,8 @@ a refusal, wait or breach carries `numbers` (and the evidence category `admissio
 waited on a compared quantity keeps schema 1, which older versions read. An older version lists a schema-2 record as
 unreadable and cannot recover such a run, so install and roll back while no run holds the account. The reasons
 `unknown-job-containment`, `job-cgroup-base-capacity`, `job-cgroup-external-capacity`, `host-process-envelope` and
-the observer `process` are no longer written (older records keep them); `coholder-record-unreadable` is new; `unknown-external-capacity` now waits instead of refusing;
+the observer `process` are no longer written (older records keep them); an owned container's evidence gains the
+additive key `memory_bytes` (its limit, for the `container-oom` numbers), which older versions ignore; `coholder-record-unreadable` is new; `unknown-external-capacity` now waits instead of refusing;
 `admission_observation.capacity` no longer carries `job_limits`. The release raises `SHARED_QUEUE_MIN_VERSION` to
 itself, so its runs never hold together with an older version's: their admission sums differ.
 

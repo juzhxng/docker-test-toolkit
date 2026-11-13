@@ -602,7 +602,9 @@ def _intended_differences(previous: str, before: dict, after: dict) -> list[str]
     found = [
         path
         for path in _differences(before, after)
-        if not path.endswith((".admission_observation.capacity.job_limits", ".hold_timeline.schema"))
+        if not path.endswith(
+            (".admission_observation.capacity.job_limits", ".hold_timeline.schema", ".evidence.memory_bytes")
+        )  # 0.8.0: an owned container's evidence records its limit (the container-oom numbers), an additive key
         and not re.search(r"\.hold_timeline\.waiting\[\d+\]\.numbers$", path)  # the numbers every wait records now
     ]
     if previous != "0.7.1":
