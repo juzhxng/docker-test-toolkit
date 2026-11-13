@@ -10,6 +10,13 @@
 Let coding agents run Docker-backed tests from several projects on one machine, without them breaking each other or
 leaving anything behind.
 
+**Purpose and non-goals.** docker-test-toolkit is a queue for Docker-backed test runs on one machine: runs go one
+after another, or side by side when their declared memory fits, and later arrivals wait. Every Docker resource a run
+creates is recorded and removed exactly, a killed run is cleaned up by the next one, and a guard keeps agents from
+changing Docker around it. It is not a scheduler (it does not place, prioritise or pre-empt work), it does not police
+live processes (a run's host processes are neither measured nor limited), and it is not a container runtime, a CI
+system or a cluster tool.
+
 When agents start test suites at once on a laptop or CI host, the suites compete for memory, and a killed run leaves
 containers, networks and volumes behind. Cleaning up with `docker system prune` then takes other projects' resources with
 it. This toolkit sits between your tests and Docker:

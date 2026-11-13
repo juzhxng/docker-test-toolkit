@@ -747,9 +747,8 @@ host memory only; accelerator memory (VRAM, Apple unified memory used by a host-
   another install. An invalid recorded value fails the guardian closed.
 - **A headroom decline is not a breach**: the host's headroom dropping since a run's phase began, through
   any process, does not end a granted run; such pressure makes later runs wait, since every admission keeps the
-  1.5 GiB headroom floor and the swap-out rate. A granted run is still ended by its own overuse (host-process envelope,
-  OOM) and by host-wide pressure, whoever caused it: an unshared run by the 1.5 GiB headroom floor and the
-  swap-out rate, every run by swap growth of 3 GiB from its admission (raised by the shared allowance below).
+  1.5 GiB headroom floor and the swap-out rate. A granted run is still ended by its own containers' OOM and by
+  host-wide pressure, whoever caused it: an unshared run by the 1.5 GiB headroom floor and the swap-out rate, every run by swap growth of 3 GiB from its admission (raised by the shared allowance below).
   Undeclared host memory can therefore still end a neighbour through these checks.
 - **Share verdicts count per repository, not per checkout** (0.7.2): a request's verdict key is its checkout's
   normalized Git `origin` address (as for the share scope below), entrypoint, profile and service closure, so two
@@ -799,12 +798,9 @@ host memory only; accelerator memory (VRAM, Apple unified memory used by a host-
   but cannot be read counts as
   full pressure. The check runs at the reservation and again at the grant. There is no fixed run cap
   (`--parallel-runs auto`).
-- **What the host-process envelope counts**: on Linux, each of a run's processes (the requester and its
-  active consumers) is charged its anonymous, shared and locked resident memory (`RssAnon + RssShmem + VmLck`), not
-  `VmRSS`. Clean file-backed pages (mapped models and libraries) are reclaimable page cache that the host read already
-  counts as available. Not charged: dirty file pages awaiting writeback, HugeTLB pages, page tables and unmapped
-  tmpfs; memory shared between processes is charged to each of them. Kernels before 4.5 have no `Rss*` rows and are
-  charged `VmRSS`. macOS still charges `ps` RSS.
+- **Host processes are not measured:** a run's declared `host_process_bytes` counts at admission only. Its processes
+  are not charged while it runs; memory they use beyond the declaration shows up as host pressure, which the checks
+  above judge for every run on the machine.
 - **Pressure while sharing:** a run that has shared (a co-holder was seen, or a run was granted beside it after its
   admission) is not failed by the 1.5 GiB headroom floor or the swap-out rate; those keep gating joiners. Its swap
   growth threshold grows by the budgets of the runs granted beside it after its admission, which never shrink, even

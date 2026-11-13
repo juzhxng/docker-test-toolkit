@@ -34,7 +34,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
-from typing import BinaryIO, Callable, ParamSpec, TextIO, TypeGuard, TypeVar, cast
+from typing import Callable, ParamSpec, TextIO, TypeGuard, TypeVar, cast
 
 from docker_test_toolkit.application import admission as account_queue
 from docker_test_toolkit.application import build_cache, image_archive, retention
@@ -116,7 +116,7 @@ from docker_test_toolkit.application.state import (
     overlaps_account,
     registry_directory,
 )
-from docker_test_toolkit.application.supervision import account_environment, private_process_environment
+from docker_test_toolkit.application.supervision import account_environment
 from docker_test_toolkit.config.installation import current_target, installation_of
 from docker_test_toolkit.config.runtime import (
     COMPOSE_PREFIX,
@@ -493,102 +493,6 @@ def _finish_control_child(child: subprocess.Popen) -> bool:
         for stream in (child.stdin, child.stdout, child.stderr):
             if stream is not None:
                 stream.close()
-
-
-def run_control(
-    argv: list[str],
-    *,
-    deadline: Deadline,
-    stdin: bytes = b"",
-    env: dict[str, str] | None = None,
-    cwd: Path | None = None,
-    output_limit: int = 8 * 1024 * 1024,
-) -> subprocess.CompletedProcess:
-    """Run one control child under its original native deadline and bounded pipes.
-
-    This function exclusively owns Popen and its wait status until return. On
-    failure it stops only that still-unreaped direct child; inherited pipes do not
-    authorize signalling descendants. ControlError retains bounded partial output.
-    No command arguments, environment or captured diagnostic text enter its message.
-    """
-    clock = NativeClock()
-    if not isinstance(stdin, bytes) or type(output_limit) is not int or output_limit <= 0:
-        raise ResourceError("Invalid control input/output bound.")
-    if not deadline.remaining_ns(clock):
-        raise ResourceError("Control deadline expired before spawn.", reason="observation-deadline")
-    try:
-        child = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=private_process_environment() if env is None else env,
-            cwd=cwd,
-            close_fds=True,
-        )
-    except OSError as error:
-        raise ResourceError("Control executable could not start.") from error
-    child_stdin = child.stdin
-    child_stdout = child.stdout
-    child_stderr = child.stderr
-    if child_stdin is None or child_stdout is None or child_stderr is None:
-        _finish_control_child(child)
-        raise ResourceError("Control child pipes are unavailable.")
-    output = {"stdout": bytearray(), "stderr": bytearray()}
-    sent = 0
-    failure = None
-    failure_reason = "unspecified"
-    with selectors.DefaultSelector() as selector:
-        try:
-            for stream, name in ((child_stdout, "stdout"), (child_stderr, "stderr")):
-                os.set_blocking(stream.fileno(), False)
-                selector.register(stream, selectors.EVENT_READ, name)
-            if stdin:
-                os.set_blocking(child_stdin.fileno(), False)
-                selector.register(child_stdin, selectors.EVENT_WRITE, "stdin")
-            else:
-                child_stdin.close()
-            while selector.get_map() or child.poll() is None:
-                remaining = deadline.remaining_ns(clock)
-                if not remaining:
-                    failure = "Control deadline expired; command or inherited pipes did not finish."
-                    failure_reason = "observation-deadline"
-                    break
-                for key, _ in selector.select(min(1, remaining / 1_000_000_000)):
-                    stream = cast(BinaryIO, key.fileobj)
-                    if key.data == "stdin":
-                        try:
-                            sent += os.write(stream.fileno(), stdin[sent : sent + 65536])
-                        except BrokenPipeError:
-                            failure = "Control input closed before the complete request was sent."
-                        if failure or sent == len(stdin):
-                            selector.unregister(stream)
-                            stream.close()
-                    else:
-                        available = output_limit - sum(map(len, output.values()))
-                        block = os.read(stream.fileno(), min(65536, available + 1))
-                        output[key.data].extend(block[:available])
-                        if len(block) > available:
-                            failure = "Control output exceeded its bound."
-                        if not block:
-                            selector.unregister(stream)
-                            stream.close()
-                    if failure:
-                        break
-                if failure:
-                    break
-        finally:
-            # No other code receives this Popen or reaps it. An unreaped original
-            # child cannot have its PID reused between this poll and Popen.kill.
-            if not _finish_control_child(child):
-                failure = "Control child termination remains unverified."
-    result = subprocess.CompletedProcess(argv, child.returncode, bytes(output["stdout"]), bytes(output["stderr"]))
-    if failure is None and not deadline.remaining_ns(clock):
-        failure = "Control deadline expired before verified completion."
-        failure_reason = "observation-deadline"
-    if failure:
-        raise ControlError(failure, result, reason=failure_reason)
-    return result
 
 
 @dataclass
@@ -1018,10 +922,9 @@ def signal_process(identity: ProcessIdentity, signum: int) -> bool:
 
 @dataclass
 class _ObservationReads:
-    """Test-composition overrides of the four reads one observation pass makes (``None`` keeps the production read)."""
+    """Test-composition overrides of the reads one observation pass makes (``None`` keeps the production read)."""
 
     engine: Callable[[object, str, Deadline | None], "EngineReply"] | None = None
-    rss: Callable[[ProcessIdentity, Deadline], int] | None = None
     host: Callable[[NativeClock, Deadline | None], "HostMemoryObservation"] | None = None
     endpoint: Callable[[object, Deadline | None], str] | None = None
 
@@ -1032,12 +935,11 @@ _READS = _ObservationReads()
 def configure_observation_reads(
     *,
     engine: Callable[[object, str, Deadline | None], "EngineReply"] | None = None,
-    rss: Callable[[ProcessIdentity, Deadline], int] | None = None,
     host: Callable[[NativeClock, Deadline | None], "HostMemoryObservation"] | None = None,
     endpoint: Callable[[object, Deadline | None], str] | None = None,
 ) -> None:
     """Replace the observation reads (``None`` restores the production read); test composition only."""
-    _READS.engine, _READS.rss, _READS.host = engine, rss, host
+    _READS.engine, _READS.host = engine, host
     _READS.endpoint = endpoint
 
 
@@ -1051,91 +953,11 @@ def _endpoint_read(docker, deadline: Deadline | None) -> str:
     return docker.endpoint(deadline) if reader is None else reader(docker, deadline)
 
 
-def _rss_read(identity: ProcessIdentity, deadline: Deadline) -> int:
-    reader = _READS.rss
-    return observe_process_rss(identity, deadline=deadline) if reader is None else reader(identity, deadline)
-
-
 def _host_read(clock: NativeClock, deadline: Deadline | None) -> "HostMemoryObservation":
     reader = _READS.host
     if reader is not None:
         return reader(clock, deadline)
     return observe_host_memory(clock) if deadline is None else observe_host_memory(clock, deadline=deadline)
-
-
-# The single-letter task states proc_pid_status prints (fs/proc/array.c task_state_array).
-_LINUX_TASK_STATES = frozenset("RSDTtXZPIKW")
-
-
-def _linux_status_rss(status: str) -> int:
-    """Return the resident bytes one ``/proc/<pid>/status`` document charges to its run.
-
-    The charge is ``RssAnon + RssShmem + VmLck``. File-backed resident pages (``RssFile``: mapped models and
-    libraries) are reclaimable page cache, which the host read already counts as available, so charging them would
-    count them twice; locked pages are unevictable whatever backs them, so ``VmLck`` is charged too (locked anonymous
-    pages then count twice, an over-charge only for a process that locks memory). Kernels before 4.5 print no ``Rss*``
-    rows; their tasks are charged ``VmRSS``. A task that has begun exiting releases its address space before it
-    becomes a zombie, so its status keeps the ``State`` row but has no ``Vm*`` rows; it holds no resident memory. A
-    status without exactly one recognizable ``State`` row, or with memory rows that are missing, duplicated or
-    malformed, refuses.
-    """
-    rows = status.splitlines()
-    states = [row.split() for row in rows if row.startswith("State:")]
-    if len(states) != 1 or len(states[0]) < 2 or states[0][1] not in _LINUX_TASK_STATES:
-        raise ResourceError("Process RSS has an unsupported Linux format.")
-    if not any(row.startswith(("Vm", "Rss")) for row in rows):
-        return 0
-    if not any(row.startswith("Vm") for row in rows):
-        raise ResourceError("Process RSS has an unsupported Linux format.")
-    if not any(row.startswith(("RssAnon:", "RssShmem:")) for row in rows):
-        return _status_kibibytes(rows, "VmRSS") * 1024
-    return sum(_status_kibibytes(rows, name) for name in ("RssAnon", "RssShmem", "VmLck")) * 1024
-
-
-def _status_kibibytes(rows: list[str], name: str) -> int:
-    values = [row.split() for row in rows if row.startswith(f"{name}:")]
-    if len(values) != 1 or len(values[0]) != 3 or not values[0][1].isdigit() or values[0][2] != "kB":
-        raise ResourceError("Process RSS has an unsupported Linux format.")
-    return int(values[0][1])
-
-
-def observe_process_rss(identity: ProcessIdentity, *, deadline: Deadline | None = None) -> int:
-    """Read one birth-bound process RSS without treating its PID as authority."""
-    if observe_process(identity) != "executing":
-        raise ResourceError("Process RSS target is not executing.")
-    if sys.platform == "linux":
-        try:
-            status = Path(f"/proc/{identity.pid}/status").read_text()
-        except OSError as error:
-            raise ResourceError("Process RSS is unavailable.") from error
-        rss = _linux_status_rss(status)
-    elif sys.platform == "darwin":
-        result = run_control(
-            ["/bin/ps", "-o", "rss=", "-p", str(identity.pid)],
-            deadline=deadline or Deadline.after(NativeClock(), 5),
-        )
-        value = result.stdout.strip()
-        if result.returncode or not value.isdigit():
-            raise ResourceError("Process RSS has an unsupported Darwin format.")
-        rss = int(value) * 1024
-    else:
-        raise ResourceError("Process RSS observation is unsupported.")
-    if observe_process(identity) != "executing":
-        raise ResourceError("Process identity changed during RSS observation.")
-    return rss
-
-
-@_attributed("process")
-def _active_process_rss(identity: ProcessIdentity, deadline: Deadline) -> int:
-    """Return zero when an active process exits during its RSS observation."""
-    if observe_process(identity) != "executing":
-        return 0
-    try:
-        return _rss_read(identity, deadline)
-    except ResourceError:
-        if observe_process(identity) != "executing":
-            return 0
-        raise
 
 
 def _private_directory(path: Path):
@@ -7783,7 +7605,6 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
     oom = False
     try:
         docker = _docker()
-        step = "engine"
         shared = _record_mode(data) == AdmissionMode.SHARED
         # The holders read before the host samples excuse them too: one that leaves before the co-holder read below had
         # its memory in the samples.
@@ -7798,21 +7619,9 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
         daemon_id: str = data["grant"]["daemon_id"]
         step = "host"
         current = _host_read(clock, deadline)
-        # A shared run reads its co-holders after the inventory, so every inventoried co-holder container is explained,
-        # and after the host sample, so a run admitted before the sample is in the membership the sample is judged with
-        # (one admitted after it can only add an excuse).
-        step = "engine"
+        # A shared run reads its co-holders after the host sample, so a run admitted before the sample is in the
+        # membership the sample is judged with (one admitted after it can only add an excuse).
         coholders = _gather_coholders(lambda: _read_coholders(context, account, deadline)) if shared else None
-        step = "process"
-        serialized_identities = [data["requester"]] + [
-            item["identity"] for item in data["consumers"].values() if item["state"] == "active"
-        ]
-        host_rss = 0
-        for serialized in serialized_identities:
-            identity = _identity_from_json(serialized)
-            failpoint("observation-process-rss")
-            host_rss += _active_process_rss(identity, deadline)
-        step = "engine"
         admission = _host_observation(data["admission_observation"]["memory"])
         phase = _host_observation(data["phase_history"][-1]["memory"])
         samples = [_host_observation(item) for item in data["admission_observation"]["samples"]]
@@ -7822,7 +7631,6 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
             if current.tick_ns - sample.tick_ns >= _WINDOW_NS
         ]
         window = max(windows, key=lambda sample: sample.tick_ns)
-        budget = _phase_budgets(data["phases"], data["initial_phase"])[data["grant"]["phase"]]
         if coholders is not None:
             capacity_decision = observation_decision(coholders.unknown)
             terms = _shared_pressure_terms(
@@ -7839,8 +7647,6 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
             granted=True,
             admission_baseline=admission,
             phase_baseline=phase,
-            host_rss_bytes=host_rss,
-            host_envelope_bytes=budget.host_process_bytes,
             growth_allowance_bytes=terms.allowance_bytes,
             shared_gate=terms.shared,
         )
@@ -7870,7 +7676,7 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
     elif capacity_decision is not None and capacity_decision.state != CapacityState.READY:
         breach = (capacity_decision.reason, "engine")
     elif pressure is not None and pressure.state != CapacityState.READY:
-        breach = (pressure.reason, "process" if pressure.reason == "host-process-envelope" else "host")
+        breach = (pressure.reason, "host")
         figures = pressure.numbers
     tick = (clock.origin, clock.read())
     if breach is not None and fault is not None:
@@ -9048,6 +8854,7 @@ def _revoke_refused(
     first = (clock.origin, clock.read())
 
     def evidence(data: dict) -> dict:
+        """Build the refusal's evidence from the record as it is at the revoke write."""
         return _observation_evidence(
             data, category="admission-refused", reason=reason, observer="admission", first_tick=first, numbers=numbers
         )
@@ -13955,6 +13762,7 @@ def assess_capacity(budget: PhaseBudget, observed: CapacitySnapshot) -> Capacity
     values = _capacity_values(budget, observed)
 
     def decided(state: CapacityState, reason: str, guest: int | None = None, host: int | None = None):
+        """Return the decision with the operands its reason compared."""
         return CapacityDecision(state, reason, guest, host, numbers=numbers_for(reason, values))
 
     if observed.daemon_cpus < budget.daemon_cpus or observed.host_cpus < budget.host_threads:
@@ -14248,8 +14056,6 @@ def assess_pressure(
     granted: bool = False,
     admission_baseline: HostMemoryObservation | None = None,
     phase_baseline: HostMemoryObservation | None = None,
-    host_rss_bytes: int | None = None,
-    host_envelope_bytes: int | None = None,
     window_ns: int = _WINDOW_NS,
     growth_allowance_bytes: int = 0,
     shared_gate: bool = False,
@@ -14257,16 +14063,16 @@ def assess_pressure(
     """Wait on initial pressure, but fail an admitted run without retry or baseline reset.
 
     A complete measured window (``window_ns``, 30 s outside a private test binding) is required; admission swap
-    history survives phase transitions. RSS is checked in its own metric, never added to H.
+    history survives phase transitions.
 
     A granted run that has shared (``shared_gate``) is not failed by the headroom floor or the swap-out rate, which
     keep gating joiners' admission; its swap-growth threshold grows by the allowance. The defaults are a
     run that never shared.
 
     A decline of the host's headroom since a granted run's phase began is not a breach: it makes
-    later runs wait (the headroom floor gates every admission). A granted run ends for its own overuse (its process
-    envelope here, its containers' limits elsewhere) and for host-wide pressure, whoever caused it: the floor and the
-    swap-out rate unless it has shared, and swap growth from its admission.
+    later runs wait (the headroom floor gates every admission). A granted run ends for its own containers' OOM
+    (elsewhere) and for host-wide pressure, whoever caused it: the floor and the swap-out rate unless it has shared, and
+    swap growth from its admission.
     """
     failure = CapacityState.REFUSED if granted else CapacityState.WAITING
     growth_limit = SWAP_GROWTH_LIMIT_BYTES + growth_allowance_bytes
@@ -14282,6 +14088,7 @@ def assess_pressure(
     }
 
     def decided(state: CapacityState, reason: str) -> CapacityDecision:
+        """Return the decision with the operands its reason compared."""
         return CapacityDecision(state, reason, numbers=numbers_for(reason, values))
 
     baselines = [sample for sample in (window_start, admission_baseline, phase_baseline) if sample is not None]
@@ -14324,13 +14131,9 @@ def assess_pressure(
         return CapacityDecision(CapacityState.READY, "native-pressure")
     if admission_baseline is None or phase_baseline is None:
         return CapacityDecision(CapacityState.REFUSED, "incomplete-admission-baseline")
-    if host_rss_bytes is None or host_envelope_bytes is None or host_rss_bytes < 0 or host_envelope_bytes < 0:
-        return CapacityDecision(CapacityState.REFUSED, "incomplete-admission-baseline")
     values.update(swap_growth_bytes=current.swap_used_bytes - admission_baseline.swap_used_bytes)
     if current.swap_used_bytes - admission_baseline.swap_used_bytes > growth_limit:
         return decided(CapacityState.REFUSED, "admission-swap-growth")
-    if host_rss_bytes > host_envelope_bytes:
-        return CapacityDecision(CapacityState.REFUSED, "host-process-envelope")
     return CapacityDecision(CapacityState.READY, "native-pressure")
 
 

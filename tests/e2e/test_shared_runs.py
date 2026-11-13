@@ -120,18 +120,11 @@ try:
             except Exception as error:
                 results.append({"rc": 1, "stderr": f"{type(error).__name__}: {error}"})
     (control / f"steps-{name}.json").write_text(json.dumps(results))
-    ballast = None
-    if action == "breach":
-        ballast = bytearray(host_bytes * 4)  # four times the declared host-process envelope, every page touched
-        for offset in range(0, len(ballast), 4096):
-            ballast[offset] = 1
     (control / f"entered-{name}.json").write_text("{}")
     deadline = time.monotonic() + 300
     while not (control / f"release-{name}").exists() and time.monotonic() < deadline:
-        if action == "breach" and handle.status().state != "active":
-            break
         time.sleep(0.2)
-    status = handle.leave("passed" if action != "breach" else "failed")
+    status = handle.leave("passed")
     entered = False
     (control / f"done-{name}.json").write_text(json.dumps({"state": status.state, "cleanup": status.cleanup_outcome}))
 except BaseException as error:
@@ -558,30 +551,6 @@ def test_a_coholder_restarting_its_containers_ends_no_other_run(
     assert all(record["infrastructure_failure"] != "unknown-job-containment" for record in records.values())
     waits = [item for item in records["c"]["hold_timeline"]["waiting"] if item["reason"] == "coholder-capacity"]
     assert waits and {"coholders", "external_bytes"} <= set(waits[0]["numbers"])
-
-
-def test_own_host_envelope_breach_fails_under_production_observation(
-    tmp_path: Path, redis_image: None, private_installation: Path
-) -> None:
-    del redis_image
-    root, control = private_installation, tmp_path / "control"
-    control.mkdir()
-    project = _stage(tmp_path, "breach")
-    worker = _worker(root, project, control, "a", "breach", container=GIB, host=64 * 1024**2, service=0)
-    try:
-        _wait(control / "entered-a.json")
-        _until(
-            lambda: _record(control, "a")["infrastructure_failure"] is not None,
-            timeout=60,
-            message="the observation failed the run",
-        )
-        (control / "release-a").touch()  # the requester leaves its failed run
-        worker.communicate(timeout=180)
-    finally:
-        if worker.poll() is None:
-            worker.kill()
-
-    assert _record(control, "a")["infrastructure_failure"] == "host-process-envelope"
 
 
 # --- share rules on real renders ---
@@ -1036,33 +1005,6 @@ def test_no_foreign_failure_including_after_departure(
     )
     logged = {grant.run_id for grant in sharing.read_grants(_account(root))}
     assert logged == {later["run_id"], *([earlier["run_id"]] if counted else [])}
-
-
-def test_own_breach_beside_coholder_fails_only_the_breaching_run(
-    tmp_path: Path, redis_image: None, private_installation: Path
-) -> None:
-    del redis_image
-    root, control = private_installation, tmp_path / "control"
-    control.mkdir()
-    steady, breaching = _stage(tmp_path, "steady"), _stage(tmp_path, "breaching")
-    seed_verdict(root, steady)
-    seed_verdict(root, breaching)
-    holder = _worker(root, steady, control, "a", "hold", container=GIB, host=256 * 1024**2, service=0)
-    breach = None
-    try:
-        _wait(control / "entered-a.json")
-        breach = _worker(root, breaching, control, "b", "breach", container=GIB, host=64 * 1024**2, service=0)
-        _wait(control / "entered-b.json")
-        _until(lambda: _record(control, "b")["infrastructure_failure"] is not None, timeout=60, message="B failed")
-        (control / "release-b").touch()
-        breach.communicate(timeout=180)
-        (control / "release-a").touch()
-        _finish(holder)
-    finally:
-        _killing(holder, breach)
-
-    assert _record(control, "b")["infrastructure_failure"] == "host-process-envelope"
-    assert _record(control, "a")["infrastructure_failure"] is None
 
 
 def _account(root: Path) -> Path:

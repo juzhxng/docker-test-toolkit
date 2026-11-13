@@ -21,7 +21,6 @@ from docker_test_toolkit.application.lifecycle import (
     EngineReply,
     HostMemoryObservation,
     NativeClock,
-    ProcessIdentity,
 )
 from docker_test_toolkit.application.ports.docker import DockerPort
 from docker_test_toolkit.application.state import canonical_account, overlaps_account
@@ -280,11 +279,10 @@ def _local_endpoint(_docker: object, _deadline: object) -> str:
 def bind_test_observation_reads(
     *,
     engine: Callable[[object, str, Deadline | None], EngineReply] | None = None,
-    rss: Callable[[ProcessIdentity, Deadline], int] | None = None,
     host: Callable[[NativeClock, Deadline | None], HostMemoryObservation] | None = None,
     endpoint: Callable[[object, Deadline | None], str] | None = None,
 ) -> Iterator[None]:
-    """Bind the Engine, RSS and host reads of one observation pass for a block, then restore the defaults.
+    """Bind the Engine and host reads of one observation pass for a block, then restore the defaults.
 
     A reader left ``None`` keeps its production read; with a synthetic ``engine`` the endpoint defaults to this
     platform's local daemon socket. Nothing a previous block bound is inherited, and the defaults
@@ -293,7 +291,7 @@ def bind_test_observation_reads(
     """
     if endpoint is None and engine is not None:
         endpoint = _local_endpoint
-    lifecycle.configure_observation_reads(engine=engine, rss=rss, host=host, endpoint=endpoint)
+    lifecycle.configure_observation_reads(engine=engine, host=host, endpoint=endpoint)
     try:
         yield
     finally:

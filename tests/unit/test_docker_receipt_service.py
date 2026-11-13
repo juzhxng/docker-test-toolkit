@@ -921,7 +921,6 @@ def test_active_observation_handles_shim_receipts_and_owned_control(
         "observe_host_memory",
         lambda _clock, deadline=None: current,
     )
-    monkeypatch.setattr(lifecycle, "_active_process_rss", lambda _identity, _deadline: 0)
     monkeypatch.setattr(
         lifecycle,
         "assess_pressure",
@@ -1069,19 +1068,19 @@ def test_pending_builds_and_exports_keep_host_pressure_observable(open_receipts:
 
 
 @pytest.mark.parametrize(
-    ("headroom", "swap", "swapout", "rss", "state", "reason"),
+    ("headroom", "swap", "swapout", "state", "reason"),
     [
         # 4 GiB below the phase baseline: memory others took makes later runs wait, it never fails this run
-        (4 * 1024**3, 0, 0, 0, lifecycle.CapacityState.READY, "native-pressure"),
-        (1024**3, 0, 0, 0, lifecycle.CapacityState.REFUSED, "native-headroom"),
-        (4 * 1024**3, 4 * 1024**3, 0, 0, lifecycle.CapacityState.REFUSED, "admission-swap-growth"),
-        (4 * 1024**3, 0, 4 * 1024**3, 0, lifecycle.CapacityState.REFUSED, "swapout-rate"),
-        (4 * 1024**3, 0, 0, 2 * 1024**3, lifecycle.CapacityState.REFUSED, "host-process-envelope"),
+        (4 * 1024**3, 0, 0, lifecycle.CapacityState.READY, "native-pressure"),
+        (1024**3, 0, 0, lifecycle.CapacityState.REFUSED, "native-headroom"),
+        (4 * 1024**3, 4 * 1024**3, 0, lifecycle.CapacityState.REFUSED, "admission-swap-growth"),
+        (4 * 1024**3, 0, 4 * 1024**3, lifecycle.CapacityState.REFUSED, "swapout-rate"),
     ],
 )
-def test_a_granted_run_fails_only_for_its_own_overuse_or_real_host_pressure(
-    headroom: int, swap: int, swapout: int, rss: int, state: lifecycle.CapacityState, reason: str
+def test_a_granted_run_fails_only_for_real_host_pressure(
+    headroom: int, swap: int, swapout: int, state: lifecycle.CapacityState, reason: str
 ) -> None:
+    """The watchdog: a granted run ends on real host pressure only (its figures: ``test_decision_numbers.py``)."""
     gib = 1024**3
     baseline = lifecycle.HostMemoryObservation("host", 0, 16 * gib, 8 * gib, 0, 0, 4096, {})
     current = lifecycle.HostMemoryObservation("host", 31_000_000_000, 16 * gib, headroom, swap, swapout, 4096, {})
@@ -1092,8 +1091,6 @@ def test_a_granted_run_fails_only_for_its_own_overuse_or_real_host_pressure(
         granted=True,
         admission_baseline=baseline,
         phase_baseline=baseline,
-        host_rss_bytes=rss,
-        host_envelope_bytes=gib,
     )
 
     assert (decision.state, decision.reason) == (state, reason)

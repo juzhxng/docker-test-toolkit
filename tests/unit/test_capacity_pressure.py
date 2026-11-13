@@ -67,8 +67,6 @@ def _granted_pressure(current, window, *, admission=None, phase=None) -> lifecyc
         granted=True,
         admission_baseline=admission or window,
         phase_baseline=phase or window,
-        host_rss_bytes=0,
-        host_envelope_bytes=GIB,
     )
 
 

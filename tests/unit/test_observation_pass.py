@@ -29,14 +29,14 @@ GIB = 1024**3
 
 
 class _Reads:
-    """Scripted engine, RSS and host readers for the test composition seam; every read records its deadline.
+    """Scripted engine and host readers for the test composition seam; every read records its deadline.
 
     ``script[key]`` is a list of outcomes consumed per read (the last one repeats): ``ok``, ``late``, ``unreadable``,
     ``unclassified``, plus ``oom`` for a container and ``daemon-changed`` or ``tiny`` for ``info``. A container can
     also stop between the exact inspection and these reads: ``exited`` (its ``/json`` already shows it stopped),
     ``exiting`` (its stats come from the dying cgroup), ``exiting-oom`` (the same, killed by the OOM killer),
     ``restarted-exited`` (stopped in a newer generation) and ``dying`` (empty stats while it keeps running).
-    Keys: ``info``, ``host``, ``rss`` or a 64-hex container id (consumed on its ``/json`` read).
+    Keys: ``info``, ``host`` or a 64-hex container id (consumed on its ``/json`` read).
     """
 
     def __init__(self, fake: FakeDockerPort, topology: str | None) -> None:
@@ -121,15 +121,6 @@ class _Reads:
             }
         return EngineReply(body, b"", 0)
 
-    def rss(self, _identity: object, deadline: object) -> int:
-        self.deadlines.append(("rss", deadline))
-        outcome = self._next("rss")
-        if outcome == "unreadable":
-            raise OSError(errno.EIO, "rss")
-        if outcome == "late":
-            raise self._late()
-        return 0
-
     def host(self, _clock: object, deadline: object) -> lifecycle.HostMemoryObservation:
         self.deadlines.append(("host", deadline))
         outcome = self._next("host")
@@ -210,13 +201,13 @@ def test_observation_pass_single_deadline_reaches_every_read(
     _services, handle, fake, reads = _active_pass(tmp_path, monkeypatch, request)
     fake.deadlines.clear()  # only the reads of the observation pass count, not the setup commands
 
-    with bind_test_observation_reads(engine=reads.engine, rss=reads.rss, host=reads.host):
+    with bind_test_observation_reads(engine=reads.engine, host=reads.host):
         lifecycle._observe_active_run(handle._context)
 
     recorded = reads.deadlines + fake.deadlines
     assert json.loads(handle._context.record.read_text())["infrastructure_failure"] is None
     labels = {label for label, _ in recorded}
-    assert {"engine:info", "host", "rss"} <= labels
+    assert {"engine:info", "host"} <= labels
     assert "objects:container" not in labels  # after the grant no inventory is read: only the run's own containers
     assert any(label.startswith("engine:container") for label in labels)
     assert [label for label, _ in recorded].count("host") == 1
@@ -234,7 +225,7 @@ def test_admission_capacity_inputs_share_one_deadline(
     data = lifecycle._load_run(handle._context)
     fake.deadlines.clear()
 
-    with bind_test_observation_reads(engine=reads.engine, rss=reads.rss, host=reads.host):
+    with bind_test_observation_reads(engine=reads.engine, host=reads.host):
         lifecycle._capacity_inputs(data, None)
 
     recorded = reads.deadlines + fake.deadlines
@@ -306,16 +297,16 @@ def test_observation_reads_binding_restores_defaults(tmp_path: Path, monkeypatch
 
     with bind_test_observation_reads(engine=first):
         assert lifecycle._READS.engine is first
-    with bind_test_observation_reads(rss=second):
+    with bind_test_observation_reads(host=second):
         assert lifecycle._READS.engine is None  # the first binding is not inherited
-        assert lifecycle._READS.rss is second
+        assert lifecycle._READS.host is second
     with (
         pytest.raises(RuntimeError, match="boom"),
-        bind_test_observation_reads(engine=first, rss=second, host=first),
+        bind_test_observation_reads(engine=first, host=second),
     ):
         raise RuntimeError("boom")
 
-    assert (lifecycle._READS.engine, lifecycle._READS.rss, lifecycle._READS.host) == (None, None, None)
+    assert (lifecycle._READS.engine, lifecycle._READS.host) == (None, None)
 
 
 def _owned_targets(handle) -> list[str]:
@@ -372,7 +363,7 @@ def _add_managed(handle, fake: FakeDockerPort, identifiers: tuple[str, ...]) -> 
 
 def _pass(services, handle, reads: _Reads, late: lifecycle._LateAttempts | None = None, **keywords) -> dict:
     """Run one guardian observation pass with the scripted reads bound; return the record afterwards."""
-    with bind_test_observation_reads(engine=reads.engine, rss=reads.rss, host=reads.host):
+    with bind_test_observation_reads(engine=reads.engine, host=reads.host):
         lifecycle._observe_active_run(handle._context, late, **keywords)
     return json.loads(handle._context.record.read_text())
 
@@ -404,13 +395,14 @@ def test_observation_pass_raw_oserror_is_unclassified_with_step_observer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
     services, handle, _fake, reads = _active_pass(tmp_path, monkeypatch, request)
-    reads.script["rss"] = ["unreadable"]
+    (target,) = _owned_targets(handle)
+    reads.script[target] = ["unreadable"]  # a raw OSError from the container step
 
     failure, evidence = _failure(_pass(services, handle, reads))
 
     assert failure == "telemetry-unreadable"
     assert evidence is not None
-    assert (evidence["detail"], evidence["observer"]) == ("unclassified", "process")
+    assert (evidence["detail"], evidence["observer"]) == ("unclassified", "container")
 
 
 def test_observation_pass_host_failure_inside_capacity_read_is_attributed_to_host(
@@ -424,7 +416,7 @@ def test_observation_pass_host_failure_inside_capacity_read_is_attributed_to_hos
 
     install_failpoint(deny)
     try:
-        with bind_test_observation_reads(engine=reads.engine, rss=reads.rss):
+        with bind_test_observation_reads(engine=reads.engine):
             lifecycle._observe_active_run(handle._context)
     finally:
         install_failpoint(None)
@@ -442,7 +434,7 @@ def test_observation_pass_host_budget_exhaustion_is_one_late_attempt(
     reads.script["info"] = ["slow"]
     late = lifecycle._LateAttempts()
 
-    with bind_test_observation_reads(engine=reads.engine, rss=reads.rss):
+    with bind_test_observation_reads(engine=reads.engine):
         lifecycle._observe_active_run(handle._context, late, _budget_seconds=0.4)
 
     assert _failure(json.loads(handle._context.record.read_text())) == (None, None)
@@ -477,7 +469,7 @@ def test_observation_pass_complete_sample_resets_late_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
     services, handle, _fake, reads = _active_pass(tmp_path, monkeypatch, request)
-    reads.script["rss"] = ["late", "ok", "late", "late"]  # one RSS read per pass: the pass is the unit being scripted
+    reads.script["host"] = ["late", "ok", "late", "late"]  # one host sample per pass: the pass is the scripted unit
     late = lifecycle._LateAttempts()
 
     for _ in range(4):

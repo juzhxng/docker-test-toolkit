@@ -35,8 +35,6 @@ def _assess(current, *, phase=None, admission=None, **keywords) -> lifecycle.Cap
         granted=True,
         admission_baseline=admission or start,
         phase_baseline=phase or start,
-        host_rss_bytes=0,
-        host_envelope_bytes=GIB,
         **keywords,
     )
 
@@ -130,22 +128,6 @@ def test_growth_beyond_allowance_still_fails_and_within_passes() -> None:
     assert (beyond.state, beyond.reason) == (CapacityState.REFUSED, "admission-swap-growth")
 
 
-def test_own_envelope_breach_fails_even_when_shared() -> None:
-    decision = lifecycle.assess_pressure(
-        _sample(60),
-        _sample(0),
-        granted=True,
-        admission_baseline=_sample(0),
-        phase_baseline=_sample(0),
-        host_rss_bytes=2 * GIB,
-        host_envelope_bytes=GIB,
-        growth_allowance_bytes=64 * GIB,
-        shared_gate=True,
-    )
-
-    assert (decision.state, decision.reason) == (CapacityState.REFUSED, "host-process-envelope")
-
-
 def test_shared_gate_never_relaxes_admission() -> None:
     """Joiners still wait on the floor: the gate applies to granted runs only."""
     decision = lifecycle.assess_pressure(_sample(60, headroom=GIB), _sample(0), shared_gate=True)
@@ -164,15 +146,13 @@ _samples = st.builds(
 )
 
 
-@given(_samples, _samples, _samples, _samples, st.integers(0, 4 * GIB), st.integers(0, 4 * GIB), st.booleans())
-def test_never_shared_unchanged(current, window, admission, phase, rss, envelope, granted) -> None:
+@given(_samples, _samples, _samples, _samples, st.booleans())
+def test_never_shared_unchanged(current, window, admission, phase, granted) -> None:
     """The defaults are a run that never shared: explicit zero allowances and no gate give the same decision."""
     arguments = {
         "granted": granted,
         "admission_baseline": admission,
         "phase_baseline": phase,
-        "host_rss_bytes": rss,
-        "host_envelope_bytes": envelope,
     }
 
     assert lifecycle.assess_pressure(current, window, **arguments) == lifecycle.assess_pressure(

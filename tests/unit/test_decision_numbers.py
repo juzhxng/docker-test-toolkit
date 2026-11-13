@@ -138,8 +138,6 @@ DECISIONS: dict[str, tuple[Callable[[], CapacityDecision], set[str]]] = {
             granted=True,
             admission_baseline=_sample(0),
             phase_baseline=_sample(0),
-            host_rss_bytes=0,
-            host_envelope_bytes=0,
         ),
         {"swap_growth_bytes", "swap_growth_limit_bytes", "growth_allowance_bytes", "host_swap_used_bytes"},
     ),
