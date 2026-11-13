@@ -77,6 +77,8 @@ REASON_KEYS: Mapping[tuple[str, str], frozenset[str]] = {
             "toolkit-upgraded",
             "coholder-record-unreadable",
             "incomplete-pressure-window",
+            "image-lock",
+            "shared-grants-unreadable",
         )
     },
 }

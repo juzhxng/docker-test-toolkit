@@ -204,3 +204,19 @@ def test_the_numbers_are_the_operands_that_decided() -> None:
     assert external.numbers["daemon_memory_bytes"] == 3 * GIB
     assert (headroom.numbers["headroom_bytes"], headroom.numbers["headroom_floor_bytes"]) == (GIB, 3 * GIB // 2)
     assert (cpu.reason, cpu.numbers["daemon_cpus_needed"], cpu.numbers["daemon_cpus"]) == ("coholder-capacity", 4, 3)
+
+
+@pytest.mark.parametrize(("reason", "operand"), sorted(numbers.REASON_KEYS))
+def test_every_row_records_exactly_its_keys_and_an_empty_row_stays_schema_1(reason: str, operand: str) -> None:
+    """One row per (reason, deciding operand), the reasons that compare no quantity included (design K3)."""
+    row = numbers.REASON_KEYS[(reason, operand)]
+    recorded = numbers.numbers_for(reason, dict.fromkeys(numbers.NUMBER_KEYS, 1), operand)
+
+    assert set(recorded) == row
+    assert numbers.schema_for(bool(recorded)) == (2 if row else 1)
+
+
+def test_the_reasons_that_compare_no_quantity_have_an_empty_row() -> None:
+    named = {"runtime-unqualified", "unknown-daemon-relationship", "toolkit-not-installed", "toolkit-upgraded"}
+    named |= {"coholder-record-unreadable", "incomplete-pressure-window", "image-lock", "shared-grants-unreadable"}
+    assert {reason for reason in named if numbers.REASON_KEYS.get((reason, "")) == frozenset()} == named
