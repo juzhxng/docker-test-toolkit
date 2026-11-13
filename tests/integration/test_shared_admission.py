@@ -15,6 +15,7 @@ from docker_test_toolkit import PhaseBudget, RunSpec
 from docker_test_toolkit.application import lifecycle, sharing
 from docker_test_toolkit.application.recovery import atomic_json
 from docker_test_toolkit.domain.policy import allowance_bytes
+from docker_test_toolkit.domain.share_policy import SHARE_RULES_VERSION
 from docker_test_toolkit.factories.testing import bind_test_capacity
 from tests.integration.account_fixtures import (
     EnterThread,
@@ -43,7 +44,7 @@ pytestmark = pytest.mark.integration
 GIB = 1024**3
 
 
-def _spec(project: Path, purpose: str, *, gib: int = 1, cpus: int = 1, wait_seconds: int = 30) -> RunSpec:
+def _spec(project: Path, purpose: str, *, gib: int = 1, cpus: int = 1, wait_seconds: int = 30, phases=None) -> RunSpec:
     return RunSpec(
         project_root=project,
         entrypoint="integration",
@@ -51,7 +52,7 @@ def _spec(project: Path, purpose: str, *, gib: int = 1, cpus: int = 1, wait_seco
         services=(),
         closure=(),
         profile="fixture",
-        phases={"tests": PhaseBudget(gib * GIB, 1, cpus, 1)},
+        phases=phases or {"tests": PhaseBudget(gib * GIB, 1, cpus, 1)},
         initial_phase="tests",
         artifact=source_artifact(),
         wait_seconds=wait_seconds,
@@ -72,7 +73,7 @@ def _seed_shareable(handle, shareable: bool = True) -> None:
     path = sharing.verdict_path(context.project.state, context.project.project_id)
     path.parent.mkdir(mode=0o700, exist_ok=True)
     verdict = {"shareable": shareable, "reason": None, "run_id": context.run_id, "origin": "seed", "tick_ns": 0}
-    atomic_json(path, {"rules": 1, "schema": 1, "verdicts": {key: verdict}})
+    atomic_json(path, {"rules": SHARE_RULES_VERSION, "schema": 1, "verdicts": {key: verdict}})
 
 
 def _open(services, project: Path, purpose: str, *, shareable: bool | None = True, **budget):
@@ -604,7 +605,7 @@ def _seed_from_record(context) -> None:
     path = sharing.verdict_path(context.project.state, context.project.project_id)
     path.parent.mkdir(mode=0o700, exist_ok=True)
     verdict = {"shareable": True, "reason": None, "run_id": context.run_id, "origin": "seed", "tick_ns": 0}
-    atomic_json(path, {"rules": 1, "schema": 1, "verdicts": {key: verdict}})
+    atomic_json(path, {"rules": SHARE_RULES_VERSION, "schema": 1, "verdicts": {key: verdict}})
 
 
 def _kill_shared_guardian(context) -> None:
@@ -653,15 +654,19 @@ def test_dead_shared_holder_recovered_in_sh_beside_live_holder(tmp_path: Path) -
     waiter.leave()
 
 
-def test_predicted_shareable_run_whose_builder_reserve_never_fits_is_admitted_exclusive(tmp_path: Path) -> None:
-    """E(self) includes the 2 GiB builder reserve for a shared run; when that can never fit the machine, the run is
-    admitted exclusive (today's per-phase rule) instead of waiting as a shared holder until its deadline."""
+def test_predicted_shareable_run_whose_phase_maximum_never_fits_is_admitted_exclusive(tmp_path: Path) -> None:
+    """E(self) is the field-wise maximum of a shared run's phases; when that can never fit the machine although each
+    phase does, the run is admitted exclusive (the per-phase rule) instead of waiting as a shared holder until its
+    deadline."""
     services, projects = three_private_projects(tmp_path)
     account = services.root / "admission"
     sharing.record_parallel_runs(account, 2)
-    bind_test_capacity(services, daemon_memory_bytes=6 * GIB, daemon_cpus=4, host_cpus=8)
-
-    run = _open(services, projects[0], "builder-shared", gib=4, cpus=2, wait_seconds=30).enter()
+    # With the 4.5 GiB host reserve each phase fits 14 GiB of host memory (9 and 12.25 GiB); their maximum does not.
+    bind_test_capacity(services, daemon_memory_bytes=6 * GIB, host_memory_bytes=14 * GIB, daemon_cpus=4, host_cpus=8)
+    phases = {"build": PhaseBudget(4 * GIB, 1, 2, 1), "tests": PhaseBudget(GIB, 6 * GIB, 1, 1)}
+    run = services.open_run(_spec(projects[0], "phases-shared", phases=phases))
+    _seed_shareable(run)
+    run.enter()
 
     assert _record(run)["admission"] == "published"
     assert "sharing" not in _record(run) and _capacity_mode(account) == "EX"
@@ -914,7 +919,7 @@ def test_publication_beside_a_coholder_logs_its_grant_and_a_lone_one_does_not(tm
     sharing.record_parallel_runs(account, 2)
     alone = _open(services, projects[0], "granted-alone").enter()
     assert sharing.read_grants(account) == []  # no co-holder at its publication: never logged
-    beside = _open(services, projects[1], "granted-beside").enter()
+    beside = _open(services, projects[1], "granted-beside", gib=2, cpus=2).enter()  # no builder reserve on top
     # The guardian appends the grant after the grant write that ends enter(), in the same locked section.
     wait_until(lambda: sharing.read_grants(account) != [], message="the publication's grant logged")
 
@@ -924,7 +929,7 @@ def test_publication_beside_a_coholder_logs_its_grant_and_a_lone_one_does_not(tm
     assert [(grant.run_id, grant.generation, grant.granted_ns) for grant in grants] == [
         (beside.run_id, 1, record["hold_timeline"]["granted_ns"])
     ]
-    assert _allowance_of(alone._context, account) == GIB + 1
+    assert _allowance_of(alone._context, account) == 2 * GIB + 1
     beside.leave()
     alone.leave()
     # the lone run's own leave repairs nothing: no holder could count a grant made alone

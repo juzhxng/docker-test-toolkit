@@ -736,6 +736,7 @@ def _seed_shared(pairing: _Pairing, name: str) -> None:
     """
     from docker_test_toolkit.application import sharing
     from docker_test_toolkit.application.recovery import atomic_json, project_id_for
+    from docker_test_toolkit.domain.share_policy import SHARE_RULES_VERSION  # the build under test reads these seeds
 
     project = (pairing.tmp / "projects" / name).resolve()
     (project / ".git").mkdir(parents=True, exist_ok=True)
@@ -748,7 +749,7 @@ def _seed_shared(pairing: _Pairing, name: str) -> None:
     verdict = {"shareable": True, "reason": None, "run_id": "seed", "origin": "seed", "tick_ns": 0}
     keys = (project.name, origin)  # the previous release's key component, then this release's
     keys = tuple(sharing.request_key(component, "e2e", "cross-version", ()) for component in keys)
-    atomic_json(path, {"rules": 1, "schema": 1, "verdicts": dict.fromkeys(keys, verdict)})
+    atomic_json(path, {"rules": SHARE_RULES_VERSION, "schema": 1, "verdicts": dict.fromkeys(keys, verdict)})
 
 
 def _own_installer(archive: Path, root: Path, *arguments: str) -> subprocess.CompletedProcess:

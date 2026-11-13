@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -15,12 +17,11 @@ from docker_test_toolkit.domain.policy import (
     HolderFacts,
     PhaseReservation,
     QueueEntryView,
-    admits_builder,
     attributed_ids,
-    effective_reservation,
     net_external_limits,
     next_grantable,
     publication_verdict,
+    reservation,
     reservation_verdict,
     version_at_least,
 )
@@ -171,16 +172,6 @@ def test_version_at_least() -> None:
         assert not version_at_least(older, "0.6.0"), older
 
 
-def test_admits_builder_needs_2gib_and_2cpus_in_one_phase() -> None:
-    assert admits_builder({"build": PhaseBudget(2 * GIB, 0, 2, 1)})
-    assert not admits_builder({"build": PhaseBudget(2 * GIB - 1, 0, 2, 1)})
-    assert not admits_builder({"build": PhaseBudget(4 * GIB, 0, 1, 1), "tests": PhaseBudget(GIB, 0, 2, 1)})
-    assert effective_reservation({"build": PhaseBudget(2 * GIB, 1, 2, 1), "tests": PhaseBudget(3 * GIB, 2, 1, 2)}) == (
-        PhaseReservation(5 * GIB, 2, 2, 2)
-    )
-    assert effective_reservation({"tests": PhaseBudget(3 * GIB, 2, 1, 2)}) == PhaseReservation(3 * GIB, 2, 1, 2)
-
-
 def _container(identifier: str, memory: int | None, *, project: str | None = None, run: str | None = None, name=None):
     labels = {}
     if project is not None:
@@ -196,26 +187,58 @@ def _container(identifier: str, memory: int | None, *, project: str | None = Non
     }
 
 
-def test_attribution_subtracts_builder_reserve_only_when_admitted() -> None:
-    with_builder = HolderFacts("r1", PhaseReservation(5 * GIB, 0, 2, 1), "dtt-p-r1", "buildx_buildkit_dtt-p-r10")
-    without_builder = HolderFacts("r1", PhaseReservation(3 * GIB, 0, 1, 1), "dtt-p-r1", None)
+def test_a_holders_builder_worker_is_attributed_by_name_within_its_reservation() -> None:
+    """The BuildKit worker carries no label; it counts as the holder's by its name, inside the reservation."""
+    holder = HolderFacts("r1", PhaseReservation(6 * GIB, 0, 2, 1), "dtt-p-r1", "buildx_buildkit_dtt-p-r10")
     containers = [
         _container("a", 2 * GIB, project="dtt-p-r1"),
         _container("b", GIB, run="r1"),
-        _container("c", GIB, project="dtt-p-r1"),  # beyond the 3 GiB bound: stays external
+        _container("c", GIB, project="dtt-p-r1"),
         _container("d", BUILDER_MEMORY_BYTES, name="buildx_buildkit_dtt-p-r10"),
         _container("e", GIB, project="dtt-other"),  # a foreign container
         _container("f", None, project="dtt-p-r1"),  # unlimited: stays external
+        _container("g", GIB, project="dtt-p-r1"),  # beyond the 6 GiB reservation: stays external
     ]
 
-    built = attributed_ids(containers, with_builder, run_label=RUN_LABEL)
-    plain = attributed_ids(containers, without_builder, run_label=RUN_LABEL)
+    built = attributed_ids(containers, holder, run_label=RUN_LABEL)
 
-    assert built == {"a" * 64, "b" * 64, "d" * 64}
-    assert plain == {"a" * 64, "b" * 64}  # nothing subtracted, and no worker attributed without the builder reserve
+    assert built == {"a" * 64, "b" * 64, "c" * 64, "d" * 64}
     external = net_external_limits(tuple(item["HostConfig"]["Memory"] for item in containers), containers, built)
     assert sorted(item for item in external if item is not None) == [GIB, GIB]
     assert None in external
+
+
+def test_a_holders_reservation_is_the_maximum_of_its_phases_and_all_its_containers_are_attributed() -> None:
+    """No builder reserve sits on top of a holder's phases, so none of its reservation is held back for a worker."""
+    e2e = {
+        "build": PhaseBudget(2 * GIB, 25 * GIB // 4, 2, 1),
+        "start": PhaseBudget(3425236418, 25 * GIB // 4, 2, 1),
+        "tests": PhaseBudget(3350000000, 25 * GIB // 4, 2, 2),
+    }
+    record = {
+        "phases": {name: vars(budget) for name, budget in e2e.items()},
+        "initial_phase": "build",
+        "grant": {"phase": "tests"},
+        "owned_resources": {"builders": {"worker": {"state": "present"}}},
+    }
+    holder = lifecycle._holder_facts(
+        "e0572458-0000-0000-0000-000000000000", SimpleNamespace(project_id="6" * 64), record
+    )
+    containers = [
+        {
+            "Id": f"{index:064x}",
+            "Name": f"/{holder.compose_project}-{name}-1",
+            "State": {"Running": True},
+            "Config": {"Labels": {"com.docker.compose.project": holder.compose_project}},
+            "HostConfig": {"Memory": limit},
+        }
+        for index, (name, limit) in enumerate(
+            (("opensearch", 3 * GIB // 2), ("neo4j", 5 * GIB // 4), ("postgres", 384 * 1024**2))
+        )
+    ]
+
+    assert len(attributed_ids(containers, holder, run_label="docker-test-toolkit.run")) == 3
+    assert holder.reservation == reservation(e2e.values())  # no builder reserve on top
 
 
 class SharedQueueMachine(RuleBasedStateMachine):
@@ -318,7 +341,7 @@ TestSharedQueueMachine.settings = settings(max_examples=150, stateful_step_count
 
 
 def _read(revision: int) -> lifecycle.CoholderRead:
-    holder = HolderFacts("r", PhaseReservation(GIB, 0, 1, 1), "dtt-p-r", None)
+    holder = HolderFacts("r", PhaseReservation(GIB, 0, 1, 1), "dtt-p-r", "buildx_buildkit_dtt-p-r0")
     return lifecycle.CoholderRead((holder,), False, GIB, (("r", revision),))
 
 
@@ -371,11 +394,12 @@ def test_admission_decision_waits_on_a_cpu_only_coholder_shortfall() -> None:
     )
 
 
-def test_shared_publisher_alone_checks_its_effective_reservation() -> None:
-    """A build-capable shared run reserves its builder too, even with no co-holder; an exclusive one does not."""
-    phases = {"build": PhaseBudget(4 * GIB, 0, 2, 1)}  # E = 6 GiB with the builder reserve
+def test_shared_publisher_alone_checks_the_maximum_of_its_phases() -> None:
+    """A shared run reserves the field-wise maximum of its phases even with no co-holder; an exclusive one checks
+    each phase alone."""
+    phases = {"build": PhaseBudget(4 * GIB, 0, 2, 1), "tests": PhaseBudget(GIB, 6 * GIB, 1, 1)}  # E = (4, 6) GiB
     snapshot = lifecycle.CapacitySnapshot(
-        6 * GIB, 4, 32 * GIB, 8, "native", (), host_reserve_bytes=GIB, runtime="docker-engine"
+        6 * GIB, 4, 10 * GIB, 8, "native", (), host_reserve_bytes=GIB, runtime="docker-engine"
     )
 
     shared = lifecycle.admission_decision(phases, snapshot, [], shared=True)
@@ -387,11 +411,11 @@ def test_shared_publisher_alone_checks_its_effective_reservation() -> None:
 
 
 def test_shared_publisher_alone_under_external_pressure_keeps_its_own_reason() -> None:
-    """Every phase fits alone, E(self) (with the builder reserve) fits the machine but not beside the external load:
+    """Every phase fits alone, E(self) (the maximum of its phases) fits the machine but not beside the external load:
     the alone shared decision is that pressure's own WAITING, never ``coholder-capacity``."""
-    phases = {"build": PhaseBudget(2 * GIB, 0, 2, 1)}  # E = 4 GiB with the builder reserve
+    phases = {"build": PhaseBudget(2 * GIB, 0, 2, 1), "tests": PhaseBudget(GIB, 4 * GIB, 1, 1)}  # E = (2, 4) GiB
     pressed = lifecycle.CapacitySnapshot(
-        8 * GIB, 4, 32 * GIB, 8, "native", (4 * GIB,), host_reserve_bytes=GIB, runtime="docker-engine"
+        8 * GIB, 4, 11 * GIB, 8, "native", (4 * GIB,), host_reserve_bytes=GIB, runtime="docker-engine"
     )
     assert lifecycle.admission_decision(phases, pressed, []).state == lifecycle.CapacityState.READY  # phase alone
 

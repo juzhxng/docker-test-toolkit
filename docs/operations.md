@@ -246,9 +246,9 @@ the account together. Nothing changes for adopters: they open runs as before.
   only when it and every holder are shared, the holders are below the limit and every queued run's toolkit version
   supports sharing. Shared runs hold `capacity.lock` shared, exclusive runs hold it exclusively, and a holder never
   converts.
-- **Fit.** A joiner is admitted only when the field-wise maximum of its phase budgets (plus a 2 GiB builder reserve for a
-  build-capable run) fits beside every holder's reservation, with the holders' own containers attributed to them, not
-  counted as external load.
+- **Fit.** A joiner is admitted only when the field-wise maximum of its phase budgets fits beside every holder's
+  reservation, with the holders' own containers (their BuildKit workers included) attributed to them, not counted as
+  external load.
 - **Waiting reasons** in `hold_timeline.waiting` and the expiry report: `queue-position`, `exclusive-holder` (a holder
   or the head is exclusive), `parallel-limit`, `older-version-entry`, the capacity reasons, `disk-capacity` (see
   [Disk admission](#disk-admission)), `repository-turn` (see Share scope), and, while holding,
@@ -509,7 +509,7 @@ bounded text) are unchanged. A granted shared run whose co-holder's record canno
 `coholder-record-unreadable`; a granted run is never ended by the capacity sums of the moment, only by its own
 containers' OOM, its own records and the pressure checks.
 
-Failures that this does not cover write no evidence: the builder envelope, `guardian-lost`,
+Failures that this does not cover write no evidence: `guardian-lost`,
 `requester-lost`, cleanup failures and recovery revokes. `telemetry-unavailable` is no longer written; older records may
 still carry it.
 
@@ -762,10 +762,11 @@ host memory only; accelerator memory (VRAM, Apple unified memory used by a host-
   variant only. A clean run of the other variant no longer teaches the request shared over the refusal; once any run
   of a request broke a share rule, its runs stay exclusive until the share rules change or the entry leaves the store
   by its per-project bound.
-- **The builder reserve ends with the first phase**: a run that may build holds 2 GiB for its Buildx
-  worker beside its co-holders until it has left its first phase with no live worker. A shared run may not create a
-  worker after that (share rule R16: the command is refused and the request runs exclusive from then on). Holders older
-  than 0.6.17 do not enforce R16 and keep their reserve.
+- **A build runs inside its phase's budget**: the Buildx worker (2 GiB, 2 CPUs, hard limits) is one of the run's own
+  containers. Creating it is checked like starting a service (share rule R12), and a phase change is refused while the
+  live worker and the run's other containers exceed the new phase's budget; remove the builder first. A phase that
+  builds declares room for the worker beside the containers it runs at the same time. A build that runs out of memory
+  is a build failure.
 - **Share scope**: `install --share-scope machine|repository` (default `machine`: any runs that fit
   share). With `repository`, a run joins only holders of its own repository and otherwise waits with reason
   `other-repository`. A repository is the checkout's normalized Git `origin` address (`github.com/owner/name`), so

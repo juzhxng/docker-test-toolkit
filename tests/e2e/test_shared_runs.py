@@ -25,6 +25,7 @@ from tests.installation_fixtures import base_python, temporary_installation
 from docker_test_toolkit.application import probe, sharing
 from docker_test_toolkit.application.recovery import atomic_json, project_id_for
 from docker_test_toolkit.config.installation import ARCHIVE_NAME, installation_of
+from docker_test_toolkit.domain.share_policy import SHARE_RULES_VERSION
 
 pytestmark = pytest.mark.e2e
 ROOT = Path(__file__).parents[2]
@@ -203,7 +204,7 @@ def seed_verdict(root: Path, project: Path) -> None:
     path = sharing.verdict_path(registry, project_id)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     verdict = {"shareable": True, "reason": None, "run_id": "seed", "origin": "seed", "tick_ns": 0}
-    atomic_json(path, {"rules": 1, "schema": 1, "verdicts": {key: verdict}})
+    atomic_json(path, {"rules": SHARE_RULES_VERSION, "schema": 1, "verdicts": {key: verdict}})
 
 
 def _worker(
@@ -755,9 +756,10 @@ def test_up_scale_two_refused(tmp_path: Path, redis_image: None, private_install
         _killing(shared)
 
 
-def test_shared_run_with_live_builder_transitions_into_smaller_phase(
+def test_a_live_builder_blocks_the_transition_into_a_smaller_phase_until_it_is_removed(
     tmp_path: Path, redis_image: None, private_installation: Path
 ) -> None:
+    """The BuildKit worker counts against the run's own budget: a shared run leaves its build phase once it is gone."""
     del redis_image
     root, control = private_installation, tmp_path / "control"
     control.mkdir()
@@ -766,13 +768,15 @@ def test_shared_run_with_live_builder_transitions_into_smaller_phase(
     phases = {"build": [2 * GIB + QUARTER, 256 * 1024**2, 2, 1], "tests": [GIB // 2, 256 * 1024**2, 1, 1]}
     steps = [
         {"docker": ["buildx", "create"]},
-        {"transition": "tests"},  # the live 2 GiB worker exceeds this phase's 0.5 GiB container budget
+        {"transition": "tests"},  # the live 2 GiB worker exceeds this phase's 0.5 GiB container budget: refused
         {"docker": ["buildx", "rm", "{builder}"]},
+        {"transition": "tests"},
     ]
     shared = _held(root, project, control, "shared", steps, phases=phases, initial="build")
     try:
-        create, transition, _remove = _steps(control, "shared")
-        assert create["rc"] == 0, create
+        create, refused, removed, transition = _steps(control, "shared")
+        assert create["rc"] == 0 and removed["rc"] == 0, (create, removed)
+        assert refused["rc"] == 1 and "R12" in refused["stderr"], refused
         assert transition == {"rc": 0, "state": "active"}, transition
         assert _record(control, "shared")["sharing"] == {"mode": "shared"}
         assert _record(control, "shared")["grant"]["phase"] == "tests"

@@ -92,7 +92,7 @@ def _verdict(shareable: bool) -> dict:
 
 
 def test_read_verdict_rules_mismatch_reads_unknown(tmp_path: Path) -> None:
-    _store(tmp_path, {"rules": 2, "schema": 1, "verdicts": {"k": _verdict(True)}})
+    _store(tmp_path, {"rules": SHARE_RULES_VERSION + 1, "schema": 1, "verdicts": {"k": _verdict(True)}})
 
     assert sharing.read_verdict(tmp_path, "p" * 64, "k") is None
 
@@ -100,10 +100,10 @@ def test_read_verdict_rules_mismatch_reads_unknown(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "document",
     [
-        {"rules": 1, "schema": 2, "verdicts": {"k": {}}},
-        {"rules": 1, "schema": 1, "verdicts": []},
-        {"rules": 1, "schema": 1, "verdicts": {"k": {"shareable": "yes"}}},
-        {"rules": 1, "schema": 1, "verdicts": {"k": {**_verdict(True), "x": 1}}},
+        {"rules": SHARE_RULES_VERSION, "schema": 2, "verdicts": {"k": {}}},
+        {"rules": SHARE_RULES_VERSION, "schema": 1, "verdicts": []},
+        {"rules": SHARE_RULES_VERSION, "schema": 1, "verdicts": {"k": {"shareable": "yes"}}},
+        {"rules": SHARE_RULES_VERSION, "schema": 1, "verdicts": {"k": {**_verdict(True), "x": 1}}},
         ["not", "an", "object"],
     ],
     ids=["schema-2", "verdicts-list", "shareable-word", "extra-field", "list"],
@@ -115,7 +115,10 @@ def test_read_verdict_invalid_file_reads_unknown(tmp_path: Path, document: objec
 
 
 def test_read_verdict_returns_the_recorded_value(tmp_path: Path) -> None:
-    _store(tmp_path, {"rules": 1, "schema": 1, "verdicts": {"yes": _verdict(True), "no": _verdict(False)}})
+    _store(
+        tmp_path,
+        {"rules": SHARE_RULES_VERSION, "schema": 1, "verdicts": {"yes": _verdict(True), "no": _verdict(False)}},
+    )
 
     assert sharing.read_verdict(tmp_path, "p" * 64, "yes") is True
     assert sharing.read_verdict(tmp_path, "p" * 64, "no") is False

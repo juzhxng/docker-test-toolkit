@@ -121,6 +121,28 @@ def test_direct_run_over_own_budget_refused_r12(world: _World) -> None:
     _leave(world, shared)
 
 
+def test_a_running_builder_worker_counts_against_the_runs_own_budget(world: _World) -> None:
+    """The worker carries no label: it is the run's own container by its name."""
+    shared = world.open(shared=True, phases={"tests": PhaseBudget(3 * GIB, 1, 2, 1)})
+    _builder_worker(world, shared)
+
+    _refused(world, shared, "run", "--memory=1536m", IMAGE_ID, "true", rule="R12")
+    _leave(world, shared)
+
+
+def test_a_build_in_a_phase_without_room_is_refused_for_shared_and_recorded_for_exclusive(world: _World) -> None:
+    small = {"tests": PhaseBudget(GIB, 1, 2, 1)}
+    shared = world.open(shared=True, phases=small)
+    _refused(world, shared, "buildx", "create", rule="R12")
+    _leave(world, shared)
+
+    exclusive = world.open(shared=False, phases=small)
+    _dispatch(world, exclusive, "buildx", "create")
+    assert _receipts(exclusive)[-1]["kind"] == "builder-create"
+    assert "R12" in _verdict(world, exclusive)["reason"]
+    _leave(world, exclusive)
+
+
 def test_direct_start_over_budget_refused(world: _World) -> None:
     shared = world.open(shared=True)
     created = _create_stopped(world, shared, 3 * GIB)
@@ -180,9 +202,9 @@ def test_transition_into_smaller_phase_with_owned_container_refused(world: _Worl
     _leave(world, shared)
 
 
-def test_transition_with_only_the_builder_worker_running_not_refused(world: _World) -> None:
-    shared = world.open(shared=True, phases=_two_phases(GIB))
-    builder = lifecycle.builder_name(shared._context.project.project_id, shared.run_id)
+def _builder_worker(world: _World, handle: RunHandle) -> None:
+    """Plant the run's running 2 GiB BuildKit worker, which carries no toolkit label."""
+    builder = lifecycle.builder_name(handle._context.project.project_id, handle.run_id)
     worker = "8" * 64
     world.fake.containers[worker] = _container(
         worker,
@@ -192,8 +214,18 @@ def test_transition_with_only_the_builder_worker_running_not_refused(world: _Wor
         host_config={"Memory": 2 * GIB},
     )
 
-    assert lifecycle.transition_phase(shared._lease, "small").state == "active"
-    assert _record(shared)["grant"]["phase"] == "small"
+
+def test_transition_into_a_phase_smaller_than_the_running_builder_worker_refused(world: _World) -> None:
+    shared = world.open(shared=True, phases=_two_phases(GIB))
+    _ = shared.docker_context  # Docker authority exists, as before any dispatch
+    _builder_worker(world, shared)
+
+    with pytest.raises(InvalidInput) as raised:
+        lifecycle.transition_phase(shared._lease, "small")
+
+    assert raised.value.reason == "share-rule"
+    _recorded_refusal(raised.value, "R12")
+    assert _record(shared)["grant"]["phase"] == "tests"
     _leave(world, shared)
 
 

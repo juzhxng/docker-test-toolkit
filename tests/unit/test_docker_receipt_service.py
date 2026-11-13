@@ -2193,25 +2193,15 @@ def _prepare_owned_removal(
     return plural, target, command
 
 
-@pytest.mark.parametrize(
-    ("container_bytes", "daemon_cpus", "command"),
-    [
-        (2 * 1024**3 - 1, 2, ("buildx", "create")),
-        (2 * 1024**3, 1, ("buildx", "create")),
-        (2 * 1024**3 - 1, 2, ("buildx", "build", "--tag", "fixture:latest", ".")),
-        (2 * 1024**3, 1, ("buildx", "build", "--tag", "fixture:latest", ".")),
-    ],
-)
-def test_builder_requires_the_calibrated_phase_envelope_before_mutation(
-    tmp_path: Path, container_bytes: int, daemon_cpus: int, command: tuple[str, ...]
-) -> None:
+def test_an_exclusive_run_builds_in_any_phase(tmp_path: Path) -> None:
+    """No phase rule for builders: an exclusive run creates its builder in a phase smaller than the worker."""
     project = tmp_path / "project"
     project.mkdir()
     fake = FakeDockerPort()
     handle = (
         build_test_services(tmp_path / "state")
         .open_run(
-            _spec(project, container_bytes=container_bytes, daemon_cpus=daemon_cpus),
+            _spec(project, container_bytes=1024**3, daemon_cpus=1),  # smaller than the 2 GiB, 2 CPU worker
             docker_factory=lambda: fake,
         )
         .enter()
@@ -2219,10 +2209,10 @@ def test_builder_requires_the_calibrated_phase_envelope_before_mutation(
     _ = handle.docker_context
     descriptor = json.loads((handle.private_root / "docker-authority.json").read_text())
 
-    with pytest.raises(InvalidInput, match="builder envelope"):
-        lifecycle.dispatch_docker(handle._context, descriptor, fake, command)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("buildx", "create"))
 
-    assert not any(item[:2] == command[:2] for item in fake.commands)
+    assert any(item[:2] == ("buildx", "create") for item in fake.commands)
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("buildx", "rm", handle.docker_context.builder))
     handle.leave()
 
 

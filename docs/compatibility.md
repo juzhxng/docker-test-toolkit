@@ -114,6 +114,12 @@ records keep them); `coholder-record-unreadable` is new; `unknown-external-capac
 `admission_observation.capacity` no longer carries `job_limits`. The release raises `SHARED_QUEUE_MIN_VERSION` to
 itself, so its runs never hold together with an older version's: their admission sums differ.
 
+The builder reserve and share rule R16 are gone (share rules version 2), so every request runs exclusive once after the
+upgrade while it relearns its verdict. The BuildKit worker now counts against its run's own phase budget: creating it
+is refused under R12 when the phase has no room for 2 GiB beside the run's running containers, and a phase change
+is refused while the smaller phase cannot hold the live worker (remove the builder first). A shared run that keeps its builder beside its
+services needs that room in its budget, otherwise it is refused once and runs exclusive from then on.
+
 Protocol `batch:1` versions only the live Python facade and bridge messages. It adds no durable field and does not change
 run, project, account or cleanup record schemas, so a crashed batch has no toolkit batch status or replay operation; its
 recovery is decided solely from its ordinary run records.

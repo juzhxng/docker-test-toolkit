@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any
 
-SHARE_RULES_VERSION = 1  # bumped whenever a rule changes; a verdict store with another value predicts nothing
+SHARE_RULES_VERSION = 2  # bumped whenever a rule changes; a verdict store with another value predicts nothing
 DAEMON_SOCKETS = ("/var/run/docker.sock", "/run/docker.sock")
 _CHECKED_KINDS = frozenset({"container-create", "container-start", "compose-run"})
 _CHECKED_COMPOSE = frozenset({"create", "up", "start", "restart"})
@@ -270,11 +270,6 @@ def container_verdict(
 def exec_verdict(*, privileged: bool) -> ShareVerdict:
     """R7 for ``compose exec``: a privileged exec reaches beyond the run's containers."""
     return ShareVerdict("R7", "compose exec --privileged") if privileged else SHAREABLE
-
-
-def builder_verdict(*, removed: bool) -> ShareVerdict:
-    """R16: a builder after the run left its first phase; no builder reserve covers it."""
-    return ShareVerdict("R16", "a builder after the run left its first phase") if removed else SHAREABLE
 
 
 def network_connect_verdict() -> ShareVerdict:

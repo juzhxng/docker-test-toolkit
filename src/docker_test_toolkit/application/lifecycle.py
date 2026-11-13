@@ -133,7 +133,6 @@ from docker_test_toolkit.domain.errors import (
     stderr_tail,
 )
 from docker_test_toolkit.domain.models import (
-    BUILDER_RELEASE_MIN_VERSION,
     SHARED_QUEUE_MIN_VERSION,
     SUPPORTED_PROTOCOLS,
     TOOLKIT_VERSION,
@@ -176,7 +175,6 @@ from docker_test_toolkit.domain.policy import (
     TurnDecision,
     actors_dead,
     admission_gate,
-    admits_builder,
     allowance_bytes,
     attributed_ids,
     claim_eligible,
@@ -190,7 +188,6 @@ from docker_test_toolkit.domain.policy import (
     detect_runtime,
     disk_estimate,
     disk_fit,
-    effective_reservation,
     engine_stats,
     fifo_head,
     has_shared,
@@ -202,11 +199,13 @@ from docker_test_toolkit.domain.policy import (
     loopback_endpoint,
     memory_limit,
     net_external_limits,
+    owns_container,
     parse_cpu_pressure,
     podman_machine_size,
     podman_size_hint,
     private_root_fit,
     publication_verdict,
+    reservation,
     reservation_verdict,
     runtime_topology,
     small_vm_hint,
@@ -227,7 +226,6 @@ from docker_test_toolkit.domain.share_policy import (
     BindFact,
     ShareScope,
     ShareVerdict,
-    builder_verdict,
     checked_mutation,
     compose_verdict,
     container_verdict,
@@ -1719,8 +1717,6 @@ def _append_docker_receipt(
             or any(item["state"] in {"pending", "unresolved"} for item in data["docker_receipts"].values())
         ):
             raise ResourceBusy("Another Docker mutation is unresolved or run authority is inactive.")
-        if command.kind == "builder-create" or command.kind in _BUILD_KINDS:
-            _require_builder_phase(data)
         if command.kind in _ARCHIVE_KINDS:
             _admit_archive_append(data, command)
         revision = data["revision"] + 1
@@ -2327,12 +2323,6 @@ def _write_buildkit_config(command: ClassifiedDockerCommand) -> None:
         os.fsync(stream.fileno())
 
 
-def _require_builder_phase(data: dict) -> None:
-    budget = _phase_budgets(data["phases"], data["initial_phase"])[data["grant"]["phase"]]
-    if budget.container_bytes < BUILDER_MEMORY_BYTES or budget.daemon_cpus < BUILDER_DAEMON_CPUS:
-        raise InvalidInput("Current phase does not admit the calibrated test-builder envelope.")
-
-
 def _prepare_builder_receipt(adapter, command: ClassifiedDockerCommand) -> ClassifiedDockerCommand:
     name = command.plan["name"]
     if not isinstance(name, str):
@@ -2596,17 +2586,15 @@ def _hard_limit_bytes(container: dict) -> int:
 def _own_running_bytes(adapter, data: dict, *, counted_elsewhere: Callable[[dict], bool]) -> int:
     """Sum the hard memory limits of the run's own running containers.
 
-    A container is the run's when it carries its Compose project or run label; the BuildKit worker carries neither
-    (``buildx create`` sets no label), so it is never counted. One without a limit counts as unbounded, so R12
-    refuses beside it.
+    A container is the run's when it carries its Compose project or run label, or is its BuildKit worker, which
+    ``buildx create`` names but does not label. One without a limit counts as unbounded, so R12 refuses beside it.
     """
     authority = data["docker_authority"]
+    worker = buildkit_worker(authority["builder"])
     total = 0
     for item in adapter.objects("container"):
-        labels = (item.get("Config") or {}).get("Labels") or {}
-        own = (
-            labels.get("com.docker.compose.project") == authority["compose_project"]
-            or labels.get(RUN) == data["run_id"]
+        own = owns_container(
+            item, compose_project=authority["compose_project"], run_label=RUN, run_id=data["run_id"], worker=worker
         )
         running = (item.get("State") or {}).get("Running") is True
         if not own or not running or counted_elsewhere(item):
@@ -2778,23 +2766,6 @@ def _other_repository(settings: AdmissionSettings, data: dict, holder: dict) -> 
     return repository_identity(holder["project_root"]) != repository_identity(data["project_root"])
 
 
-def _builder_removed(data: dict) -> bool:
-    """Whether the run may no longer run a builder, so it holds no builder reserve (share rule R16 refuses a new one).
-
-    Builders belong to the run's first phase: once it left that phase with no live builder, none is left to reserve
-    for. A holder of an older version than ``BUILDER_RELEASE_MIN_VERSION`` does not enforce R16 and keeps its reserve.
-    """
-    builders = data["owned_resources"]["builders"]
-    live = any(item["state"] != "removed" for item in builders.values())
-    grant = data.get("grant") or {}
-    left_first_phase = grant.get("phase", data["initial_phase"]) != data["initial_phase"]
-    artifact = data.get("artifact")
-    enforces_r16 = version_at_least(
-        artifact.get("version") if isinstance(artifact, dict) else None, BUILDER_RELEASE_MIN_VERSION
-    )
-    return enforces_r16 and left_first_phase and not live
-
-
 def _evaluates_share_rules(command: ClassifiedDockerCommand) -> bool:
     """Return whether a classified command is a row of the enforcement table: never teardown or I/O."""
     subcommand = command.plan.get("subcommand")
@@ -2810,8 +2781,9 @@ def _share_verdict(
 ) -> ShareVerdict:
     """Return the first share rule one creating or starting command breaks."""
     kind, budget = command.kind, _phase_container_bytes(data)
-    if kind == "builder-create":
-        return builder_verdict(removed=_builder_removed(data))
+    if kind == "builder-create":  # the worker is the run's own container, checked like a service (R12)
+        running = _own_running_bytes(adapter, data, counted_elsewhere=lambda _item: False)
+        return own_budget_verdict(running_bytes=running, added_bytes=BUILDER_MEMORY_BYTES, phase_container_bytes=budget)
     if kind == "network-connect":
         return network_connect_verdict()
     if kind == "compose-io":
@@ -3929,8 +3901,6 @@ def dispatch_docker(
         owned=data["owned_resources"],
         external=tuple(ExternalDockerResource(**item) for item in data["external_resources"]),
     )
-    if command.kind == "builder-create" or command.kind in _BUILD_KINDS:
-        _require_builder_phase(data)
     if command.kind in _ARCHIVE_KINDS:
         return _dispatch_archive(context, descriptor, adapter, command, data, operation_id, test_seams)
     if command.kind not in _IMAGE_LOCK_SECONDS or _record_mode(data) != AdmissionMode.SHARED:
@@ -9488,7 +9458,7 @@ def transition_phase(lease: RunLease, phase: str) -> RunStatus:
         if running_bytes > budget.container_bytes:
             raise ResourceError("Running container limits exceed the target phase commitment.")
         if _record_mode(data) == AdmissionMode.SHARED and data["docker_authority"] is not None:
-            # R12: every own running container counts, Compose and dispatcher-created, not the worker
+            # R12: every own running container counts: Compose, dispatcher-created and the BuildKit worker
             own = _own_running_bytes(_bound_docker(data), data, counted_elsewhere=lambda _item: False)
             _refuse_or_record(
                 context,
@@ -12466,14 +12436,11 @@ def _entry_facts(run_id: str, entry: QueueEntry, directory: Path) -> EntryFacts:
 def _holder_facts(run_id: str, entry: QueueEntry, data: dict) -> HolderFacts:
     """Return what one holder contributes to the account's accounting: E(h) and the names attribution matches."""
     phases = _phase_budgets(data["phases"], data["initial_phase"])
-    builder = builder_name(entry.project_id, run_id)
-    removed = _builder_removed(data)
     return HolderFacts(
         run_id,
-        effective_reservation(phases, builder_removed=removed),
+        reservation(phases.values()),
         compose_project_name(entry.project_id, run_id),
-        # Without a builder reserve there is no worker to attribute, and none of the reservation is set aside for it.
-        buildkit_worker(builder) if admits_builder(phases) and not removed else None,
+        buildkit_worker(builder_name(entry.project_id, run_id)),
     )
 
 
@@ -12518,7 +12485,7 @@ def admission_decision(
             return alone
     if not coholders and not shared:
         return CapacityDecision(CapacityState.READY, "static-capacity")
-    both = _as_budget(combined([effective_reservation(phases), *coholders]))
+    both = _as_budget(combined([reservation(phases.values()), *coholders]))
     together = assess_capacity(both, snapshot)
     if together.state == CapacityState.READY or not coholders:
         return together
@@ -12790,7 +12757,7 @@ def _never_fits_shared(data: dict, machine: "CapacitySnapshot", settings: Admiss
     phases = _phase_budgets(data["phases"], data["initial_phase"])
     if any(assess_capacity(budget, snapshot).state == CapacityState.REFUSED for budget in phases.values()):
         return False
-    return assess_capacity(_as_budget(effective_reservation(phases)), snapshot).state == CapacityState.REFUSED
+    return assess_capacity(_as_budget(reservation(phases.values())), snapshot).state == CapacityState.REFUSED
 
 
 def reserve_capacity(
@@ -13243,7 +13210,7 @@ def _holder_baselines(state: QueueState, directory: Path, *, exclude: str) -> di
 
 def _grant_of(data: dict, budgets: Mapping[str, PhaseBudget]) -> Grant:
     """Return the grant a granted record's current generation counts as in co-holders' allowances."""
-    reserved = effective_reservation(budgets)
+    reserved = reservation(budgets.values())
     return Grant(
         data["run_id"],
         data["generation"],

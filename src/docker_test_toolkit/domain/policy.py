@@ -7,7 +7,7 @@ import math
 import re
 import urllib.parse
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -345,26 +345,6 @@ def reservation(budgets: Iterable["PhaseBudget"]) -> PhaseReservation:
     )
 
 
-def admits_builder(phases: Mapping[str, "PhaseBudget"]) -> bool:
-    """Return whether some declared phase admits the Buildx worker envelope (2 GiB and 2 daemon CPUs)."""
-    return any(
-        budget.container_bytes >= BUILDER_MEMORY_BYTES and budget.daemon_cpus >= BUILDER_DAEMON_CPUS
-        for budget in phases.values()
-    )
-
-
-def effective_reservation(phases: Mapping[str, "PhaseBudget"], *, builder_removed: bool = False) -> PhaseReservation:
-    """Return ``E(r)``: the run's reservation plus the builder's memory while it may still run a builder.
-
-    A run that removed its builder holds no builder reserve: a shared run may not create another (share rule R16), so
-    the 2 GiB would stand empty beside its co-holders (two such runs did not fit together on a 24 GB CI host).
-    """
-    reserved = reservation(phases.values())
-    if builder_removed or not admits_builder(phases):
-        return reserved
-    return replace(reserved, container_bytes=reserved.container_bytes + BUILDER_MEMORY_BYTES)
-
-
 def combined(items: Iterable[PhaseReservation]) -> PhaseReservation:
     """Return the field-wise sum of reservations (``E(S)``); the sum of none is zero."""
     listed = list(items)
@@ -380,14 +360,14 @@ def combined(items: Iterable[PhaseReservation]) -> PhaseReservation:
 class HolderFacts:
     """What one holder entry contributes to the account's accounting, derived from its queue entry and record.
 
-    ``compose_project`` is the run-scoped Compose project; ``builder_worker`` the BuildKit worker container name when
-    the run admits a builder (its reserve is part of ``reservation``), else None.
+    ``compose_project`` is the run-scoped Compose project; ``builder_worker`` the BuildKit worker's container name. The
+    worker counts within ``reservation`` like the run's other containers.
     """
 
     run_id: str
     reservation: PhaseReservation
     compose_project: str
-    builder_worker: str | None
+    builder_worker: str
 
 
 def memory_limit(container: Mapping[str, Any]) -> int | None:
@@ -397,29 +377,39 @@ def memory_limit(container: Mapping[str, Any]) -> int | None:
     return limit if type(limit) is int and limit > 0 else None
 
 
+def owns_container(
+    container: Mapping[str, Any], *, compose_project: str, run_label: str, run_id: str, worker: str
+) -> bool:
+    """Whether a container is a run's own: its Compose project or run label, or its BuildKit worker by name (the
+    worker carries no label)."""
+    config, name = container.get("Config"), container.get("Name")
+    labels = config.get("Labels") if isinstance(config, Mapping) else None
+    labelled = isinstance(labels, Mapping) and (
+        labels.get("com.docker.compose.project") == compose_project or labels.get(run_label) == run_id
+    )
+    return labelled or (isinstance(name, str) and name.lstrip("/") == worker)
+
+
 def attributed_ids(containers: Sequence[Mapping[str, Any]], holder: HolderFacts, *, run_label: str) -> frozenset[str]:
     """Return the running containers that count against a holder's reservation instead of as foreign.
 
     A container is the holder's when it carries the holder's Compose project label or its ``run_label`` value, or is
-    its BuildKit worker. Each needs a hard memory limit. The worker is attributed within the builder reserve; the
-    others, in ID order, within the reservation minus that reserve when the run admits a builder. A container
-    beyond the bound, or without a limit, stays external. Attribution is accounting only, never authority.
+    its BuildKit worker (by name: the worker carries no label). Each needs a hard memory limit and is attributed, in ID
+    order, within the reservation. A container beyond it, or without a limit, stays external. Attribution is
+    accounting only, never authority.
     """
-    builder_bound = BUILDER_MEMORY_BYTES if holder.builder_worker is not None else 0
-    bound, total, attributed = holder.reservation.container_bytes - builder_bound, 0, set()
+    bound, total, attributed = holder.reservation.container_bytes, 0, set()
     for container in sorted(containers, key=lambda item: str(item.get("Id"))):
-        state, config = container.get("State"), container.get("Config")
-        labels = config.get("Labels") if isinstance(config, Mapping) else None
-        name = container.get("Name")
+        state = container.get("State")
         limit = memory_limit(container)
         if not isinstance(state, Mapping) or state.get("Running") is not True or limit is None:
             continue
-        if holder.builder_worker is not None and isinstance(name, str) and name.lstrip("/") == holder.builder_worker:
-            if limit <= builder_bound:
-                attributed.add(str(container["Id"]))
-            continue
-        owned = isinstance(labels, Mapping) and (
-            labels.get("com.docker.compose.project") == holder.compose_project or labels.get(run_label) == holder.run_id
+        owned = owns_container(
+            container,
+            compose_project=holder.compose_project,
+            run_label=run_label,
+            run_id=holder.run_id,
+            worker=holder.builder_worker,
         )
         if owned and total + limit <= bound:
             total += limit
