@@ -277,18 +277,24 @@ def test_native_capacity_counts_a_restarting_container_by_its_limit(
         "HostConfig": {"Memory": GIB},
         "Config": {"Labels": {}},
     }
+    runner = {  # a CI runner hosting a run of another account: left out of the external sum, counted apart
+        "Id": "8" * 64,
+        "State": {"Running": True, "Pid": 4242},
+        "HostConfig": {"Memory": 12 * GIB},
+        "Config": {"Labels": {"com.docker-test-toolkit.run-host": "true"}},
+    }
 
     with bind_test_observation_reads(engine=reads.engine, host=reads.host):
         _daemon_id, snapshot = lifecycle.observe_capacity(
             fake,
             topology,
             frozenset({target}),
-            inventory=[*fake.objects("container"), restarting],
+            inventory=[*fake.objects("container"), restarting, runner],
             deadline=Deadline.after(NativeClock(), 30),
         )
     decision = lifecycle.assess_capacity(PhaseBudget(GIB, GIB, 1, 1), snapshot)
 
-    assert snapshot.external_limits == (GIB,)
+    assert (snapshot.external_limits, snapshot.run_host_containers) == ((GIB,), 1)
     assert (decision.state, decision.reason) == (lifecycle.CapacityState.READY, "static-capacity")
 
 

@@ -21,7 +21,7 @@ _MEMORY = (
     "host_process_bytes",
     "host_reserve_bytes",
 )
-_EXTERNAL = (*_MEMORY, "external_bytes", "external_containers")
+_EXTERNAL = (*_MEMORY, "external_bytes", "external_containers", "run_host_containers")
 _CPU = ("daemon_cpus_needed", "daemon_cpus", "host_threads_needed", "host_cpus")
 _DISK = ("free_bytes", "total_bytes", "reserve_bytes")
 

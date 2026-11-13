@@ -7,8 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from docker_test_toolkit.application import lifecycle
+from docker_test_toolkit.application import lifecycle, sharing
 from docker_test_toolkit.application.lifecycle import CapacitySnapshot, CapacityState
+from docker_test_toolkit.domain import policy
 from docker_test_toolkit.domain.models import PhaseBudget
 from docker_test_toolkit.domain.policy import (
     PhaseReservation,
@@ -103,9 +104,12 @@ _COLIMA_INFO = {"Name": "colima", "OperatingSystem": "Ubuntu 24.04.2 LTS"}
         ("desktop", _DESKTOP_INFO, "darwin", "tcp://10.0.0.5:2376", None),  # remote, whatever was declared
         ("remote", _ENGINE_INFO, "linux", "unix:///var/run/docker.sock", "docker-engine"),
         ("desktop", _COLIMA_INFO, "darwin", "unix:///Users/x/.colima/default/docker.sock", "colima"),
+        # a runner container inside Desktop's VM whose account declares it: native Docker Engine
+        ("native", _DESKTOP_INFO, "linux", "unix:///var/run/docker.sock", "docker-engine"),
     ],
 )
 def test_the_observed_runtime_matches_the_declared_topology(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     topology: str,
     info: dict,
@@ -115,6 +119,10 @@ def test_the_observed_runtime_matches_the_declared_topology(
 ) -> None:
     monkeypatch.setattr(lifecycle.sys, "platform", client_platform)
     monkeypatch.setattr(lifecycle, "passwd_home", lambda: Path("/Users/x"))
+    account = tmp_path / "account"
+    account.mkdir(mode=0o700)
+    sharing.record_desktop_vm_client(account, True)  # it changes nothing but the Desktop-from-Linux row
+    monkeypatch.setattr(lifecycle, "canonical_account", lambda: account)
 
     assert lifecycle._observed_runtime(info, endpoint, topology) == expected
 
@@ -234,3 +242,35 @@ def test_one_daemons_endpoint_is_read_once_per_process(monkeypatch: pytest.Monke
     other = lifecycle._daemon_endpoint(object(), "daemon-2", None)
 
     assert first == again == other and reads == ["context inspect", "context inspect"]
+
+
+def _running(identifier: str, memory: int, labels: dict[str, str] | None = None, *, running: bool = True) -> dict:
+    return {
+        "Id": identifier * 64,
+        "State": {"Running": running},
+        "HostConfig": {"Memory": memory},
+        "Config": {"Labels": labels or {}},
+    }
+
+
+RUN_HOST = {"com.docker-test-toolkit.run-host": "true"}
+
+
+@pytest.mark.parametrize(
+    ("container", "owned", "expected"),
+    [
+        (_running("a", 12 * GIB, RUN_HOST), frozenset(), ((), 1)),  # a CI runner hosting a run of another account
+        (_running("a", 0, RUN_HOST), frozenset(), ((), 1)),  # without a limit too
+        (_running("a", 12 * GIB, {"com.docker-test-toolkit.run-host": "1"}), frozenset(), ((12 * GIB,), 0)),
+        (_running("a", 12 * GIB, RUN_HOST), frozenset({"a" * 64}), ((), 0)),  # the run's own container: never external
+        (_running("a", 12 * GIB, RUN_HOST, running=False), frozenset(), ((), 0)),
+        (_running("a", GIB), frozenset(), ((GIB,), 0)),
+    ],
+)
+def test_a_run_host_container_is_not_an_external_commitment(
+    container: dict, owned: frozenset[str], expected: tuple
+) -> None:
+    """A container the operator labels as the host of a run (a CI runner) is left out of every run's external sum."""
+    commitments = policy.external_commitments([container], owned)
+
+    assert (commitments.limits, commitments.run_hosts) == expected

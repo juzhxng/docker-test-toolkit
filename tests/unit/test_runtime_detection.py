@@ -186,3 +186,20 @@ def test_a_podman_socket_without_a_binding_is_never_a_supported_runtime(monkeypa
     refused = lifecycle.runtime_of(None, FEDORA, PODMAN_SOCKET)  # the adapter refuses earlier; the rule stays closed
 
     assert isinstance(refused, RuntimeRefusal) and refused.reason == "unsupported-runtime"
+
+
+@pytest.mark.parametrize(
+    ("info", "declared", "expected"),
+    [
+        (DESKTOP, True, "docker-engine"),  # a CI runner container inside Desktop's VM, as its operator declared
+        (DESKTOP, False, "use Docker Engine in the WSL2 distribution"),  # undeclared: the WSL2 refusal stays
+        (COLIMA_1450, True, UNSUPPORTED),  # the setting is about Desktop's VM only
+    ],
+)
+def test_a_declared_client_inside_docker_desktops_vm_is_docker_engine(
+    info: dict, declared: bool, expected: str
+) -> None:
+    """The client and its containers then share one kernel and one memory pool: the VM, accounted as native."""
+    found = detect_runtime(info, "linux", "unix:///var/run/docker.sock", HOME, desktop_vm_client=declared)
+
+    assert found == expected if isinstance(found, str) else expected in found.message

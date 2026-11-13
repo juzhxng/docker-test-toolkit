@@ -7,12 +7,13 @@ import math
 import re
 import urllib.parse
 from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from docker_test_toolkit.domain.errors import ToolkitError
+from docker_test_toolkit.domain.errors import ResourceError, ToolkitError
 from docker_test_toolkit.domain.numbers import numbers_for
 
 if TYPE_CHECKING:  # models imports this module, so its types are only named for the checker
@@ -377,16 +378,20 @@ def memory_limit(container: Mapping[str, Any]) -> int | None:
     return limit if type(limit) is int and limit > 0 else None
 
 
+def _labels(container: Mapping[str, Any]) -> Mapping[str, Any]:
+    """An inspected container's labels; empty when it has none or they are malformed."""
+    config = container.get("Config")
+    labels = config.get("Labels") if isinstance(config, Mapping) else None
+    return labels if isinstance(labels, Mapping) else {}
+
+
 def owns_container(
     container: Mapping[str, Any], *, compose_project: str, run_label: str, run_id: str, worker: str
 ) -> bool:
     """Whether a container is a run's own: its Compose project or run label, or its BuildKit worker by name (the
     worker carries no label)."""
-    config, name = container.get("Config"), container.get("Name")
-    labels = config.get("Labels") if isinstance(config, Mapping) else None
-    labelled = isinstance(labels, Mapping) and (
-        labels.get("com.docker.compose.project") == compose_project or labels.get(run_label) == run_id
-    )
+    name, labels = container.get("Name"), _labels(container)
+    labelled = labels.get("com.docker.compose.project") == compose_project or labels.get(run_label) == run_id
     return labelled or (isinstance(name, str) and name.lstrip("/") == worker)
 
 
@@ -402,8 +407,8 @@ def attributed_ids(containers: Sequence[Mapping[str, Any]], holder: HolderFacts,
     for container in sorted(containers, key=lambda item: str(item.get("Id"))):
         state = container.get("State")
         limit = memory_limit(container)
-        if not isinstance(state, Mapping) or state.get("Running") is not True or limit is None:
-            continue
+        if not isinstance(state, Mapping) or state.get("Running") is not True or limit is None or _run_host(container):
+            continue  # a run host is never in an external sum, so there is nothing to attribute
         owned = owns_container(
             container,
             compose_project=holder.compose_project,
@@ -496,6 +501,63 @@ def cpu_pressure_blocks_join(avg60: float | None) -> bool:
     return avg60 is not None and avg60 >= CPU_PRESSURE_JOIN_LIMIT
 
 
+RUN_HOST_LABEL = "com.docker-test-toolkit.run-host"  # honoured only with the value "true"
+
+
+@dataclass(frozen=True)
+class ExternalCommitments:
+    """The running containers a run does not own: their hard limits (``None`` for none), and the run hosts left out."""
+
+    limits: tuple[int | None, ...]
+    run_hosts: int
+
+
+def _run_host(container: Mapping[str, Any]) -> bool:
+    return _labels(container).get(RUN_HOST_LABEL) == "true"
+
+
+def external_commitments(containers: Sequence[Mapping[str, Any]], owned_ids: AbstractSet[str]) -> ExternalCommitments:
+    """Sum up a complete daemon inventory against the containers a run owns.
+
+    A running container the run does not own is an external commitment by its hard limit, unless the operator
+    labelled it as the host of a run (a CI runner whose job is accounted by its own run): such a container is counted
+    in ``run_hosts`` instead. NOTE: ceiling: a run host's memory is invisible to other accounts; upgrade path: count
+    labelled containers by observed use if the record shows over-commitment.
+
+    Raises:
+        ResourceError: If the inventory is incomplete or contradictory, or an owned container is missing from it.
+    """
+    observed_ids: set[str] = set()
+    limits: list[int | None] = []
+    run_hosts = 0
+    for item in containers:
+        try:
+            container_id = item["Id"]
+            running = item["State"]["Running"]
+            limit = item["HostConfig"]["Memory"]
+        except (KeyError, TypeError) as error:
+            raise ResourceError("Docker container capacity evidence is incomplete.") from error
+        if (
+            not isinstance(container_id, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", container_id)
+            or type(running) is not bool
+            or type(limit) is not int
+            or limit < 0
+            or container_id in observed_ids
+        ):
+            raise ResourceError("Docker container capacity evidence is contradictory.")
+        observed_ids.add(container_id)
+        if not running or container_id in owned_ids:
+            continue
+        if _run_host(item):
+            run_hosts += 1
+        else:
+            limits.append(limit or None)
+    if not owned_ids <= observed_ids:
+        raise ResourceError("An owned container is absent from the complete daemon inventory.")
+    return ExternalCommitments(tuple(limits), run_hosts)
+
+
 def net_external_limits(
     external_limits: Sequence[int | None], containers: Sequence[Mapping[str, Any]], attributed: frozenset[str]
 ) -> tuple[int | None, ...]:
@@ -503,7 +565,7 @@ def net_external_limits(
     remaining = list(external_limits)
     for container in containers:
         limit = memory_limit(container)
-        if container.get("Id") in attributed and limit in remaining:
+        if container.get("Id") in attributed and limit in remaining:  # never in the sum
             remaining.remove(limit)
     return tuple(remaining)
 
@@ -765,7 +827,7 @@ def loopback_endpoint(endpoint: str) -> bool:
 
 
 def detect_runtime(
-    info: Mapping[str, object], client_platform: str, endpoint: str, home: Path
+    info: Mapping[str, object], client_platform: str, endpoint: str, home: Path, *, desktop_vm_client: bool = False
 ) -> str | RuntimeRefusal | None:
     """Name the runtime behind a local Docker daemon from its ``/info``, the client platform and the client endpoint.
 
@@ -775,7 +837,9 @@ def detect_runtime(
     rule recognises there (Docker Desktop) is, and any other stays remote (a tunnel to another host). A Mac VM daemon is
     only recognised from a ``darwin`` client, and Colima only through its own profile's socket, so no Mac VM is ever
     accounted as native Linux. A Podman machine is never classified here: its binding decides (``lifecycle.runtime_of``;
-    the adapter refuses a Podman engine it cannot bind).
+    the adapter refuses a Podman engine it cannot bind). A Linux client on Docker Desktop's local socket is refused
+    unless the operator declared it a client inside Desktop's VM (``desktop_vm_client``, a CI runner container): client
+    and containers then share the VM's kernel and memory, which is ``docker-engine``.
     """
     local_socket = endpoint.startswith("unix://")
     if not local_socket and not loopback_endpoint(endpoint):
@@ -796,6 +860,8 @@ def detect_runtime(
     elif client_platform == "linux":
         if desktop and not local_socket:
             return None  # a loopback port to a Desktop daemon (WSL2's exposed one) stays remote, as before
+        if desktop and desktop_vm_client:
+            return "docker-engine"
         if desktop:
             return RuntimeRefusal(
                 "Docker Desktop daemon seen from a Linux client; use Docker Engine in the WSL2 distribution."

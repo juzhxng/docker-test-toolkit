@@ -88,7 +88,9 @@ def test_capacity_on_docker_still_returns_the_body_id(monkeypatch: pytest.Monkey
     # sys.platform would make the native clock load macOS libraries on a Linux CI host).
     classify = lifecycle.detect_runtime
     monkeypatch.setattr(
-        lifecycle, "detect_runtime", lambda info, _platform, endpoint, home: classify(info, "darwin", endpoint, home)
+        lifecycle,
+        "detect_runtime",
+        lambda info, _platform, endpoint, home, **declared: classify(info, "darwin", endpoint, home, **declared),
     )
     desktop_info = {**INFO, "OperatingSystem": "Docker Desktop"}
 

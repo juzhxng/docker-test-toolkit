@@ -259,6 +259,20 @@ def test_install_records_the_host_reserve_and_the_guardian_reads_it(tmp_path: Pa
     assert sharing.read_host_reserve(account) == 3 * GIB
 
 
+def test_install_records_the_desktop_vm_client_setting(tmp_path: Path) -> None:
+    archive = build_archive(tmp_path / "a", version="9.9.1")
+    root = tmp_path / "root"
+    account = Installation(root, root / "9.9.1", root / "9.9.1" / ARCHIVE_NAME).account_directory
+
+    assert _ok(_install(archive, root, "--desktop-vm-client", "on"))["desktop_vm_client"] is True
+    assert sharing.read_desktop_vm_client(account) is True
+    assert _ok(_install(archive, root))["desktop_vm_client"] is True  # a rerun without the flag keeps the setting
+    error = _error(_install(archive, root, "--desktop-vm-client", "yes"))
+
+    assert "on" in error["message"] and "off" in error["message"]
+    assert sharing.read_desktop_vm_client(account) is True
+
+
 def test_install_records_the_disk_reserve(tmp_path: Path) -> None:
     archive = build_archive(tmp_path / "a", version="9.9.1")
     root = tmp_path / "root"

@@ -445,7 +445,7 @@ def test_non_fitting_pair_serialized(tmp_path: Path, redis_image: None, private_
     assert granted_interval(b)[0] > granted_interval(a)[1]
 
 
-@pytest.mark.parametrize("control_kind", ["attributed", "unlabeled"])
+@pytest.mark.parametrize("control_kind", ["attributed", "unlabeled", "run-host"])
 def test_coholder_containers_attributed_not_external(
     tmp_path: Path, redis_image: None, private_installation: Path, control_kind: str
 ) -> None:
@@ -466,15 +466,16 @@ def test_coholder_containers_attributed_not_external(
     worker_b = None
     try:
         _wait(control / "entered-a.json")
-        if control_kind == "unlabeled":
+        if control_kind in ("unlabeled", "run-host"):  # a run host (a CI runner) is labelled by its operator
+            label = ["--label", "com.docker-test-toolkit.run-host=true"] if control_kind == "run-host" else []
             foreign = subprocess.run(
-                [docker, "run", "--detach", "--memory", str(GIB), REDIS, "redis-server", "--save", ""],
+                [docker, "run", "--detach", "--memory", str(GIB), *label, REDIS, "redis-server", "--save", ""],
                 capture_output=True,
                 text=True,
                 check=True,
             ).stdout.strip()
         worker_b = _worker(root, second, control, "b", "hold", container=budget, host=256 * 1024**2, service=0)
-        if control_kind == "attributed":
+        if control_kind != "unlabeled":
             _wait(control / "entered-b.json")
         else:
             _wait(control / "prepared-b.json")

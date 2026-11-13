@@ -105,6 +105,8 @@ Runners on a shared CI host that share one Docker daemon and one PID namespace s
 | Run folders | `TMPDIR` set to one shared directory under a host path such as `/srv/ci/`, mounted at the same path in every runner and in the daemon, so Compose bind mounts from a run's private root resolve and a recoverer in another runner can remove it |
 | Host reserve | `install --host-reserve-bytes 1073741824`, once |
 | PID 1 that reaps orphans | `init: true`, an init such as `dumb-init`, or a shared PID namespace with one: the toolkit never counts a zombie as dead, so under a PID 1 that does not reap, a killed run is never recovered |
+| Runners inside Docker Desktop's VM | `install --desktop-vm-client on`, once, for the runners' account: a Linux client on Desktop's local socket then counts as Docker Engine in that VM (client and containers share its kernel and memory) instead of being refused |
+| Run-host label | `com.docker-test-toolkit.run-host=true` on each runner container: every other account on the daemon leaves it out of its external sum (the runner's own account accounts the job's run). The runner's `mem_limit` then bounds the job's processes only; the job's containers keep their own limits. Other accounts do not see a job's processes, so the record shows how many run hosts a wait left out (`run_host_containers`) |
 
 For a GitHub-hosted runner, see the [CI guide](ci.md).
 
@@ -740,7 +742,9 @@ host memory only; accelerator memory (VRAM, Apple unified memory used by a host-
 - **Windows through WSL2:** install Docker Engine inside the WSL2 distribution; it runs as the `native` topology.
   `/proc/meminfo` describes the WSL2 virtual machine (by default half of the Windows memory), so pressure outside it on the
   Windows host is not visible. A Docker Desktop daemon reached from a Linux client is refused with `Docker Desktop daemon
-  seen from a Linux client; use Docker Engine in the WSL2 distribution.`
+  seen from a Linux client; use Docker Engine in the WSL2 distribution.` The refusal stays unless the operator
+  declared the account's client to run inside Docker Desktop's VM (`install --desktop-vm-client on`, for CI runner
+  containers on Desktop's engine; see [CI runners](#ci-runners)).
 - **Host reserve:** every phase keeps 4.5 GiB of host memory free for the machine's own work (IDE, browser, other
   projects). A single-purpose CI host records a smaller reserve with `install --host-reserve-bytes` (decimal bytes, at
   least 1 GiB); it is stored in the account (`host-reserve.json`) and is replaced only by

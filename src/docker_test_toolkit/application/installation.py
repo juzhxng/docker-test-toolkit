@@ -186,6 +186,7 @@ def install(
     disk_reserve_bytes: int | None = None,
     parallel_runs: int | Literal["auto"] | None = None,
     share_scope: str | None = None,
+    desktop_vm_client: bool | None = None,
     command_link: Path | None = None,
     test_root: bool = False,
     docker_factory: Callable[[], DockerPort] | None = None,
@@ -249,6 +250,9 @@ def install(
             if share_scope is not None:
                 sharing.record_share_scope(account, share_scope)
             scope = sharing.read_share_scope(account)
+            if desktop_vm_client is not None:
+                sharing.record_desktop_vm_client(account, desktop_vm_client)
+            vm_client = sharing.read_desktop_vm_client(account)
     try:
         docker = docker_factory() if docker_factory is not None else None
     except (InfrastructureFailure, ResourceError):
@@ -263,6 +267,7 @@ def install(
         "holder_versions": [held for held in holders if held != version],
         "parallel_runs": "auto" if limit is None else limit,
         "share_scope": scope,
+        "desktop_vm_client": vm_client,
         "probe_image": probe_image,
         "retention": pass_report,
     }

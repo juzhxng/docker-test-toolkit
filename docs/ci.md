@@ -50,7 +50,9 @@ If your tests export images to archives, the daemon also needs the containerd im
 
 Install once for the machine, not per job. Runners that share a Docker daemon and PID namespace must share one installation and
 one user. A run's temporary folder must be at the same path in the runners and in the daemon. A single-purpose host can lower its
-reserve with `install --host-reserve-bytes`. [Operations](operations.md#ci-runners) lists everything the runner stack provides.
+reserve with `install --host-reserve-bytes`. Runner containers inside Docker Desktop's VM declare that once with
+`install --desktop-vm-client on` and carry the label `com.docker-test-toolkit.run-host=true`, so local runs on the same
+Mac do not count them as foreign memory. [Operations](operations.md#ci-runners) lists everything the runner stack provides.
 
 Never use self-hosted runners on a public repository: they would run code from anyone's pull request.
 

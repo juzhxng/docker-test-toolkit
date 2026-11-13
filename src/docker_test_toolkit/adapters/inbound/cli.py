@@ -142,6 +142,7 @@ def install_main(argv: list[str]) -> int:
         parser.add_argument("--disk-reserve-bytes", type=int)
         parser.add_argument("--parallel-runs")
         parser.add_argument("--share-scope", choices=("machine", "repository"))
+        parser.add_argument("--desktop-vm-client", choices=("on", "off"))
         parser.add_argument("--python", type=Path)
         parser.add_argument("--root", type=Path)
         try:
@@ -149,7 +150,7 @@ def install_main(argv: list[str]) -> int:
         except (argparse.ArgumentError, SystemExit) as error:
             raise InvalidInput(
                 "install accepts --json, --host-reserve-bytes, --disk-reserve-bytes, --parallel-runs, --share-scope,"
-                " --python and --root."
+                " --desktop-vm-client on|off, --python and --root."
             ) from error
         parallel_runs = _parallel_runs_argument(arguments.parallel_runs)
         if RUNNING_ARCHIVE is None:
@@ -168,6 +169,7 @@ def install_main(argv: list[str]) -> int:
             disk_reserve_bytes=arguments.disk_reserve_bytes,
             parallel_runs=parallel_runs,
             share_scope=arguments.share_scope,
+            desktop_vm_client=None if arguments.desktop_vm_client is None else arguments.desktop_vm_client == "on",
             command_link=link,
             test_root=test_root,
             docker_factory=build_docker_adapter,

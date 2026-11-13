@@ -287,6 +287,31 @@ def record_share_scope(account_directory: Path, value: str) -> None:
     atomic_json(account_directory / SHARE_SCOPE_FILE, {"share_scope": value, "schema": 1})
 
 
+DESKTOP_VM_CLIENT_FILE = "desktop-vm-client.json"
+_DESKTOP_VM_CLIENT_FIELDS = frozenset({"schema", "desktop_vm_client"})
+
+
+def read_desktop_vm_client(account_directory: Path) -> bool:
+    """Return whether the operator declared this account's client to run inside Docker Desktop's VM (off by default).
+
+    Raises:
+        ResourceError: If the declaration is not exactly ``{"schema": 1, "desktop_vm_client": true | false}``.
+    """
+    path = account_directory / DESKTOP_VM_CLIENT_FILE
+    if _absent(path):
+        return False
+    document = _read_private_json(path)
+    value = document.get("desktop_vm_client")
+    if not _header_ok(document, _DESKTOP_VM_CLIENT_FIELDS) or type(value) is not bool:
+        raise ResourceError("The account's Docker Desktop VM client declaration is invalid.")
+    return value
+
+
+def record_desktop_vm_client(account_directory: Path, value: bool) -> None:
+    """Record the operator's declaration that this account's client runs inside Docker Desktop's VM (a CI runner)."""
+    atomic_json(account_directory / DESKTOP_VM_CLIENT_FILE, {"desktop_vm_client": value, "schema": 1})
+
+
 def repository_identity(project_root: str) -> str:
     """Return a project's repository identity: its Git ``origin`` address, normalized, else its resolved path.
 

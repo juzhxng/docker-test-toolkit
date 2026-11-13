@@ -92,6 +92,7 @@ from docker_test_toolkit.application.sharing import (
     drain_pending,
     pending_absent,
     read_admission_settings,
+    read_desktop_vm_client,
     read_grants,
     read_host_reserve,
     read_leases,
@@ -189,6 +190,7 @@ from docker_test_toolkit.domain.policy import (
     disk_estimate,
     disk_fit,
     engine_stats,
+    external_commitments,
     fifo_head,
     has_shared,
     holder_numbers,
@@ -8107,14 +8109,15 @@ def _test_capacity_inputs(
     daemon_memory = bound.get("daemon_memory_bytes", max(64 * gib, largest_container + gib))
     host_memory = bound.get("host_memory_bytes", 64 * gib)
     containers = list(bound.get("containers", []))
-    external = tuple(item["HostConfig"]["Memory"] or None for item in containers if item["State"]["Running"] is True)
+    commitments = external_commitments(containers, frozenset())
     snapshot = CapacitySnapshot(
         daemon_memory,
         bound.get("daemon_cpus", 64),
         host_memory,
         bound.get("host_cpus", 64),
         data["topology"],
-        external,
+        commitments.limits,
+        run_host_containers=commitments.run_hosts,
         runtime=_bound_runtime(bound, data["topology"]),
     )
     if host_script is None:
@@ -8374,7 +8377,9 @@ def runtime_of(binding: PodmanBinding | None, info: Mapping[str, object], endpoi
     decides); any other daemon is classified by ``detect_runtime``."""
     if binding is not None:
         return "podman"
-    return detect_runtime(info, sys.platform, endpoint, passwd_home())
+    account = canonical_account()  # the operator's setting for a runner inside Desktop's VM; none from the source tree
+    declared = account is not None and read_desktop_vm_client(account)
+    return detect_runtime(info, sys.platform, endpoint, passwd_home(), desktop_vm_client=declared)
 
 
 def _runtime_facts(docker, daemon_id: str, deadline: Deadline) -> RuntimeFacts:
@@ -13139,7 +13144,11 @@ def _publish_grant(
             }
             data["admission_observation"] = {
                 # the detected runtime is never recorded: the record keeps 0.6.20's capacity keys
-                "capacity": {key: value for key, value in asdict(snapshot).items() if key != "runtime"},
+                "capacity": {  # the record keeps 0.7's capacity keys
+                    key: value
+                    for key, value in asdict(snapshot).items()
+                    if key not in ("runtime", "run_host_containers")
+                },
                 "memory": asdict(current),
                 "window_start": asdict(window_start),
                 "samples": [asdict(current)],
@@ -13578,6 +13587,7 @@ class CapacitySnapshot:
     external_limits: tuple[int | None, ...]
     host_reserve_bytes: int = HOST_RESERVE_DEFAULT
     runtime: str | None = field(kw_only=True)  # the detected runtime; ``None`` for a remote daemon
+    run_host_containers: int = field(default=0, kw_only=True)  # run hosts left out of ``external_limits``
 
 
 def passwd_home() -> Path:
@@ -13663,30 +13673,7 @@ def observe_capacity(
     if runtime is None:
         topology = "remote"  # a remote endpoint is accounted as remote from any client
     containers = docker.objects("container", deadline=deadline) if inventory is None else inventory
-    capacity_owned_ids = set(owned_ids)
-    observed_ids = set()
-    external_limits = []
-    for item in containers:
-        try:
-            container_id = item["Id"]
-            running = item["State"]["Running"]
-            limit = item["HostConfig"]["Memory"]
-        except (KeyError, TypeError) as error:
-            raise ResourceError("Docker container capacity evidence is incomplete.") from error
-        if (
-            not isinstance(container_id, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", container_id)
-            or type(running) is not bool
-            or type(limit) is not int
-            or limit < 0
-            or container_id in observed_ids
-        ):
-            raise ResourceError("Docker container capacity evidence is contradictory.")
-        observed_ids.add(container_id)
-        if running and container_id not in capacity_owned_ids:
-            external_limits.append(limit or None)
-    if not capacity_owned_ids <= observed_ids:
-        raise ResourceError("An owned container is absent from the complete daemon inventory.")
+    commitments = external_commitments(containers, owned_ids)
     host = _host_read(NativeClock(), deadline)
     host_cpus = os.cpu_count()
     if type(host_cpus) is not int or host_cpus <= 0:
@@ -13697,7 +13684,8 @@ def observe_capacity(
         host.physical_bytes,
         host_cpus,
         topology,
-        tuple(external_limits),
+        commitments.limits,
+        run_host_containers=commitments.run_hosts,
         runtime=runtime,
     )
 
@@ -13767,6 +13755,7 @@ def _capacity_values(budget: PhaseBudget, observed: CapacitySnapshot) -> dict[st
         "host_reserve_bytes": observed.host_reserve_bytes,
         "external_bytes": external,
         "external_containers": len(observed.external_limits),
+        "run_host_containers": observed.run_host_containers,
         "unlimited_containers": len(observed.external_limits) - len(finite),
         "daemon_cpus_needed": budget.daemon_cpus,
         "daemon_cpus": observed.daemon_cpus,

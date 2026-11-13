@@ -14,10 +14,12 @@ from docker_test_toolkit.domain.errors import ResourceError
 from docker_test_toolkit.domain.models import PhaseBudget
 from docker_test_toolkit.domain.policy import (
     BUILDER_MEMORY_BYTES,
+    RUN_HOST_LABEL,
     HolderFacts,
     PhaseReservation,
     QueueEntryView,
     attributed_ids,
+    external_commitments,
     net_external_limits,
     next_grantable,
     publication_verdict,
@@ -189,21 +191,24 @@ def _container(identifier: str, memory: int | None, *, project: str | None = Non
 
 def test_a_holders_builder_worker_is_attributed_by_name_within_its_reservation() -> None:
     """The BuildKit worker carries no label; it counts as the holder's by its name, inside the reservation."""
-    holder = HolderFacts("r1", PhaseReservation(6 * GIB, 0, 2, 1), "dtt-p-r1", "buildx_buildkit_dtt-p-r10")
+    holder = HolderFacts("r1", PhaseReservation(7 * GIB, 0, 2, 1), "dtt-p-r1", "buildx_buildkit_dtt-p-r10")
     containers = [
         _container("a", 2 * GIB, project="dtt-p-r1"),
         _container("b", GIB, run="r1"),
         _container("c", GIB, project="dtt-p-r1"),
         _container("d", BUILDER_MEMORY_BYTES, name="buildx_buildkit_dtt-p-r10"),
         _container("e", GIB, project="dtt-other"),  # a foreign container
-        _container("f", None, project="dtt-p-r1"),  # unlimited: stays external
-        _container("g", GIB, project="dtt-p-r1"),  # beyond the 6 GiB reservation: stays external
+        _container("f", 0, project="dtt-p-r1"),  # unlimited (Docker reports 0): stays external
+        _container("0", GIB, project="dtt-other"),  # a second foreign container of the same size
+        _container("1", GIB, project="dtt-p-r1"),  # the holder's, and labelled as a run host
     ]
+    containers[-1]["Config"]["Labels"][RUN_HOST_LABEL] = "true"
 
     built = attributed_ids(containers, holder, run_label=RUN_LABEL)
 
-    assert built == {"a" * 64, "b" * 64, "c" * 64, "d" * 64}
-    external = net_external_limits(tuple(item["HostConfig"]["Memory"] for item in containers), containers, built)
+    assert built == {"a" * 64, "b" * 64, "c" * 64, "d" * 64}  # "1" is a run host: never in a sum, never attributed
+    limits = external_commitments(containers, frozenset()).limits  # an observer of another account owns none of them
+    external = net_external_limits(limits, containers, built)  # "1" was never in the sum: nothing subtracted for it
     assert sorted(item for item in external if item is not None) == [GIB, GIB]
     assert None in external
 

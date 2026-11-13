@@ -516,3 +516,33 @@ def test_an_unreadable_turn_file_reads_empty(tmp_path: Path) -> None:
     atomic_json(account / "turn.json", {"schema": 1, "turns": {"one": {"run_id": 5}}})
 
     assert sharing.read_turns(account) == {}  # no turn: today's order
+
+
+def test_the_desktop_vm_client_setting_defaults_off_and_reads_the_declaration(tmp_path: Path) -> None:
+    account = tmp_path / "account"
+    account.mkdir(mode=0o700)
+    assert sharing.read_desktop_vm_client(account) is False
+
+    sharing.record_desktop_vm_client(account, True)
+
+    assert sharing.read_desktop_vm_client(account) is True
+    assert (account / sharing.DESKTOP_VM_CLIENT_FILE).stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"schema": 1, "desktop_vm_client": "yes"},
+        {"schema": 1, "desktop_vm_client": 1},
+        {"schema": 1},
+        {"schema": 2, "desktop_vm_client": True},
+    ],
+    ids=["word", "integer", "missing", "schema-2"],
+)
+def test_an_invalid_desktop_vm_client_setting_fails_closed(tmp_path: Path, document: dict) -> None:
+    account = tmp_path / "account"
+    account.mkdir(mode=0o700)
+    atomic_json(account / sharing.DESKTOP_VM_CLIENT_FILE, document)
+
+    with pytest.raises(ResourceError, match="Docker Desktop VM client"):
+        sharing.read_desktop_vm_client(account)

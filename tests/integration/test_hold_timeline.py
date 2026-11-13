@@ -196,6 +196,7 @@ def test_every_new_grant_keeps_the_key_through_active_stopping_and_terminal(tmp_
     assert timeline["accounting_from_ns"] <= timeline["reserved_ns"] <= timeline["granted_ns"]
     assert timeline["origin"] == active["admission_observation"]["memory"]["origin"]
     assert (timeline["schema"], timeline["waiting"]) == (1, [])  # a run that never queued stays readable by 0.7
+    assert "run_host_containers" not in active["admission_observation"]["capacity"]  # 0.7's capacity keys
     assert (timeline["release"], timeline["release_origin"], timeline["released_ns"]) == (None, None, None)
     handle.leave()
     final = _record(services, handle.run_id)
