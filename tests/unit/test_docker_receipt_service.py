@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from docker_test_toolkit import ArtifactIdentity, ExternalDockerResource, PhaseBudget, RunSpec
-from docker_test_toolkit.application import lifecycle
+from docker_test_toolkit.application import lifecycle, sharing
 from docker_test_toolkit.application.docker_commands import ClassifiedDockerCommand
 from docker_test_toolkit.application.ports.docker import DockerPort
 from docker_test_toolkit.domain.errors import (
@@ -1288,9 +1288,11 @@ def test_new_digest_pull_accepts_missing_optional_created_metadata(tmp_path: Pat
     handle.leave()
 
 
-def test_pulled_digest_cleanup_force_releases_alias_without_deleting_shared_image_bytes(
+def test_a_pulled_image_a_foreign_container_uses_is_handed_off_not_untagged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A container this account does not know (another account's on the same engine) keeps the pulled image: the
+    leave hands it off instead of untagging it under that container, which would leave an image no record owns."""
     project = tmp_path / "project"
     project.mkdir()
     fake = FakeDockerPort()
@@ -1315,14 +1317,18 @@ def test_pulled_digest_cleanup_force_releases_alias_without_deleting_shared_imag
     monkeypatch.setattr(lifecycle, "_BOUND_DOCKER_FACTORY", lambda _identity: fake)
 
     lifecycle.dispatch_docker(handle._context, descriptor, fake, ("pull", reference))
+    account = Path(json.loads(handle._context.record.read_text())["account_directory"])
     lifecycle._cleanup_owned_docker_resources(handle._context)
-    status = handle.leave()
 
-    assert status.cleanup_outcome == "complete"
-    assert IMAGE_ID in fake.images
-    assert reference not in fake.images
-    assert foreign_id in fake.containers
-    assert ("image", "rm", "--force", reference) in fake.commands
+    assert IMAGE_ID in fake.images and reference in fake.images  # kept with its reference
+    assert not any(command[:2] == ("image", "rm") for command in fake.commands)
+    assert [entry.image_id for entry in sharing.read_pending(account)] == [IMAGE_ID]
+
+    fake.containers.pop(foreign_id)  # the other account's container is gone: the next image step drains the hand-off
+    lifecycle._cleanup_owned_docker_resources(handle._context)
+
+    assert reference not in fake.images and sharing.read_pending(account) == []
+    assert handle.leave().cleanup_outcome == "complete"
 
 
 def test_interrupted_digest_alias_cleanup_reconciles_reference_absence(
@@ -1340,8 +1346,6 @@ def test_interrupted_digest_alias_cleanup_reconciles_reference_absence(
             "RepoDigests": [],
         }
     }
-    foreign_id = "d" * 64
-    fake.containers[foreign_id] = _container(foreign_id, "foreign", {})
     handle = (
         build_test_services(tmp_path / "state")
         .open_run(_spec(project, include_image=False), docker_factory=lambda: fake)
@@ -1363,9 +1367,7 @@ def test_interrupted_digest_alias_cleanup_reconciles_reference_absence(
     lifecycle._reconcile_docker_receipt(handle._context)
 
     assert handle.leave().cleanup_outcome == "complete"
-    assert IMAGE_ID in fake.images
     assert reference not in fake.images
-    assert foreign_id in fake.containers
 
 
 def test_cached_digest_pull_refuses_incomplete_identity_before_record_mutation(tmp_path: Path) -> None:
@@ -3312,7 +3314,7 @@ def test_recovery_replays_digest_addressed_image_removal(tmp_path: Path, monkeyp
     monkeypatch.setattr(lifecycle, "_BOUND_DOCKER_FACTORY", lambda _identity: fake)
     lifecycle.dispatch_docker(handle._context, descriptor, fake, ("pull", reference))
     fake.fail_before_remove_kind = "image"
-    command = ("image", "rm", "--force", reference)
+    command = ("image", "rm", reference)
 
     with pytest.raises(ResourceError, match="cleanup result is unresolved"):
         lifecycle._cleanup_owned_docker_resources(handle._context)

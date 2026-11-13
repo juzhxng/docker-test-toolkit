@@ -170,7 +170,7 @@ def test_release_recovery_never_removes_while_a_foreign_run_holds_capacity(
         except ResourceBusy as error:
             refusal = error
 
-        removals = [argv for argv in fake.commands[commands:] if argv[:3] == ("image", "rm", "--force")]
+        removals = [argv for argv in fake.commands[commands:] if argv[:2] == ("image", "rm")]
         assert removals == [], f"recovery removed {removals} while a foreign run held the capacity lock"
         assert refusal is not None and refusal.reason == "capacity-lock-held"
         after = (a_context.record.read_bytes(), b_context.record.read_bytes(), (account / "queue.json").read_bytes())
@@ -185,9 +185,7 @@ def test_release_recovery_never_removes_while_a_foreign_run_holds_capacity(
     # Once the foreign run left, the retry completes A exactly once.
     status = lifecycle.recover_run(a_context, _test_directory=account)
     assert (status.state, status.cleanup_outcome) == ("complete", "complete")
-    assert [argv for argv in fake.commands[commands:] if argv[:3] == ("image", "rm", "--force")] == [
-        ("image", "rm", "--force", REFERENCE)
-    ]
+    assert [argv for argv in fake.commands[commands:] if argv[:2] == ("image", "rm")] == [("image", "rm", REFERENCE)]
 
 
 # ---- the fence precedes every write, never waits, and uses the dead run's mode ---------------------------------------
@@ -398,7 +396,7 @@ def _two_recoverer_world(tmp_path: Path, fake: FakeDockerPort):
 
 
 def _removals(fake: FakeDockerPort, since: int) -> list[tuple[str, ...]]:
-    return [argv for argv in fake.commands[since:] if argv[:3] == ("image", "rm", "--force")]
+    return [argv for argv in fake.commands[since:] if argv[:2] == ("image", "rm")]
 
 
 def test_interleaving_takeover_then_release_recovery(tmp_path: Path, fake_docker: FakeDockerPort) -> None:
@@ -415,7 +413,7 @@ def test_interleaving_takeover_then_release_recovery(tmp_path: Path, fake_docker
         leader.finish()
     assert json.loads(dead.record.read_text())["state"] == "complete"
     assert _recover(world.context, world.account).state == "complete"
-    assert _removals(fake_docker, commands) == [("image", "rm", "--force", REFERENCE)]
+    assert _removals(fake_docker, commands) == [("image", "rm", REFERENCE)]
 
 
 def test_interleaving_release_recovery_then_takeover(tmp_path: Path, fake_docker: FakeDockerPort) -> None:
@@ -482,6 +480,6 @@ def test_crash_of_release_recovery_beside_a_dead_holder_resumes_once(
 
     status = _recover(world.context, world.account)
 
-    assert status.state == "complete" and _removals(fake_docker, commands) == [("image", "rm", "--force", REFERENCE)]
+    assert status.state == "complete" and _removals(fake_docker, commands) == [("image", "rm", REFERENCE)]
     assert dead.record.read_bytes() == dead_record  # the dead holder is recovered by its own takeover only
     assert _recover(dead, world.account).state == "complete"

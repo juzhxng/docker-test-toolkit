@@ -4169,7 +4169,9 @@ def _owned_removal_command(
             ("container", "rm", "-f", identity) if keep_anonymous_volumes else ("container", "rm", "-f", "-v", identity)
         )
     if kind == "image" and reference is not None:
-        return "image", "rm", "--force", reference
+        # Never forced: Docker then refuses while any container uses the image, so a container of another account on
+        # the same engine never leaves it untagged under it, dangling and owned by no record.
+        return "image", "rm", reference
     return kind, "rm", identity
 
 
@@ -5115,7 +5117,8 @@ def _cleanup_owned_docker_resources(context: RunContext, deadline_ns: int | None
     failpoint("owned-containers-removed")
     data = _load_run(context)
     account = Path(data["account_directory"])
-    if not _image_step_locked(data):
+    kept = [key for key, item in data["owned_resources"]["images"].items() if item["state"] != "removed"]
+    if not _image_step_locked(data) and not (kept and set(kept) & _engine_images(_bound_docker(data))):
         _remove_owned(context, (("images", "image"),), deadline_ns)
         return
     with image_lock(Context(account, account), deadline_ns=deadline_ns) as hold_fd:
@@ -5246,15 +5249,18 @@ def _image_step(context: RunContext, deadline_ns: int | None, hold_fd: int) -> N
         read_pending(account)  # an unreadable list hands nothing off and drains nothing
     except ResourceError as error:
         raise IncompleteCleanup("The pending image deletion list is unreadable; images are kept.") from error
-    if _record_mode(data) != AdmissionMode.SHARED:
-        _remove_owned(context, (("images", "image"),), deadline_ns, hold_fd)
-    else:
-        for identity, resource in data["owned_resources"]["images"].items():
-            if resource["state"] == "removed" or _hand_off_if_in_use(context, data, identity, resource, deadline_ns):
-                continue
-            argv, plan = _image_removal(resource)
-            _run_owned_mutation(context, argv, "image-rm", {"image_id": identity, **plan}, deadline_ns, hold_fd)
+    for identity, resource in data["owned_resources"]["images"].items():
+        if resource["state"] == "removed" or _hand_off_if_in_use(context, data, identity, resource, deadline_ns):
+            continue
+        argv, plan = _image_removal(resource)
+        _run_owned_mutation(context, argv, "image-rm", {"image_id": identity, **plan}, deadline_ns, hold_fd)
     _drain_pending(context, account, deadline_ns, hold_fd)
+
+
+def _engine_images(adapter: DockerPort) -> set[str]:
+    """The images the daemon's containers use, whoever created them (another toolkit account on the same engine is
+    invisible to this account's records); a run's own containers are removed before its images."""
+    return {str(item.get("Image")) for item in adapter.objects("container")}
 
 
 def _hand_off_if_in_use(
@@ -5272,7 +5278,9 @@ def _hand_off_if_in_use(
     with ``pending_deletion`` evidence; a dispatch's K wait is merged into that write. Raises IncompleteCleanup
     when the pending list is unreadable.
     """
-    if not image_in_use(identity, _interest_views(context, data, deadline_ns), actor_run=data["run_id"]):
+    views = _interest_views(context, data, deadline_ns)
+    engine = _engine_images(_bound_docker(data))
+    if not image_in_use(identity, views, actor_run=data["run_id"]) and identity not in engine:
         return False
     account = Path(data["account_directory"])
     try:
@@ -5318,15 +5326,20 @@ def _drain_pending(context: RunContext, account: Path, deadline_ns: int | None, 
     # only entries its own grant's daemon recorded, and only when the discovered daemon is that daemon.
     daemon_id = (data.get("grant") or {}).get("daemon_id")
 
-    def in_use(image_id: str) -> bool:
-        """Whether a live run other than this one uses the image."""
-        return image_in_use(image_id, views, actor_run=data["run_id"])
-
-    if not any(entry.daemon_id == daemon_id and not in_use(entry.image_id) for entry in pending):
+    if not any(
+        entry.daemon_id == daemon_id and not image_in_use(entry.image_id, views, actor_run=data["run_id"])
+        for entry in pending
+    ):
         return  # nothing to delete: no Docker call and nothing to rewrite
     adapter = _bound_docker(data) if data["docker_authority"] is not None else _docker()
     if adapter.observe_daemon().daemon_id != daemon_id:
         return  # another daemon is reachable now: nothing is deleted and every entry stays
+    engine_images = _engine_images(adapter)
+
+    def in_use(image_id: str) -> bool:
+        """Whether a live run other than this one, or any container on the engine (another account's), uses it."""
+        return image_id in engine_images or image_in_use(image_id, views, actor_run=data["run_id"])
+
     drain_pending(adapter, account, daemon_id, in_use, hold_fd)
 
 

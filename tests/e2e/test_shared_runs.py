@@ -951,6 +951,57 @@ def test_owner_image_rm_hands_off_and_non_owner_rm_is_refused(
         _killing(owner, user)
 
 
+PULLED = "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"  # absent: the run pulls it
+
+
+def _dangling(image_id: str) -> bool:
+    docker = shutil.which("docker")
+    assert docker is not None
+    listed = subprocess.run(
+        [docker, "image", "ls", "--quiet", "--no-trunc", "--filter", "dangling=true"], capture_output=True, text=True
+    )
+    return image_id in listed.stdout.split()
+
+
+@pytest.mark.parametrize("shared", [True, False], ids=["shared", "exclusive"])
+def test_a_pulled_image_a_foreign_container_uses_is_handed_off_not_untagged(
+    tmp_path: Path, redis_image: None, private_installation: Path, shared: bool
+) -> None:
+    """Another toolkit account on the same engine (a CI runner's) is invisible to this account's records: a leave
+    keeps a pulled image any container uses, hands it off, and a later image step removes it once nothing uses it."""
+    del redis_image
+    root, control = private_installation, tmp_path / "control"
+    control.mkdir()
+    project = _stage(tmp_path, "pull-owner")
+    if shared:
+        seed_verdict(root, project)
+    docker = shutil.which("docker")
+    assert docker is not None
+    owner = _held(root, project, control, "owner", [{"docker": ["pull", PULLED]}])
+    later = foreign = None
+    try:
+        _wait(control / "entered-owner.json")
+        image_id = _built_image(control, "owner")  # the pulled image the run owns
+        foreign = subprocess.run(  # stands in for a container of the other account
+            [docker, "create", PULLED, "true"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        _release(control, "owner", owner)
+
+        assert _image_exists(PULLED) and not _dangling(image_id)  # kept with its reference, not untagged
+        assert [entry["image_id"] for entry in _pending(root)] == [image_id]
+
+        subprocess.run([docker, "container", "rm", foreign], check=True, capture_output=True)
+        foreign = None
+        later = _held(root, _stage(tmp_path, "pull-later"), control, "later", [])
+        _release(control, "later", later)  # its leave's image step drains the hand-off
+
+        assert not _image_exists(image_id) and _pending(root) == []
+    finally:
+        if foreign is not None:
+            subprocess.run([docker, "container", "rm", "-f", foreign], check=False, capture_output=True)
+        _killing(owner, later)
+
+
 # --- pressure while sharing ---
 
 HOG = r"""import os, pathlib, sys, time
