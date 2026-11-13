@@ -14,8 +14,8 @@ from docker_test_toolkit.domain.policy import NAME, VERSION, require_name
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
-TOOLKIT_VERSION = "0.7.7"
-SHARED_QUEUE_MIN_VERSION = "0.6.0"  # the first release whose queue readers accept more than one holder
+TOOLKIT_VERSION = "0.8.0"
+SHARED_QUEUE_MIN_VERSION = "0.8.0"  # 0.8.0 changed the admission sums: no run holds beside an older version (C4)
 SUPPORTED_PROTOCOLS = MappingProxyType(
     {
         "batch": 2,

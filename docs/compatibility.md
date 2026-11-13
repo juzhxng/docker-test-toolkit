@@ -105,7 +105,7 @@ report timing changed; [Operations](operations.md#dead-owners-and-the-takeover-w
 resumes a recovery a 0.7.7 recoverer began does not know the marker; finish a recovery with the version that started
 it.
 
-The release after 0.7.7 changes two record shapes, one way. `failure_evidence` and `hold_timeline` gain schema 2 when
+0.8.0 changes two record shapes, one way. `failure_evidence` and `hold_timeline` gain schema 2 when
 a refusal, wait or breach carries `numbers` (and the evidence category `admission-refused` with them); a run that never
 waited on a compared quantity keeps schema 1, which older versions read. An older version lists a schema-2 record as
 unreadable and cannot recover such a run, so install and roll back while no run holds the account. The reasons

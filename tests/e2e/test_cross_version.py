@@ -27,7 +27,6 @@ from tests.integration.account_fixtures import queue_entries, queue_phases, reap
 
 from docker_test_toolkit.application.installation import archive_version, install
 from docker_test_toolkit.config.installation import ARCHIVE_NAME
-from docker_test_toolkit.domain.models import SHARED_QUEUE_MIN_VERSION
 from docker_test_toolkit.domain.policy import version_at_least
 
 pytestmark = pytest.mark.e2e
@@ -728,11 +727,12 @@ def test_limit_one_matches_previous_release(tmp_path: Path, builds: list[tuple[s
     assert not leftovers, leftovers
 
 
-def _seed_shared(pairing: _Pairing, name: str) -> None:
+def _seed_shared(pairing: _Pairing, name: str, rules: int | None = None) -> None:
     """Seed a positive verdict for a ``prepare`` worker's request in this root's registry.
 
     Both releases read the store: the previous one keys a request by its checkout folder's name, this one by the
-    checkout's Git origin, so the seed holds the verdict under both keys.
+    checkout's Git origin, so the seed holds the verdict under both keys. ``rules`` is the reading build's
+    ``SHARE_RULES_VERSION`` (default: this build's); a store with another value predicts nothing.
     """
     from docker_test_toolkit.application import sharing
     from docker_test_toolkit.application.recovery import atomic_json, project_id_for
@@ -749,7 +749,8 @@ def _seed_shared(pairing: _Pairing, name: str) -> None:
     verdict = {"shareable": True, "reason": None, "run_id": "seed", "origin": "seed", "tick_ns": 0}
     keys = (project.name, origin)  # the previous release's key component, then this release's
     keys = tuple(sharing.request_key(component, "e2e", "cross-version", ()) for component in keys)
-    atomic_json(path, {"rules": SHARE_RULES_VERSION, "schema": 1, "verdicts": dict.fromkeys(keys, verdict)})
+    store = {"rules": SHARE_RULES_VERSION if rules is None else rules, "schema": 1}
+    atomic_json(path, store | {"verdicts": dict.fromkeys(keys, verdict)})
 
 
 def _own_installer(archive: Path, root: Path, *arguments: str) -> subprocess.CompletedProcess:
@@ -762,15 +763,28 @@ def _own_installer(archive: Path, root: Path, *arguments: str) -> subprocess.Com
     )
 
 
+# The first release whose queue readers accept more than one holder (not SHARED_QUEUE_MIN_VERSION, the version gate).
+_FIRST_SHARED_QUEUE_READER = "0.6.0"
+# The previous release's SHARE_RULES_VERSION, for a shared holder on that build (0.7.x: 1).
+_PREVIOUS_SHARE_RULES = 1
+
+
 @previous_release_runs_here
+@pytest.mark.parametrize("holder_mode", ["exclusive", "shared"])
 def test_m1_previous_release_queued_and_holding_entries_block_join(
-    tmp_path: Path, builds: list[tuple[str, Path, Path]], redis_image: None
+    tmp_path: Path, builds: list[tuple[str, Path, Path]], redis_image: None, holder_mode: str
 ) -> None:
+    """A joiner never holds beside the previous release's holder; beside a shared one it waits on the version gate
+    (C4: a release that changes sums or record shapes raises SHARED_QUEUE_MIN_VERSION to itself)."""
     del redis_image
     old, new = _previous(builds)
     pairing = _Pairing(tmp_path / "m1", old, new)
     try:
-        pairing.install(old)
+        if holder_mode == "shared":
+            pairing.install(old, parallel_runs=2)
+            _seed_shared(pairing, "old-holder", rules=_PREVIOUS_SHARE_RULES)
+        else:
+            pairing.install(old)
         pairing.started("old-holder", "prepare")
         assert pairing.report("entered", "old-holder")["version"] == pairing.old_version
         assert _own_installer(new, pairing.root, "--parallel-runs", "2").returncode == 0
@@ -788,6 +802,10 @@ def test_m1_previous_release_queued_and_holding_entries_block_join(
         assert pairing.at_ns("entered", "joiner") > pairing.at_ns("leaving", "old-holder")
         pairing.signal("release", "joiner")
         assert pairing.report("done", "joiner")["state"] == "complete"
+        if holder_mode == "shared":
+            record = json.loads((pairing.root / "state" / "runs" / f"{joiner}.json").read_text())
+            reasons = {item["reason"] for item in record["hold_timeline"]["waiting"]}
+            assert "older-version-entry" in reasons, reasons
     finally:
         leftovers = pairing.close()
     assert not leftovers, leftovers
@@ -807,7 +825,7 @@ def test_previous_installer_refuses_two_holders_and_accepts_one(
             pairing.started(name, "prepare")
             pairing.report("entered", name)
         switched = _own_installer(old, pairing.root)
-        if version_at_least(pairing.old_version, SHARED_QUEUE_MIN_VERSION):
+        if version_at_least(pairing.old_version, _FIRST_SHARED_QUEUE_READER):
             # A previous release that reads shared queues (0.6.0 on) switches back with both holders in place.
             assert switched.returncode == 0, switched.stdout + switched.stderr
             assert json.loads(switched.stdout)["result"]["holder_versions"] == [pairing.new_version] * 2
