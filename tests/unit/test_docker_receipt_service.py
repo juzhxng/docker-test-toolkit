@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from docker_test_toolkit.domain.models import (
     PodmanBinding,
     ProbeRun,
 )
-from docker_test_toolkit.factories.testing import build_test_services, install_failpoint
+from docker_test_toolkit.factories.testing import bind_test_observation_reads, build_test_services, install_failpoint
 from tests.integration.account_fixtures import (
     abandon_run,
     current_identity,
@@ -864,6 +865,11 @@ def _pause_for_invalid_records(request: pytest.FixtureRequest, context: lifecycl
     return resume
 
 
+def _daemon_info(fake: FakeDockerPort) -> Callable[[object, str, object], lifecycle.EngineReply]:
+    """Serve the observation's ``/info`` read with the fake daemon's identity (the fake port has no Engine API)."""
+    return lambda _docker, _path, _deadline: lifecycle.EngineReply({"ID": fake.identity.daemon_id}, b"", 0)
+
+
 def test_active_observation_handles_shim_receipts_and_owned_control(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -906,27 +912,10 @@ def test_active_observation_handles_shim_receipts_and_owned_control(
         baseline.page_size,
         baseline.raw,
     )
-    capacity_owned_ids: list[frozenset[str]] = []
-    mutation_plans: list[dict | None] = []
-
-    def observe_capacity(_docker, topology, owned_ids=frozenset(), **_keywords):
-        capacity_owned_ids.append(frozenset(owned_ids))
-        mutation_plans.append(_keywords.get("mutation_plan"))
-        external = tuple(
-            None
-            for identifier, container in fake.containers.items()
-            if container["State"]["Running"] and identifier not in owned_ids
-        )
-        gib = 1024**3
-        return fake.identity.daemon_id, lifecycle.CapacitySnapshot(
-            64 * gib, 64, 64 * gib, 64, topology, external, runtime=lifecycle._TOPOLOGY_RUNTIME[topology]
-        )
-
     monkeypatch.setattr(lifecycle, "current_process", lambda _clock: guardian)
     monkeypatch.setattr(lifecycle, "account_directory", lambda: isolated_account)
     monkeypatch.setattr(lifecycle, "canonical_account", lambda: isolated_account)
     monkeypatch.setattr(lifecycle, "_docker", lambda: fake)
-    monkeypatch.setattr(lifecycle, "observe_capacity", observe_capacity)
     monkeypatch.setattr(
         lifecycle,
         "observe_host_memory",
@@ -939,16 +928,13 @@ def test_active_observation_handles_shim_receipts_and_owned_control(
         lambda *_args, **_keywords: lifecycle.CapacityDecision(lifecycle.CapacityState.READY, "stable"),
     )
     monkeypatch.setattr(lifecycle, "observe_container", _observe_fake_container)
+    reads = ExitStack()
+    request.addfinalizer(reads.close)
+    reads.enter_context(bind_test_observation_reads(engine=_daemon_info(fake)))  # the identity read of each pass
 
     lifecycle._observe_active_run(handle._context)
     observed = json.loads(handle._context.record.read_text())
     owned_failure = observed["infrastructure_failure"]
-    expected_owned_ids = frozenset(
-        container_id
-        for container_id, resource in observed["owned_resources"]["containers"].items()
-        if resource["state"] == "running"
-    )
-    first_capacity_ids = capacity_owned_ids[-1]
     controlled_id = next(
         container_id
         for container_id, resource in observed["owned_resources"]["containers"].items()
@@ -992,7 +978,6 @@ def test_active_observation_handles_shim_receipts_and_owned_control(
     lifecycle._observe_active_run(handle._context)
     observed = json.loads(handle._context.record.read_text())
     owned_control_failure = observed["infrastructure_failure"]
-    owned_control_mutation_plan = mutation_plans[-1]
     observed["pending_operation"] = None
     handle._context.record.write_text(json.dumps(observed))
     receipt = next(item for item in observed["docker_receipts"].values() if item["kind"] == "build")
@@ -1017,7 +1002,6 @@ def test_active_observation_handles_shim_receipts_and_owned_control(
     lifecycle._observe_active_run(handle._context)
     observed = json.loads(handle._context.record.read_text())
     pending_failure = observed["infrastructure_failure"]
-    pending_capacity_call_count = len(capacity_owned_ids)
     receipt = next(item for item in observed["docker_receipts"].values() if item["kind"] == "build")
     receipt["state"] = "promoted"
     receipt["result"] = receipt_result
@@ -1064,12 +1048,9 @@ def test_active_observation_handles_shim_receipts_and_owned_control(
     assert (owned_failure, owned_control_failure, pending_failure, oom_failure) == (
         None,
         None,
-        "unknown-external-capacity",
+        None,  # an unlimited foreign container appearing after the grant ends nothing
         "container-oom",
     )
-    assert owned_control_mutation_plan is None
-    assert first_capacity_ids == expected_owned_ids
-    assert pending_capacity_call_count == 3
 
 
 @pytest.mark.parametrize(
@@ -1158,7 +1139,7 @@ def test_active_observation_only_publishes_failure_for_current_revision(
     monkeypatch.setattr(lifecycle, "account_directory", lambda: isolated_account)
     monkeypatch.setattr(lifecycle, "canonical_account", lambda: isolated_account)
     monkeypatch.setattr(lifecycle, "_docker", lambda: fake)
-    monkeypatch.setattr(lifecycle, "observe_capacity", fail_observation)
+    monkeypatch.setattr(lifecycle, "_identified_info", fail_observation)
 
     lifecycle._observe_active_run(handle._context)
 

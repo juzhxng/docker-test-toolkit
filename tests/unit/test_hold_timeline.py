@@ -47,8 +47,9 @@ def _waiting(reason: str = "queue-position", first: int = 1_000, last: int = 1_5
         _timeline(waiting=[_waiting(), _waiting("incomplete-pressure-window", 2_000, 2_900)]),
         _timeline(release="leave", release_origin=ORIGIN, released_ns=4_000),
         _timeline(release="recovery", release_origin=LATER_BOOT, released_ns=5),
+        _timeline(schema=2, waiting=[{**_waiting(), "numbers": {"holders": 1}}, _waiting("lock-wait", 2_000, 2_100)]),
     ],
-    ids=["empty-waiting", "two-waiting-items", "same-origin-release", "cross-origin-release"],
+    ids=["empty-waiting", "two-waiting-items", "same-origin-release", "cross-origin-release", "waiting-numbers"],
 )
 def test_valid_hold_timeline_shapes_load(value: dict[str, Any]) -> None:
     validate_hold_timeline(copy.deepcopy(value))
@@ -65,8 +66,10 @@ def _without(key: str) -> dict[str, Any]:
     [
         _timeline(extra=1),
         _without("waiting"),
-        _timeline(schema=2),
+        _timeline(schema=3),
         _timeline(schema=True),
+        _timeline(waiting=[{**_waiting(), "numbers": {"holders": 1}}]),
+        _timeline(schema=2, waiting=[{**_waiting(), "numbers": {}}]),
         _timeline(reserved_ns=True),
         _timeline(accounting_from_ns=-1),
         _timeline(accounting_from_ns=2_500),
@@ -83,8 +86,10 @@ def _without(key: str) -> dict[str, Any]:
     ids=[
         "extra-key",
         "missing-key",
-        "schema-2",
+        "schema-3",
         "schema-bool",
+        "schema-1-with-numbers",
+        "empty-numbers",
         "bool-tick",
         "negative-tick",
         "accounting-after-reserved",
@@ -339,6 +344,30 @@ def test_timeline_entry_expired_admission_shows_failure_waiting() -> None:
 
     assert entry["granted"] is False and entry["waiting"] == waiting and "unrecorded" not in entry["notes"]
     assert all(value is None for value in entry["segments"].values())
+    assert entry["failure"]["category"] == "admission-expired"
+
+
+def test_timeline_entry_shows_the_failure_of_an_older_record_without_numbers() -> None:
+    """A record written before numbers existed (a removed reason and observer included) still shows its failure."""
+    record = _run_record()
+    record["failure_evidence"] = {
+        "schema": 1,
+        "category": "breach",
+        "reason": "unknown-job-containment",
+        "observer": "process",
+        "first_observed": {"phase": "tests"},
+    }
+
+    entry = timeline_entry(record, indexed=False)
+
+    assert entry["failure"] == {
+        "category": "breach",
+        "reason": "unknown-job-containment",
+        "observer": "process",
+        "phase": "tests",
+        "numbers": {},
+    }
+    assert timeline_entry(_run_record(), indexed=False)["failure"] is None
 
 
 def test_timeline_entry_build_seconds_from_cache_finished_ns() -> None:

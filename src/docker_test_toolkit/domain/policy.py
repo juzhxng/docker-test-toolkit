@@ -7,12 +7,13 @@ import math
 import re
 import urllib.parse
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from docker_test_toolkit.domain.errors import ToolkitError
+from docker_test_toolkit.domain.numbers import numbers_for
 
 if TYPE_CHECKING:  # models imports this module, so its types are only named for the checker
     from docker_test_toolkit.domain.models import MachineFacts, PhaseBudget
@@ -475,6 +476,27 @@ def parse_df(text: str) -> tuple[int, int] | None:
     return total * 1024, available * 1024
 
 
+def cpu_pressure_numbers(avg60: float | None) -> dict[str, int]:
+    """The CPU pressure a join compared, in permille; ``{}`` when it was not measured."""
+    if avg60 is None:
+        return {}
+    figures = {
+        "cpu_pressure_permille": round(avg60 * 10),
+        "cpu_pressure_limit_permille": round(CPU_PRESSURE_JOIN_LIMIT * 10),
+    }
+    return numbers_for("cpu-pressure", figures)
+
+
+def holder_numbers(entries: Sequence[QueueEntryView], limit: int | None) -> dict[str, int]:
+    """The queue figures a positional wait compared: the holders, and the account's limit when one is set."""
+    figures = {"holders": sum(entry.phase in HOLDER_PHASES for entry in entries)}
+    return (
+        numbers_for("queue-position", figures)
+        if limit is None
+        else numbers_for("queue-position", {**figures, "limit": limit}, "limit")
+    )
+
+
 def cpu_pressure_blocks_join(avg60: float | None) -> bool:
     """Whether a run must wait before joining holders: CPU pressure at the limit (no figures never block).
 
@@ -866,13 +888,13 @@ class CapacityState(StrEnum):
 
 @dataclass
 class CapacityDecision:
-    """Explain one admission decision and its computed reservations; ``detail`` names the figures of a disk decision."""
+    """Explain one admission decision, its computed reservations and the numbers it compared."""
 
     state: CapacityState
     reason: str
     guest_bytes: int | None = None
     host_bytes: int | None = None
-    detail: str | None = None
+    numbers: Mapping[str, int] = field(default_factory=dict)  # the compared operands (``domain.numbers``)
 
 
 DISK_FLOOR_BYTES = 4 * _GIB  # NOTE: the per-run estimate without a previous run's image sizes
@@ -915,19 +937,25 @@ def disk_fit(figure: DiskFigure, other_leases: int, estimate: int) -> CapacityDe
     free, total, reserve = figure.free_bytes, figure.total_bytes, figure.reserve_bytes
     if figure.state != "measured" or free is None or total is None or reserve is None:
         return CapacityDecision(CapacityState.READY, "disk-unknown")
-    detail = f"{figure.place}: free {free}, total {total}, reserve {reserve}, estimate {estimate} bytes"
+    place = figure.place.replace("-", "_")
+    values = {f"{place}_free_bytes": free, f"{place}_total_bytes": total, f"{place}_reserve_bytes": reserve}
+    figures = numbers_for(
+        "disk-capacity", {**values, "estimate_bytes": estimate, "other_leases_bytes": other_leases}, place
+    )
     if estimate > total - reserve:
-        return CapacityDecision(CapacityState.REFUSED, "disk-capacity", detail=detail)
+        return CapacityDecision(CapacityState.REFUSED, "disk-capacity", numbers=figures)
     if free - reserve - other_leases < estimate:
-        return CapacityDecision(CapacityState.WAITING, "disk-capacity", detail=f"{detail}, leased {other_leases}")
-    return CapacityDecision(CapacityState.READY, "disk-fits", detail=detail)
+        return CapacityDecision(CapacityState.WAITING, "disk-capacity", numbers=figures)
+    return CapacityDecision(CapacityState.READY, "disk-fits")
 
 
 def private_root_fit(free: int) -> CapacityDecision:
     """Wait while the run's private root has less than its floor free."""
     if free < PRIVATE_ROOT_FLOOR_BYTES:
-        detail = f"private-root: free {free}, floor {PRIVATE_ROOT_FLOOR_BYTES} bytes"
-        return CapacityDecision(CapacityState.WAITING, "disk-capacity", detail=detail)
+        figures = {"private_root_free_bytes": free, "private_root_reserve_bytes": PRIVATE_ROOT_FLOOR_BYTES}
+        return CapacityDecision(
+            CapacityState.WAITING, "disk-capacity", numbers=numbers_for("disk-capacity", figures, "private_root")
+        )
     return CapacityDecision(CapacityState.READY, "disk-fits")
 
 

@@ -20,7 +20,6 @@ from docker_test_toolkit.application.lifecycle import (
     Deadline,
     EngineReply,
     HostMemoryObservation,
-    JobMemoryLimit,
     NativeClock,
     ProcessIdentity,
 )
@@ -283,10 +282,9 @@ def bind_test_observation_reads(
     engine: Callable[[object, str, Deadline | None], EngineReply] | None = None,
     rss: Callable[[ProcessIdentity, Deadline], int] | None = None,
     host: Callable[[NativeClock, Deadline | None], HostMemoryObservation] | None = None,
-    jobs: Callable[[list[dict], set[str]], tuple[JobMemoryLimit, ...] | None] | None = None,
     endpoint: Callable[[object, Deadline | None], str] | None = None,
 ) -> Iterator[None]:
-    """Bind the Engine, RSS, host and job-cgroup reads of one observation pass for a block, then restore the defaults.
+    """Bind the Engine, RSS and host reads of one observation pass for a block, then restore the defaults.
 
     A reader left ``None`` keeps its production read; with a synthetic ``engine`` the endpoint defaults to this
     platform's local daemon socket. Nothing a previous block bound is inherited, and the defaults
@@ -295,7 +293,7 @@ def bind_test_observation_reads(
     """
     if endpoint is None and engine is not None:
         endpoint = _local_endpoint
-    lifecycle.configure_observation_reads(engine=engine, rss=rss, host=host, jobs=jobs, endpoint=endpoint)
+    lifecycle.configure_observation_reads(engine=engine, rss=rss, host=host, endpoint=endpoint)
     try:
         yield
     finally:

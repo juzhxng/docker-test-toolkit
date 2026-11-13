@@ -384,12 +384,12 @@ def _publication_setup(
 
 
 @pytest.mark.parametrize(
-    ("fresh_headroom", "external_limits", "refreshed_daemon", "failure"),
+    ("fresh_headroom", "external_limits", "refreshed_daemon", "waits", "failure"),
     [
-        (8 * 1024**3, (), "fixture-daemon", None),
-        (1024**3, (), "fixture-daemon", "fresh complete native pressure"),
-        (8 * 1024**3, (16 * 1024**3,), "fixture-daemon", "phase passed capacity admission"),
-        (8 * 1024**3, (), "other-daemon", "Docker daemon changed"),
+        (8 * 1024**3, (), "fixture-daemon", None, None),
+        (1024**3, (), "fixture-daemon", "native-headroom", None),
+        (8 * 1024**3, (16 * 1024**3,), "fixture-daemon", "external-capacity", None),
+        (8 * 1024**3, (), "other-daemon", None, "Docker daemon changed"),
     ],
 )
 def test_grant_uses_post_reconciliation_capacity_and_pressure(
@@ -398,50 +398,38 @@ def test_grant_uses_post_reconciliation_capacity_and_pressure(
     fresh_headroom: int,
     external_limits: tuple[int, ...],
     refreshed_daemon: str,
+    waits: str | None,
     failure: str | None,
 ) -> None:
+    """A fresh sample that no longer fits makes the publication wait; only a changed daemon refuses it."""
     setup = _publication_setup(tmp_path, monkeypatch, fresh_headroom, external_limits, refreshed_daemon)
-    handle, attempt, snapshot, stale, baseline, fresh = (
-        setup.handle,
-        setup.attempt,
-        setup.snapshot,
-        setup.stale,
-        setup.baseline,
-        setup.fresh,
-    )
+    handle, attempt = setup.handle, setup.attempt
 
     with ExitStack() as capacity_stack:
         outcome = lifecycle.reserve_capacity(handle._context, attempt, capacity_stack)
         assert outcome.waiting is None and outcome.descriptor is not None
-        capacity = outcome.descriptor
-        if failure is None:
-            status = lifecycle._publish_grant(
-                handle._context,
-                attempt,
-                capacity,
-                snapshot,
-                stale,
-                baseline,
-                daemon_id="fixture-daemon",
-                **_grant_accounting(),
-            )
-            assert status.state == "active"
-            assert lifecycle.load_run_record(handle._context)["admission_observation"]["memory"] == vars(fresh)
-        else:
+        publish = functools.partial(
+            lifecycle._publish_grant,
+            handle._context,
+            attempt,
+            outcome.descriptor,
+            setup.snapshot,
+            setup.stale,
+            setup.baseline,
+            daemon_id="fixture-daemon",
+            **_grant_accounting(),
+        )
+        if failure is not None:
             with pytest.raises(ResourceError, match=failure):
-                lifecycle._publish_grant(
-                    handle._context,
-                    attempt,
-                    capacity,
-                    snapshot,
-                    stale,
-                    baseline,
-                    daemon_id="fixture-daemon",
-                    **_grant_accounting(),
-                )
-            refused = lifecycle.load_run_record(handle._context)
-            assert refused["state"] == "admitting"
-            assert refused["admission"] == "never-granted"
+                publish()
+        elif waits is not None:
+            assert publish().reason == waits
+        else:
+            assert publish().state == "active"
+            assert lifecycle.load_run_record(handle._context)["admission_observation"]["memory"] == vars(setup.fresh)
+            return
+    record = lifecycle.load_run_record(handle._context)
+    assert (record["state"], record["admission"]) == ("admitting", "never-granted")
 
 
 def test_grant_is_refused_when_the_sample_ages_past_its_limit_while_waiting_for_the_metadata_lock(
@@ -2287,7 +2275,7 @@ def test_reserve_capacity_reports_the_reservation(tmp_path: Path) -> None:
 def test_reserve_capacity_reports_queue_position(tmp_path: Path) -> None:
     outcome, account, before = _reserve(tmp_path, holder=True)
 
-    assert outcome == lifecycle.ReserveOutcome(None, "queue-position")
+    assert outcome == lifecycle.ReserveOutcome(None, "queue-position", numbers={"holders": 1, "limit": 1})
     assert (account / "queue.json").read_bytes() == before  # a waiting run writes nothing
 
 

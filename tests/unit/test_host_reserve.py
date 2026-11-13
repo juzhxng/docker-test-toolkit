@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -22,14 +21,6 @@ def test_default_reserve_refuses_a_small_ci_host() -> None:
 
     assert (decision.state, decision.reason) == (CapacityState.REFUSED, "unsupported-base-capacity")
     assert CI_RUNNER.host_reserve_bytes == 9 * GIB // 2  # unchanged default for developer machines
-
-
-def test_declared_reserve_also_bounds_job_cgroups() -> None:
-    job = lifecycle.JobMemoryLimit(7 * GIB, 0, 0)
-    tight = replace(CI_RUNNER, host_memory_bytes=64 * GIB, job_limits=(job,))
-
-    assert lifecycle.assess_capacity(HEAVY_TESTS, tight).reason == "job-cgroup-base-capacity"
-    assert lifecycle.assess_capacity(HEAVY_TESTS, replace(tight, host_reserve_bytes=GIB)).state == CapacityState.READY
 
 
 def test_account_reserve_defaults_and_reads_the_declaration(tmp_path: Path) -> None:

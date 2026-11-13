@@ -278,10 +278,11 @@ the report below. Its `infrastructure_failure` stays empty. The run record carri
 
 - `waiting` lists every reason the admission waited on, with the first and last tick it held and the time it was waiting for
   it. The reasons are `queue-position` (an earlier ticket or a holder blocks the head), `capacity-lock-busy`,
-  `lock-wait` (blocked on a lock until the budget ended), the capacity verdicts (`external-capacity`,
-  `job-cgroup-external-capacity`), the pressure waits (`incomplete-pressure-window`, `native-headroom`, `swapout-rate`),
+  `lock-wait` (blocked on a lock until the budget ended), the capacity verdicts (`external-capacity`, and
+  `unknown-external-capacity` for a running foreign container without a memory limit), the pressure waits (`incomplete-pressure-window`, `native-headroom`, `swapout-rate`),
   `disk-capacity`, `repository-turn` and `observation-late`. One pass can hold several reasons, so the durations overlap and
-  their sum can exceed the wall-clock wait; each one is at most the span from the first pass to the expiry.
+  their sum can exceed the wall-clock wait; each one is at most the span from the first pass to the expiry. An item
+  whose wait compared quantities carries `numbers`: the values of the last pass that had numbers for it (see below).
 - `reason` is the waiting reason that began first. `pressure` is the last host and daemon sample the admission took
   (headroom, swap used and total, swap-out rate over the window, daemon memory), or `null` when it took none, for
   example while it only waited behind an earlier ticket.
@@ -349,8 +350,9 @@ in the project index (`indexed: false`); archived records are not read. Each run
 | `hold_s` | slot reserved | slot released |
 | `hold_to_leave_s` | slot reserved | leave request |
 
-It also lists each phase with its duration, each build with its duration, and the waiting reasons (the same reasons as
-the [Admission expiry report](#admission-expiry-report)). A fact a record does not carry is `null`, never estimated:
+It also lists each phase with its duration, each build with its duration, the waiting reasons (the same reasons as
+the [Admission expiry report](#admission-expiry-report), with their `numbers`), and `failure`: `null`, or the first
+failure's `category`, `reason`, `observer`, `phase` and `numbers` (`{}` for a record written before numbers). A fact a record does not carry is `null`, never estimated:
 
 - `unrecorded`: the record has no timeline (written by an earlier release); `reserved` is then approximated by the
   start of the admission window (`reserved: "window-start"`) and `waiting` is `null`, never shown as "no waiting".
@@ -455,6 +457,7 @@ carries, not by where it was raised:
 | `daemon-identity-changed` | the daemon changed during an active observation | none |
 | `breach` | a measured limit was exceeded; `reason` is the specific one (`external-capacity`, `native-headroom`, `swapout-rate`, `admission-swap-growth`, `container-oom`, …) | none |
 | `admission-expired` | the queue deadline passed before a grant (see above) | not applicable |
+| `admission-refused` | admission was refused on compared values (a run that can never fit, a disk that can never hold it); `numbers` names them | not applicable |
 
 The observer names what was being read: `host`, `engine`, `container`, `process` or `admission`.
 
@@ -495,6 +498,16 @@ For `observation-late` the tick is the first of the late attempts. There is no `
 `leave` stay read-only, and the leave message says how long before the report the failure was first observed, and the lease message names the
 cause and its observer.
 A stopped-retained run that carries the key cannot be resumed.
+
+**Numbers.** A refusal, wait or breach decided by comparing quantities records them as `numbers`: an object of named
+non-negative integers from one closed set (for example `external_bytes`, `daemon_memory_bytes`, `headroom_bytes`,
+`holders`). A breach or refusal carries them on the evidence (schema 2), an expiry on each waiting item. Evidence and
+hold timelines without numbers stay schema 1, readable by older releases. The requester's messages render them after
+the reason, bytes in GiB (`external=1.00GiB external_containers=1`). Only these integers are added: no command line,
+argument or environment value. Free-text reasons that existed before (a client exit's message, an unclassified fault's
+bounded text) are unchanged. A granted shared run whose co-holder's record cannot be read ends as
+`coholder-record-unreadable`; a granted run is never ended by the capacity sums of the moment, only by its own
+containers' OOM, its own records and the pressure checks.
 
 Failures that this does not cover write no evidence: the builder envelope, `guardian-lost`,
 `requester-lost`, cleanup failures and recovery revokes. `telemetry-unavailable` is no longer written; older records may
@@ -722,20 +735,20 @@ host memory only; accelerator memory (VRAM, Apple unified memory used by a host-
   `podman-helper-unsupported` (the Docker socket of `podman-mac-helper`, which is not supported),
   `podman-binary-missing` (no `podman` on `PATH`) and `podman-machine-not-found` (the context's endpoint is no running
   machine's API socket).
-- **Linux** (`native` topology), x86_64 and aarch64: the daemon sees the host's memory unless a cgroup limits it, and the
-  enclosing finite cgroup limits are honoured.
+- **Linux** (`native` topology), x86_64 and aarch64: the daemon sees the host's memory unless a cgroup limits it. An
+  enclosing cgroup limit (a CI runner's) is not part of admission; the kernel enforces it on the processes inside it.
 - **Windows through WSL2:** install Docker Engine inside the WSL2 distribution; it runs as the `native` topology.
   `/proc/meminfo` describes the WSL2 virtual machine (by default half of the Windows memory), so pressure outside it on the
   Windows host is not visible. A Docker Desktop daemon reached from a Linux client is refused with `Docker Desktop daemon
   seen from a Linux client; use Docker Engine in the WSL2 distribution.`
 - **Host reserve:** every phase keeps 4.5 GiB of host memory free for the machine's own work (IDE, browser, other
   projects). A single-purpose CI host records a smaller reserve with `install --host-reserve-bytes` (decimal bytes, at
-  least 1 GiB); it is stored in the account (`host-reserve.json`), also bounds job cgroups, and is replaced only by
+  least 1 GiB); it is stored in the account (`host-reserve.json`) and is replaced only by
   another install. An invalid recorded value fails the guardian closed.
 - **A headroom decline is not a breach**: the host's headroom dropping since a run's phase began, through
   any process, does not end a granted run; such pressure makes later runs wait, since every admission keeps the
   1.5 GiB headroom floor and the swap-out rate. A granted run is still ended by its own overuse (host-process envelope,
-  OOM, own capacity) and by host-wide pressure, whoever caused it: an unshared run by the 1.5 GiB headroom floor and the
+  OOM) and by host-wide pressure, whoever caused it: an unshared run by the 1.5 GiB headroom floor and the
   swap-out rate, every run by swap growth of 3 GiB from its admission (raised by the shared allowance below).
   Undeclared host memory can therefore still end a neighbour through these checks.
 - **Share verdicts count per repository, not per checkout** (0.7.2): a request's verdict key is its checkout's

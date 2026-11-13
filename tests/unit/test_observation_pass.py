@@ -18,6 +18,7 @@ import pytest
 from docker_test_toolkit.application import lifecycle, sharing
 from docker_test_toolkit.application.lifecycle import ControlError, Deadline, EngineReply, NativeClock
 from docker_test_toolkit.domain.errors import ResourceError
+from docker_test_toolkit.domain.models import PhaseBudget
 from docker_test_toolkit.domain.policy import Grant
 from docker_test_toolkit.factories.testing import bind_test_observation_reads, build_test_services, install_failpoint
 from tests.integration.account_fixtures import pause_guardian, resume_guardian
@@ -129,13 +130,6 @@ class _Reads:
             raise self._late()
         return 0
 
-    def jobs(self, _containers: object, _owned_ids: object) -> tuple:
-        """No enclosing job cgroup: native-Linux runs must not read the test host's own cgroup tree.
-
-        The job-cgroup read is a local file walk without a deadline, so it is not recorded with the deadline reads.
-        """
-        return ()
-
     def host(self, _clock: object, deadline: object) -> lifecycle.HostMemoryObservation:
         self.deadlines.append(("host", deadline))
         outcome = self._next("host")
@@ -216,15 +210,16 @@ def test_observation_pass_single_deadline_reaches_every_read(
     _services, handle, fake, reads = _active_pass(tmp_path, monkeypatch, request)
     fake.deadlines.clear()  # only the reads of the observation pass count, not the setup commands
 
-    with bind_test_observation_reads(engine=reads.engine, rss=reads.rss, host=reads.host, jobs=reads.jobs):
+    with bind_test_observation_reads(engine=reads.engine, rss=reads.rss, host=reads.host):
         lifecycle._observe_active_run(handle._context)
 
     recorded = reads.deadlines + fake.deadlines
     assert json.loads(handle._context.record.read_text())["infrastructure_failure"] is None
     labels = {label for label, _ in recorded}
-    assert {"engine:info", "host", "rss", "objects:container"} <= labels
+    assert {"engine:info", "host", "rss"} <= labels
+    assert "objects:container" not in labels  # after the grant no inventory is read: only the run's own containers
     assert any(label.startswith("engine:container") for label in labels)
-    assert [label for label, _ in recorded].count("host") >= 2  # the host sample and the one nested in observe_capacity
+    assert [label for label, _ in recorded].count("host") == 1
     first = recorded[0][1]
     assert isinstance(first, Deadline)
     assert all(deadline is first for _, deadline in recorded), [
@@ -239,7 +234,7 @@ def test_admission_capacity_inputs_share_one_deadline(
     data = lifecycle._load_run(handle._context)
     fake.deadlines.clear()
 
-    with bind_test_observation_reads(engine=reads.engine, rss=reads.rss, host=reads.host, jobs=reads.jobs):
+    with bind_test_observation_reads(engine=reads.engine, rss=reads.rss, host=reads.host):
         lifecycle._capacity_inputs(data, None)
 
     recorded = reads.deadlines + fake.deadlines
@@ -277,27 +272,33 @@ def test_observation_pass_host_budget_exhaustion_is_late(
     assert raised.value.observer == "host"
 
 
-def test_native_capacity_reads_job_limits_through_the_bound_reader(
+def test_native_capacity_counts_a_restarting_container_by_its_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
-    """Only a native-Linux daemon has job cgroups to read; there the bound reader replaces the host's cgroup tree."""
+    """A foreign container restarting (Running with Pid 0) counts by its hard limit and never refuses admission."""
     _services, handle, fake, reads = _active_pass(tmp_path, monkeypatch, request)
-    topology = "native" if sys.platform == "linux" else "desktop"
+    topology = "native" if sys.platform == "linux" else "desktop"  # the client platform fixes it, as in production
     reads.topology = topology
     (target,) = _owned_targets(handle)
-    seen: list[tuple[list[str], set[str]]] = []
+    restarting = {
+        "Id": "9" * 64,
+        "State": {"Running": True, "Restarting": True, "Pid": 0},
+        "HostConfig": {"Memory": GIB},
+        "Config": {"Labels": {}},
+    }
 
-    def jobs(containers: list[dict], owned_ids: set[str]) -> tuple:
-        seen.append(([item["Id"] for item in containers], set(owned_ids)))
-        return ()
-
-    with bind_test_observation_reads(engine=reads.engine, host=reads.host, jobs=jobs):
+    with bind_test_observation_reads(engine=reads.engine, host=reads.host):
         _daemon_id, snapshot = lifecycle.observe_capacity(
-            fake, topology, frozenset({target}), deadline=Deadline.after(NativeClock(), 30)
+            fake,
+            topology,
+            frozenset({target}),
+            inventory=[*fake.objects("container"), restarting],
+            deadline=Deadline.after(NativeClock(), 30),
         )
+    decision = lifecycle.assess_capacity(PhaseBudget(GIB, GIB, 1, 1), snapshot)
 
-    assert snapshot.job_limits == ()
-    assert seen == ([([target], {target})] if topology == "native" else [])
+    assert snapshot.external_limits == (GIB,)
+    assert (decision.state, decision.reason) == (lifecycle.CapacityState.READY, "static-capacity")
 
 
 def test_observation_reads_binding_restores_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -310,16 +311,11 @@ def test_observation_reads_binding_restores_defaults(tmp_path: Path, monkeypatch
         assert lifecycle._READS.rss is second
     with (
         pytest.raises(RuntimeError, match="boom"),
-        bind_test_observation_reads(engine=first, rss=second, host=first, jobs=second),
+        bind_test_observation_reads(engine=first, rss=second, host=first),
     ):
         raise RuntimeError("boom")
 
-    assert (lifecycle._READS.engine, lifecycle._READS.rss, lifecycle._READS.host, lifecycle._READS.jobs) == (
-        None,
-        None,
-        None,
-        None,
-    )
+    assert (lifecycle._READS.engine, lifecycle._READS.rss, lifecycle._READS.host) == (None, None, None)
 
 
 def _owned_targets(handle) -> list[str]:
@@ -376,7 +372,7 @@ def _add_managed(handle, fake: FakeDockerPort, identifiers: tuple[str, ...]) -> 
 
 def _pass(services, handle, reads: _Reads, late: lifecycle._LateAttempts | None = None, **keywords) -> dict:
     """Run one guardian observation pass with the scripted reads bound; return the record afterwards."""
-    with bind_test_observation_reads(engine=reads.engine, rss=reads.rss, host=reads.host, jobs=reads.jobs):
+    with bind_test_observation_reads(engine=reads.engine, rss=reads.rss, host=reads.host):
         lifecycle._observe_active_run(handle._context, late, **keywords)
     return json.loads(handle._context.record.read_text())
 
@@ -517,21 +513,18 @@ def test_observation_pass_daemon_change_is_its_own_category(
     assert (evidence["category"], evidence["observer"]) == ("daemon-identity-changed", "engine")
 
 
-def test_observation_pass_capacity_breach_survives_later_container_timeout(
+def test_observation_pass_a_capacity_change_ends_no_granted_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
+    """After the grant the daemon shrinking below the budget is no breach; the late container read still counts."""
     services, handle, _fake, reads = _active_pass(tmp_path, monkeypatch, request)
     (target,) = _owned_targets(handle)
     reads.script["info"] = ["tiny"]
     reads.script[target] = ["late"]
     late = lifecycle._LateAttempts()
 
-    failure, evidence = _failure(_pass(services, handle, reads, late))
-
-    assert failure == "unsupported-base-capacity"
-    assert evidence is not None
-    assert (evidence["category"], evidence["observer"]) == ("breach", "engine")
-    assert late.count == 0
+    assert _failure(_pass(services, handle, reads, late)) == (None, None)
+    assert late.count == 1
 
 
 def test_observation_pass_container_oom_survives_later_container_timeout(
@@ -629,13 +622,16 @@ def test_observation_pass_healthy_container_then_late_container_is_a_late_attemp
     assert late.count == 1
 
 
-def test_observation_pass_oom_and_capacity_breach_in_one_pass_publish_container_oom(
+def test_observation_pass_publishes_an_oom_before_a_pressure_breach_of_the_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
+    """A pass that measures both an OOM and 4 GiB of swap growth publishes the OOM, the run's own fault."""
     services, handle, _fake, reads = _active_pass(tmp_path, monkeypatch, request)
     (target,) = _owned_targets(handle)
-    reads.script["info"] = ["tiny"]
     reads.script[target] = ["oom"]
+    healthy = reads.host_factory
+    assert healthy is not None
+    reads.host_factory = lambda: _swapped(healthy(), 4 * GIB)
 
     failure, evidence = _failure(_pass(services, handle, reads))
 

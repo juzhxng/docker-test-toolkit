@@ -159,6 +159,9 @@ def test_queued_run_records_its_waiting_reasons(tmp_path: Path) -> None:
 
     assert timeline["waiting"], "a queued run names why it waited"
     assert {item["reason"] for item in timeline["waiting"]} <= {"queue-position", "capacity-lock-busy"}
+    assert timeline["schema"] == 2
+    position = [item for item in timeline["waiting"] if item["reason"] == "queue-position"]
+    assert position and position[0]["numbers"] == {"holders": 1, "limit": 1}
     for item in timeline["waiting"]:
         assert timeline["accounting_from_ns"] <= item["first_tick_ns"] <= item["last_tick_ns"] <= timeline["granted_ns"]
     waiter.leave()
@@ -192,7 +195,7 @@ def test_every_new_grant_keeps_the_key_through_active_stopping_and_terminal(tmp_
     timeline = active["hold_timeline"]
     assert timeline["accounting_from_ns"] <= timeline["reserved_ns"] <= timeline["granted_ns"]
     assert timeline["origin"] == active["admission_observation"]["memory"]["origin"]
-    assert timeline["waiting"] == []
+    assert (timeline["schema"], timeline["waiting"]) == (1, [])  # a run that never queued stays readable by 0.7
     assert (timeline["release"], timeline["release_origin"], timeline["released_ns"]) == (None, None, None)
     handle.leave()
     final = _record(services, handle.run_id)

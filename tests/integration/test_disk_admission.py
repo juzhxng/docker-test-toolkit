@@ -161,7 +161,7 @@ def test_never_fit_is_refused_before_mutation_naming_bytes(tmp_path: Path) -> No
 
     message = str(refused.value)
     assert "disk-capacity" in message
-    for text in ("data-root", f"total {50 * GIB}", f"reserve {2 * GIB}", f"estimate {60 * GIB}"):
+    for text in ("data_root_total=50.00GiB", "data_root_reserve=2.00GiB", "estimate=60.00GiB"):
         assert text in message, message
 
 

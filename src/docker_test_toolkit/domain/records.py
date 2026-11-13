@@ -8,6 +8,7 @@ from typing import Any
 
 from docker_test_toolkit.domain.errors import ResourceError, ToolkitError
 from docker_test_toolkit.domain.models import ArtifactIdentity, ExternalDockerResource
+from docker_test_toolkit.domain.numbers import valid_numbers
 from docker_test_toolkit.domain.policy import NAME
 from docker_test_toolkit.domain.telemetry import CATEGORIES, OBSERVERS
 
@@ -255,8 +256,15 @@ def _evidence_int(value: object) -> bool:
     return type(value) is int and value >= 0
 
 
-def _valid_waiting_item(item: object) -> bool:
-    """Return whether one waiting span has the closed shape shared by failure evidence and the hold timeline."""
+def _valid_waiting_item(item: object, schema: int = 1) -> bool:
+    """Return whether one waiting span has the closed shape shared by failure evidence and the hold timeline.
+
+    Schema 2 lets an item carry the ``numbers`` of the last pass that named its reason.
+    """
+    if schema == 2 and isinstance(item, dict) and "numbers" in item:
+        if not valid_numbers(item["numbers"]):
+            return False
+        item = {key: value for key, value in item.items() if key != "numbers"}
     return (
         isinstance(item, dict)
         and set(item) == _EVIDENCE_WAITING_FIELDS
@@ -277,14 +285,22 @@ def validate_failure_evidence(value: object) -> None:
         ResourceError: If the value is not exactly the closed evidence shape.
     """
     invalid = ResourceError("Run record failure evidence is invalid.")
-    if not isinstance(value, dict) or set(value) != _EVIDENCE_FIELDS:
+    if not isinstance(value, dict) or type(value.get("schema")) is not int or value["schema"] not in (1, 2):
+        raise invalid
+    schema = value["schema"]
+    if set(value) != (_EVIDENCE_FIELDS | {"numbers"} if schema == 2 else _EVIDENCE_FIELDS):
         raise invalid
     observed = value["first_observed"]
     admission = value["category"] == "admission-expired"
+    if not isinstance(value["category"], str):
+        raise invalid
+    numbers = value.get("numbers")
+    if schema == 2 and (numbers is not None if admission else not valid_numbers(numbers)):
+        raise invalid  # the figures that decided it; an expiry keeps them on its waiting items instead
+    if value["category"] == "admission-refused" and (schema != 2 or value["waiting"] is not None):
+        raise invalid
     if (
-        value["schema"] != 1
-        or type(value["schema"]) is not int
-        or value["category"] not in CATEGORIES
+        value["category"] not in CATEGORIES
         or value["observer"] not in OBSERVERS
         or not isinstance(value["reason"], str)
         or not value["reason"]
@@ -304,7 +320,11 @@ def validate_failure_evidence(value: object) -> None:
         raise invalid
     if admission:
         waiting = value["waiting"]
-        if not isinstance(waiting, list) or not waiting or not all(_valid_waiting_item(item) for item in waiting):
+        if (
+            not isinstance(waiting, list)
+            or not waiting
+            or not all(_valid_waiting_item(item, schema) for item in waiting)
+        ):
             raise invalid
         pressure = value["pressure"]
         if pressure is not None and (
@@ -347,13 +367,13 @@ def validate_hold_timeline(value: object) -> None:
     release, release_origin, released_ns = value["release"], value["release_origin"], value["released_ns"]
     if (
         type(value["schema"]) is not int
-        or value["schema"] != 1
+        or value["schema"] not in (1, 2)
         or not isinstance(value["origin"], str)
         or not value["origin"]
         or not all(_evidence_int(tick) for tick in ticks)
         or not ticks[0] <= ticks[1] <= ticks[2]
         or not isinstance(value["waiting"], list)
-        or not all(_valid_waiting_item(item) for item in value["waiting"])
+        or not all(_valid_waiting_item(item, value["schema"]) for item in value["waiting"])
     ):
         raise invalid
     if release is None and release_origin is None and released_ns is None:

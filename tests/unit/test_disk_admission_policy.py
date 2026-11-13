@@ -45,9 +45,13 @@ def test_never_fit_is_refused_naming_bytes() -> None:
     decision = disk_fit(_figure(50 * GIB, 50 * GIB), 0, 60 * GIB)
 
     assert (decision.state, decision.reason) == (CapacityState.REFUSED, "disk-capacity")
-    assert decision.detail is not None
-    for text in ("data-root", f"free {50 * GIB}", f"total {50 * GIB}", f"reserve {2 * GIB}", f"estimate {60 * GIB}"):
-        assert text in decision.detail
+    assert decision.numbers == {
+        "data_root_free_bytes": 50 * GIB,
+        "data_root_total_bytes": 50 * GIB,
+        "data_root_reserve_bytes": 2 * GIB,
+        "estimate_bytes": 60 * GIB,
+        "other_leases_bytes": 0,
+    }
 
 
 def test_other_leases_are_subtracted() -> None:
@@ -69,7 +73,7 @@ def test_private_root_floor() -> None:
     assert private_root_fit(GIB).state is CapacityState.READY
     waiting = private_root_fit(GIB - 1)
     assert (waiting.state, waiting.reason) == (CapacityState.WAITING, "disk-capacity")
-    assert waiting.detail is not None and "private-root" in waiting.detail
+    assert waiting.numbers == {"private_root_free_bytes": GIB - 1, "private_root_reserve_bytes": GIB}
 
 
 def test_estimate_is_derived_with_a_quarter_margin_else_the_floor() -> None:
@@ -87,7 +91,7 @@ def test_a_refusal_at_any_place_wins_over_a_wait_at_another() -> None:
     decided = _disk_decision(DiskInputs((waiting, never), None, 60 * GIB, "derived"), 0, None)
 
     assert (decided.state, decided.reason) == (CapacityState.REFUSED, "disk-capacity")
-    assert decided.detail is not None and decided.detail.startswith("vm-disk-host")
+    assert "vm_disk_host_total_bytes" in decided.numbers  # the place that refused
 
 
 def test_the_declared_reserve_is_applied_at_the_decision() -> None:

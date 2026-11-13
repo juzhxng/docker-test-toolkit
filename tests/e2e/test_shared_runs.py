@@ -508,6 +508,58 @@ def test_coholder_containers_attributed_not_external(
         assert not _waited(b, "coholder-capacity")
 
 
+CRASHING = (
+    "services:\n"
+    "  cache:\n"
+    "    image: {image}\n"
+    f"    mem_limit: {GIB // 4}\n"
+    "    restart: always\n"
+    "    command: [sh, -c, 'sleep 0.3; exit 1']\n"
+)
+
+
+def test_a_coholder_restarting_its_containers_ends_no_other_run(
+    tmp_path: Path, redis_image: None, private_installation: Path
+) -> None:
+    """A co-holder whose service crash-loops (the daemon reports it Running with Pid 0 between restarts) ends no
+    other run; a run that does not fit beside both waits with the figures that decided it, then runs."""
+    del redis_image
+    root, control = private_installation, tmp_path / "control"
+    control.mkdir()
+    budget = _pair_budget(root, 3 * GIB // 4)  # B and C fill the binding side to 0.75 GiB: A's 1 GiB does not fit
+    a, b, c = (_stage(tmp_path, f"restart-{name}") for name in "abc")
+    for project in (a, b, c):
+        seed_verdict(root, project)
+    up = {"write": {"compose.yml": CRASHING.format(image=REDIS), "test.env": "A=1\n"}, "docker": UP}
+    worker_a = _held(root, a, control, "a", [up])
+    worker_b = worker_c = None
+    try:
+        assert [step["rc"] for step in _steps(control, "a")] == [0], _steps(control, "a")
+        worker_b = _worker(root, b, control, "b", "hold", container=budget, host=256 * 1024**2, service=0)
+        _wait(control / "entered-b.json")
+        for _ in range(3):  # three of B's observation passes while A's service keeps restarting
+            tick = _record(control, "b")["admission_observation"]["samples"][-1]["tick_ns"]
+            _until(lambda tick=tick: observed_after(_record(control, "b"), tick), message="a later observation of b")
+        worker_c = _worker(root, c, control, "c", "hold", container=budget, host=256 * 1024**2, service=0)
+        _wait(control / "prepared-c.json")
+        _until(lambda: _record(control, "c")["state"] == "queued", message="c queued beside a and b")
+        assert not (control / "entered-c.json").exists()
+        assert _record(control, "b")["infrastructure_failure"] is None
+        (control / "release-a").touch()  # A's own outcome is not asserted: its daemon restarts are its own state
+        worker_a.communicate(timeout=180)
+        _wait(control / "entered-c.json")
+        _release(control, "b", worker_b)
+        _release(control, "c", worker_c)
+    finally:
+        _killing(worker_a, worker_b, worker_c)
+
+    records = {name: _record(control, name) for name in "abc"}
+    assert records["b"]["infrastructure_failure"] is None and records["c"]["infrastructure_failure"] is None
+    assert all(record["infrastructure_failure"] != "unknown-job-containment" for record in records.values())
+    waits = [item for item in records["c"]["hold_timeline"]["waiting"] if item["reason"] == "coholder-capacity"]
+    assert waits and {"coholders", "external_bytes"} <= set(waits[0]["numbers"])
+
+
 def test_own_host_envelope_breach_fails_under_production_observation(
     tmp_path: Path, redis_image: None, private_installation: Path
 ) -> None:

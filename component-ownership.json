@@ -42,6 +42,7 @@
     {"mode": "0644", "owner": "lifecycle", "path": "src/docker_test_toolkit/domain/command_guard.py"},
     {"mode": "0644", "owner": "lifecycle", "path": "src/docker_test_toolkit/domain/errors.py"},
     {"mode": "0644", "owner": "lifecycle", "path": "src/docker_test_toolkit/domain/models.py"},
+    {"mode": "0644", "owner": "lifecycle", "path": "src/docker_test_toolkit/domain/numbers.py"},
     {"mode": "0644", "owner": "lifecycle", "path": "src/docker_test_toolkit/domain/platform.py"},
     {"mode": "0644", "owner": "lifecycle", "path": "src/docker_test_toolkit/domain/policy.py"},
     {"mode": "0644", "owner": "lifecycle", "path": "src/docker_test_toolkit/domain/records.py"},

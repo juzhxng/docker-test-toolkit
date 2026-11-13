@@ -92,7 +92,17 @@ def test_own_budget_failure_at_publish_revokes_as_today(tmp_path: Path) -> None:
     entering.join(timeout=40)
 
     assert entering.error is not None
-    assert _record(run)["infrastructure_failure"] == "unsupported-base-capacity"
+    record = _record(run)
+    evidence = record["failure_evidence"]
+    assert record["infrastructure_failure"] == "unsupported-base-capacity"
+    assert (evidence["schema"], evidence["category"], evidence["reason"], evidence["observer"]) == (
+        2,
+        "admission-refused",
+        "unsupported-base-capacity",
+        "admission",
+    )
+    assert evidence["numbers"]["container_bytes"] == 100 * GIB
+    assert "container=100.00GiB" in str(entering.error)
 
 
 def test_unreadable_holder_admits_nobody_without_reason(tmp_path: Path) -> None:
@@ -154,14 +164,16 @@ def _stage_count(log: Path, stage: str) -> int:
     return sum(1 for line in lines if line["kind"] == "stage" and line["stage"] == stage)
 
 
-def _external_capacity_account(services) -> None:
-    """A 2 GiB daemon with one foreign 1 GiB container: a 1 GiB phase (1.5 GiB guest base) never fits beside it."""
-    bind_test_capacity(services, daemon_memory_bytes=2 * GIB, containers=[_planted_container("e", "external", GIB)])
+def _external_capacity_account(services, memory: int = GIB) -> None:
+    """A 2 GiB daemon with one foreign container: a 1 GiB phase (1.5 GiB guest base) never fits beside its 1 GiB limit,
+    and a foreign container without a limit (``memory`` 0) is unknown external capacity."""
+    bind_test_capacity(services, daemon_memory_bytes=2 * GIB, containers=[_planted_container("e", "external", memory)])
 
 
-def test_admission_expiry_records_waiting_reasons_and_pressure(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("memory", "reason"), [(GIB, "external-capacity"), (0, "unknown-external-capacity")])
+def test_admission_expiry_records_waiting_reasons_and_pressure(tmp_path: Path, memory: int, reason: str) -> None:
     services, projects = three_private_projects(tmp_path)
-    _external_capacity_account(services)
+    _external_capacity_account(services, memory)
     run = services.open_run(_spec(projects[0], "expiry", 1, wait_seconds=3))
     deadline = _record(run)["queue_deadline"]
     entering = EnterThread(run)
@@ -176,8 +188,15 @@ def test_admission_expiry_records_waiting_reasons_and_pressure(tmp_path: Path) -
     assert (evidence["category"], evidence["observer"], evidence["detail"]) == ("admission-expired", "admission", None)
     assert evidence["first_observed"]["state"] in ("queued", "admitting")
     waiting = evidence["waiting"]
-    assert [item["reason"] for item in waiting] == ["external-capacity"]
-    assert evidence["reason"] == "external-capacity"
+    assert [item["reason"] for item in waiting] == [reason]
+    assert evidence["reason"] == reason
+    assert (evidence["schema"], evidence["numbers"]) == (2, None)  # the figures sit on the waiting items
+    expected_numbers = (
+        {"daemon_memory_bytes": 2 * GIB, "external_bytes": GIB, "external_containers": 1, "container_bytes": GIB}
+        if memory
+        else {"unlimited_containers": 1, "external_containers": 1}
+    )
+    assert waiting[0]["numbers"].items() >= expected_numbers.items()
     span = max(item["last_tick_ns"] for item in waiting) - min(item["first_tick_ns"] for item in waiting)
     assert all(0 < item["waited_ns"] <= span for item in waiting)
     assert max(item["last_tick_ns"] for item in waiting) == deadline["expires_ns"]  # the final pass closes at expiry
@@ -190,7 +209,7 @@ def test_admission_expiry_records_waiting_reasons_and_pressure(tmp_path: Path) -
         "daemon_memory_bytes": 2 * GIB,
     }
     detail = lifecycle._admission_ended_detail(record)
-    assert "external-capacity" in detail and "admission-expired" not in detail  # the reasons, not the category name
+    assert reason in detail and "admission-expired" not in detail  # the reasons, not the category name
 
 
 def test_admission_expiry_before_any_capacity_sample_has_no_pressure(tmp_path: Path) -> None:
@@ -326,6 +345,7 @@ def test_admission_persistent_client_exit_expires_naming_the_command_and_cause(t
     assert _stage_count(log, "publish-pending") == 0  # nothing was ever published on the missing read
     assert [item["reason"] for item in evidence["waiting"]] == [message]
     assert evidence["reason"] == message
+    assert evidence["schema"] == 1 and "numbers" not in evidence["waiting"][0]  # free text compares no quantity
 
 
 def test_admission_client_exit_that_persists_revokes_naming_the_command_and_cause(tmp_path: Path) -> None:
@@ -548,6 +568,7 @@ def test_expiry_message_names_the_waits(tmp_path: Path) -> None:
     entering.join(timeout=40)
 
     assert "Original admission deadline expired before a grant (waited: external-capacity" in str(entering.error)
+    assert "external=1.00GiB" in str(entering.error) and "daemon_memory=2.00GiB" in str(entering.error)
 
 
 def test_expiry_message_waits_for_a_late_guardian_write(tmp_path: Path) -> None:

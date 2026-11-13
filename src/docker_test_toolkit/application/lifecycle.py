@@ -33,7 +33,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from itertools import pairwise
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import BinaryIO, Callable, ParamSpec, TextIO, TypeGuard, TypeVar, cast
 
 from docker_test_toolkit.application import admission as account_queue
@@ -139,7 +139,6 @@ from docker_test_toolkit.domain.models import (
     TOOLKIT_VERSION,
     ArtifactIdentity,
     DaemonIdentity,
-    DockerObservation,
     DockerResult,
     Endpoint,
     ExactInspection,
@@ -148,6 +147,7 @@ from docker_test_toolkit.domain.models import (
     PhaseBudget,
     PodmanBinding,
 )
+from docker_test_toolkit.domain.numbers import numbers_for, oom_numbers, render_numbers, schema_for
 from docker_test_toolkit.domain.platform import Platform, classify_emulation, daemon_platform, parse_requested_platform
 from docker_test_toolkit.domain.policy import (
     DEAD_GRACE_NS,
@@ -184,6 +184,7 @@ from docker_test_toolkit.domain.policy import (
     combined,
     counted_grant,
     cpu_pressure_blocks_join,
+    cpu_pressure_numbers,
     deadline_unexpired,
     derive_reserve,
     detect_runtime,
@@ -193,6 +194,7 @@ from docker_test_toolkit.domain.policy import (
     engine_stats,
     fifo_head,
     has_shared,
+    holder_numbers,
     image_in_use,
     is_creation_prefix,
     known_fields,
@@ -1021,7 +1023,6 @@ class _ObservationReads:
     engine: Callable[[object, str, Deadline | None], "EngineReply"] | None = None
     rss: Callable[[ProcessIdentity, Deadline], int] | None = None
     host: Callable[[NativeClock, Deadline | None], "HostMemoryObservation"] | None = None
-    jobs: Callable[[list[dict], set[str]], "tuple[JobMemoryLimit, ...] | None"] | None = None
     endpoint: Callable[[object, Deadline | None], str] | None = None
 
 
@@ -1033,11 +1034,10 @@ def configure_observation_reads(
     engine: Callable[[object, str, Deadline | None], "EngineReply"] | None = None,
     rss: Callable[[ProcessIdentity, Deadline], int] | None = None,
     host: Callable[[NativeClock, Deadline | None], "HostMemoryObservation"] | None = None,
-    jobs: Callable[[list[dict], set[str]], "tuple[JobMemoryLimit, ...] | None"] | None = None,
     endpoint: Callable[[object, Deadline | None], str] | None = None,
 ) -> None:
     """Replace the observation reads (``None`` restores the production read); test composition only."""
-    _READS.engine, _READS.rss, _READS.host, _READS.jobs = engine, rss, host, jobs
+    _READS.engine, _READS.rss, _READS.host = engine, rss, host
     _READS.endpoint = endpoint
 
 
@@ -1061,13 +1061,6 @@ def _host_read(clock: NativeClock, deadline: Deadline | None) -> "HostMemoryObse
     if reader is not None:
         return reader(clock, deadline)
     return observe_host_memory(clock) if deadline is None else observe_host_memory(clock, deadline=deadline)
-
-
-def _job_read(
-    containers: list[dict], owned_ids: set[str], is_stopped: Callable[[str], bool] | None = None
-) -> "tuple[JobMemoryLimit, ...] | None":
-    reader = _READS.jobs  # a test-composition override only (factories.testing)
-    return _linux_job_limits(containers, owned_ids, is_stopped) if reader is None else reader(containers, owned_ids)
 
 
 # The single-letter task states proc_pid_status prints (fs/proc/array.c task_state_array).
@@ -7348,7 +7341,6 @@ def enter_run(context: RunContext, *, _test_directory: Path | None = None) -> Ru
                 "Admission ended before grant"
                 + (f": {data['infrastructure_failure']}" if data["infrastructure_failure"] else "")
                 + _admission_ended_detail(data)
-                + _disk_refusal_detail(context, data, _test_directory)
                 + _small_vm_detail(data, _test_directory)
                 + "."
             )
@@ -7470,21 +7462,6 @@ def _ensure_probe_image(topology: str) -> None:
         pass  # the guardian's own Docker reads decide whether the daemon is usable; this is only the image
 
 
-def _disk_refusal_detail(context: RunContext, data: dict, test_directory: Path | None) -> str:
-    """Name the place a never-fitting run was refused on, read again by the requester (no record carries figures).
-
-    A refusal does not depend on other runs' leases, so the requester's own reading reproduces it.
-    """
-    if data["infrastructure_failure"] != "disk-capacity":
-        return ""
-    try:
-        account = Path(data["account_directory"])
-        decided = _disk_decision(_disk_inputs(context, data, test_directory), 0, declared_disk_reserve(account))
-    except (OSError, ResourceError, InfrastructureFailure):
-        return ""
-    return f" ({decided.detail})" if decided.state == CapacityState.REFUSED and decided.detail else ""
-
-
 def _small_vm_detail(data: dict, test_directory: Path | None) -> str:
     """Name the VM size that admits a run refused for its base capacity or its CPUs, read again by the requester.
 
@@ -7532,9 +7509,16 @@ def _admission_ended_detail(data: dict) -> str:
         return ""
     if evidence["category"] == "admission-expired":
         longest = sorted(evidence["waiting"], key=lambda item: item["waited_ns"], reverse=True)[:3]
-        return " (waited: " + ", ".join(f"{item['reason']} {item['waited_ns'] / 1e9:.1f} s" for item in longest) + ")"
+        waits = (f"{item['reason']} {item['waited_ns'] / 1e9:.1f} s{_figures(item)}" for item in longest)
+        return " (waited: " + ", ".join(waits) + ")"
     named = "" if evidence["reason"] == evidence["category"] else f": {evidence['reason']}"  # what failed, when known
-    return f" ({evidence['category']}, observer {evidence['observer']}{named})"
+    return f" ({evidence['category']}, observer {evidence['observer']}{named}{_figures(evidence)})"
+
+
+def _figures(item: Mapping[str, object]) -> str:
+    """Render the numbers of an evidence item after its reason; nothing when it has none."""
+    numbers = item.get("numbers")
+    return f" [{render_numbers(numbers)}]" if isinstance(numbers, Mapping) and numbers else ""
 
 
 def _apply_withdrawal(data: dict, *, requester: dict, outcome: str, clock: NativeClock) -> dict:
@@ -7595,8 +7579,8 @@ def _evidence_summary(data: dict) -> str:
     else:
         when = "first observed (interval unavailable (clock origin changed))"
     return (
-        f" (first failure {evidence['category']}: {evidence['reason']}, observer {evidence['observer']}, {when},"
-        f" state {observed['state']}, phase {observed['phase']})"
+        f" (first failure {evidence['category']}: {evidence['reason']}{_figures(evidence)}, observer"
+        f" {evidence['observer']}, {when}, state {observed['state']}, phase {observed['phase']})"
     )
 
 
@@ -7624,12 +7608,19 @@ def _observation_evidence(
     observer: str,
     first_tick: tuple[str, int],
     detail: str | None = None,
+    numbers: Mapping[str, int] | None = None,
 ) -> dict:
-    """Build the observation-kind ``failure_evidence`` value from the record being written."""
+    """Build the observation-kind ``failure_evidence`` value; schema 2 carries the ``numbers`` that decided it.
+
+    A ``container-oom`` takes its numbers from the record being written, whichever writer records it.
+    """
     grant = data.get("grant")
     origin, tick_ns = first_tick
+    numbers = oom_numbers(data) if reason == "container-oom" else numbers
+    figures = {"numbers": dict(numbers)} if numbers else {}
     return {
-        "schema": 1,
+        "schema": schema_for(bool(figures)),
+        **figures,
         "category": category,
         "reason": reason,
         "detail": detail,
@@ -7777,7 +7768,6 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
                 if data["owned_resources"]["containers"][container_id]["evidence"].get("control") is not None
             )
         )
-        capacity_ids = managed_ids | owned_ids
         mutation_pending = data["pending_operation"] is not None and data["pending_operation"]["kind"] in (
             "compose-mutate",
             "container-control",
@@ -7791,40 +7781,21 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
     observations: dict[str, ContainerObservation] = {}
     owned_observations = None
     oom = False
-    reserve = read_host_reserve(Path(data["account_directory"]))  # the account's setting, read each pass
     try:
         docker = _docker()
-        mutation_plan = data["resources"].get("compose") if mutation_pending else None
-        mutation_limits = None
-        if mutation_plan is not None:
-            mutation_limits = {
-                service: sum(
-                    resource["memory_bytes"]
-                    for resource in data["resources"]["containers"].values()
-                    if resource["service"] == service and resource["state"] != "removed"
-                )
-                for service in mutation_plan["services"]
-            }
         step = "engine"
         shared = _record_mode(data) == AdmissionMode.SHARED
         # The holders read before the host samples excuse them too: one that leaves before the co-holder read below had
         # its memory in the samples.
         account = Path(data["account_directory"])
         before = _gather_coholders(lambda: _read_coholders(context, account, deadline)) if shared else None
-        inventory = docker.objects("container", deadline=deadline) if shared else None
-        daemon_id, capacity = observe_capacity(
-            docker,
-            data["topology"],
-            capacity_ids,
-            mutation_plan=mutation_plan,
-            mutation_limits=mutation_limits,
-            inventory=inventory,
-            deadline=deadline,
-        )
-        if daemon_id != data["grant"]["daemon_id"]:
+        # After the grant only the daemon's identity is read here; the run's own containers are read one by one below.
+        identified, _info = _identified_info(docker, deadline, expected=data["grant"]["daemon_id"])
+        if identified != data["grant"]["daemon_id"]:
             raise ResourceError(
                 "Docker daemon changed during active observation.", reason="daemon-identity-changed", observer="engine"
             )
+        daemon_id: str = data["grant"]["daemon_id"]
         step = "host"
         current = _host_read(clock, deadline)
         # A shared run reads its co-holders after the inventory, so every inventoried co-holder container is explained,
@@ -7852,15 +7823,8 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
         ]
         window = max(windows, key=lambda sample: sample.tick_ns)
         budget = _phase_budgets(data["phases"], data["initial_phase"])[data["grant"]["phase"]]
-        if coholders is None or inventory is None:
-            capacity_decision = assess_capacity(budget, replace(capacity, host_reserve_bytes=reserve))
-        else:
-            capacity_decision = observation_decision(
-                budget,
-                _coholder_snapshot(capacity, inventory, coholders.holders, coholders.host_reserve_bytes),
-                [holder.reservation for holder in coholders.holders],
-                coholders.unknown,
-            )
+        if coholders is not None:
+            capacity_decision = observation_decision(coholders.unknown)
             terms = _shared_pressure_terms(
                 coholders.grants,
                 coholder_seen=bool(
@@ -7900,12 +7864,14 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
             fault = (error, "container")
     # The live failure tuple decides first: a measured OOM, then a capacity breach, then a pressure breach.
     breach: tuple[str, str] | None = None
+    figures: Mapping[str, int] = {}
     if oom:
         breach = ("container-oom", "container")
     elif capacity_decision is not None and capacity_decision.state != CapacityState.READY:
         breach = (capacity_decision.reason, "engine")
     elif pressure is not None and pressure.state != CapacityState.READY:
         breach = (pressure.reason, "process" if pressure.reason == "host-process-envelope" else "host")
+        figures = pressure.numbers
     tick = (clock.origin, clock.read())
     if breach is not None and fault is not None:
         reason, observer = breach
@@ -7914,7 +7880,12 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
             reason,
             revision,
             lambda record: _observation_evidence(
-                record, category="breach", reason=reason, observer=observer, first_tick=tick
+                record,
+                category="breach",
+                reason=reason,
+                observer=observer,
+                first_tick=tick,
+                numbers=figures,
             ),
         )
         return
@@ -7964,7 +7935,12 @@ def _observe_active_run(context: RunContext, late: _LateAttempts | None = None, 
                 current_data,
                 reason,
                 _observation_evidence(
-                    current_data, category="breach", reason=reason, observer=observer, first_tick=tick
+                    current_data,
+                    category="breach",
+                    reason=reason,
+                    observer=observer,
+                    first_tick=tick,
+                    numbers=figures,
                 ),
             )
         current_data["revision"] += 1
@@ -8778,11 +8754,11 @@ def _scan_image_sizes(context: RunContext, data: dict) -> list[int] | None:
     return None if newest is None else newest[1]
 
 
-def _never_fits(disk: DiskInputs, data: dict) -> str | None:
+def _never_fits(disk: DiskInputs, data: dict) -> CapacityDecision | None:
     """Return the refusal of a run that cannot fit even beside no other lease (it depends on no other run, design
     2.6), or ``None``."""
     decided = _disk_decision(disk, 0, declared_disk_reserve(Path(data["account_directory"])))
-    return decided.reason if decided.state == CapacityState.REFUSED else None
+    return decided if decided.state == CapacityState.REFUSED else None
 
 
 def _disk_decision(disk: DiskInputs, other_leases: int, declared: int | None) -> CapacityDecision:
@@ -8925,10 +8901,11 @@ class _WaitSpan:
     first_tick_ns: int
     last_tick_ns: int
     waited_ns: int = 0
+    numbers: dict[str, int] = field(default_factory=dict)  # of the last pass that named the reason
 
 
 def _waiting_items(spans: Mapping[str, _WaitSpan]) -> list[dict]:
-    """Return waiting spans in the shared evidence shape, ordered by first tick, then reason."""
+    """Return waiting spans in the shared evidence shape, ordered by first tick, then reason (numbers when any)."""
     ordered = sorted(spans.items(), key=lambda item: (item[1].first_tick_ns, item[0]))
     return [
         {
@@ -8936,20 +8913,24 @@ def _waiting_items(spans: Mapping[str, _WaitSpan]) -> list[dict]:
             "first_tick_ns": span.first_tick_ns,
             "last_tick_ns": span.last_tick_ns,
             "waited_ns": span.waited_ns,
+            **({"numbers": dict(span.numbers)} if span.numbers else {}),
         }
         for reason, span in ordered
     ]
 
 
-def _attribute_pass(spans: dict[str, _WaitSpan], start: int, reasons: set[str], tick: int) -> None:
-    """Attribute one pass from ``start`` to ``tick`` to every reason it held.
+def _attribute_pass(
+    spans: dict[str, _WaitSpan], start: int, reasons: Mapping[str, Mapping[str, int]], tick: int
+) -> None:
+    """Attribute one pass from ``start`` to ``tick`` to every reason it held, with that pass's numbers when it had any.
 
     A pass that named no reason continues the wait of the last pass that did (the queue budget cut it short).
     """
-    for reason in reasons:
+    for reason, figures in reasons.items():
         span = spans.setdefault(reason, _WaitSpan(start, start))
         span.last_tick_ns = tick
         span.waited_ns += tick - start
+        span.numbers = dict(figures) or span.numbers  # the last pass that had numbers for it
 
 
 class _AdmissionWaits:
@@ -8963,8 +8944,8 @@ class _AdmissionWaits:
     def __init__(self) -> None:
         self.first_tick_ns: int | None = None  # the first pass's start: waiting is complete from here
         self._spans: dict[str, _WaitSpan] = {}
-        self._pass: tuple[int, set[str]] | None = None
-        self._last_reasons: set[str] = set()
+        self._pass: tuple[int, dict[str, Mapping[str, int]]] | None = None
+        self._last_reasons: dict[str, Mapping[str, int]] = {}
         self._pressure: dict[str, int] | None = None
         self._client_exits = 0  # consecutive passes that failed on a Docker client exit
 
@@ -8982,12 +8963,12 @@ class _AdmissionWaits:
         if self.first_tick_ns is None:
             self.first_tick_ns = tick
         self.close(tick)
-        self._pass = (tick, set())
+        self._pass = (tick, {})
 
-    def note(self, reason: str) -> None:
-        """Name a reason that held during the current pass."""
+    def note(self, reason: str, numbers: Mapping[str, int] | None = None) -> None:
+        """Name a reason that held during the current pass, with the numbers that decided it."""
         if self._pass is not None:
-            self._pass[1].add(reason)
+            self._pass[1][reason] = numbers or {}
 
     def close(self, tick: int) -> None:
         """End the current pass at ``tick`` and attribute its interval to every reason it named."""
@@ -9026,6 +9007,8 @@ class _AdmissionWaits:
             first_tick=(clock.origin, clock.read()),  # captured at the write, like every kind but observation-late
         )
         evidence.update(waiting=waiting, pressure=self._pressure)
+        if any("numbers" in item for item in waiting):
+            evidence.update(schema=schema_for(True), numbers=None)  # the figures sit on the waiting items
         return evidence
 
 
@@ -9054,6 +9037,27 @@ def _revoke_ended_wait(
         _test_directory=test_directory,
         _failure_reason=failure_reason,
         _admission_evidence=waits.evidence if expired else None,
+    )
+
+
+def _revoke_refused(
+    context: RunContext, capacity: ExitStack, test_directory: Path | None, reason: str, numbers: Mapping[str, int]
+) -> RunStatus:
+    """Revoke a run whose admission was refused; a refusal decided from compared numbers records them as evidence."""
+    clock = NativeClock()
+    first = (clock.origin, clock.read())
+
+    def evidence(data: dict) -> dict:
+        return _observation_evidence(
+            data, category="admission-refused", reason=reason, observer="admission", first_tick=first, numbers=numbers
+        )
+
+    return revoke_ungranted(
+        context,
+        capacity,
+        _test_directory=test_directory,
+        _failure_reason=reason,
+        _admission_evidence=evidence if numbers else None,
     )
 
 
@@ -9161,9 +9165,7 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                 never = None if disk is None else _never_fits(disk, data)
                 if never is not None:
                     # refused before any Docker mutation of this pass, another run's takeover included
-                    return revoke_ungranted(
-                        context, capacity_stack, _test_directory=test_directory, _failure_reason=never
-                    )
+                    return _revoke_refused(context, capacity_stack, test_directory, never.reason, never.numbers)
                 # detection is part of every admission pass, whether or not this pass can reserve
                 reconcile_account(context, _test_directory=test_directory)
                 reserved = reserve_capacity(
@@ -9178,14 +9180,12 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                 if reserved.waiting == "disk-capacity":
                     retention_after_release(context, test_directory, "disk-wait")  # it runs only with no holder
                 if reserved.refusal is not None:  # decided inside the section; revoked only after leaving it
-                    return revoke_ungranted(
-                        context, capacity_stack, _test_directory=test_directory, _failure_reason=reserved.refusal
-                    )
+                    return _revoke_refused(context, capacity_stack, test_directory, reserved.refusal, reserved.numbers)
                 capacity = reserved.descriptor
                 if capacity is not None:
                     reserved_ns = NativeClock().read()  # the reservation tick, read before the window
                 if reserved.waiting is not None:
-                    waits.note(reserved.waiting)
+                    waits.note(reserved.waiting, reserved.numbers)
                 if pass_sample is None:
                     queued.clear()  # a pass that yields no sample clears the buffer, whether or not it reserved
                 elif capacity is None:
@@ -9251,35 +9251,20 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                     else select_window_start(queued.samples(), post.samples(), current, window_ns=window_ns)
                 )
                 decisions = [assess_capacity(budget, snapshot) for budget in budgets.values()]
-                if any(decision.state == CapacityState.REFUSED for decision in decisions):
-                    reason = next(decision.reason for decision in decisions if decision.state == CapacityState.REFUSED)
-                    return revoke_ungranted(
-                        context,
-                        capacity_stack,
-                        _test_directory=test_directory,
-                        _failure_reason=reason,
-                    )
+                refused = next((decision for decision in decisions if decision.state == CapacityState.REFUSED), None)
+                if refused is not None:
+                    return _revoke_refused(context, capacity_stack, test_directory, refused.reason, refused.numbers)
                 # The first post-reservation sample stays a continuity baseline: a counter that goes backwards after the
                 # reservation is still refused, whichever sample starts the window.
                 continuity = None if unscripted else baseline
                 pressure = assess_pressure(current, window_start, admission_baseline=continuity, window_ns=window_ns)
                 if pressure.state == CapacityState.REFUSED:
-                    print(
-                        f"Admission refused ({pressure.reason}): current {current}, window start {window_start}, "
-                        f"baseline {continuity}.",
-                        file=sys.stderr,
-                    )
-                    return revoke_ungranted(
-                        context,
-                        capacity_stack,
-                        _test_directory=test_directory,
-                        _failure_reason=pressure.reason,
-                    )
+                    return _revoke_refused(context, capacity_stack, test_directory, pressure.reason, pressure.numbers)
                 for decision in decisions:
                     if decision.state == CapacityState.WAITING:
-                        waits.note(decision.reason)
+                        waits.note(decision.reason, decision.numbers)
                 if pressure.state == CapacityState.WAITING:
-                    waits.note(pressure.reason)
+                    waits.note(pressure.reason, pressure.numbers)
                 if (
                     all(decision.state == CapacityState.READY for decision in decisions)
                     and pressure.state == CapacityState.READY
@@ -9317,12 +9302,12 @@ def _guardian_loop(context: RunContext, attempt: str, test_directory: Path | Non
                         _admission_baseline=continuity,
                         disk=fresh_disk,
                     )
-                    if isinstance(published, _Refused):  # gate point 4 refused inside its section; revoke outside it
-                        return revoke_ungranted(
-                            context, capacity_stack, _test_directory=test_directory, _failure_reason=published.reason
+                    if isinstance(published, _Refused):  # refused inside its section; revoked outside it
+                        return _revoke_refused(
+                            context, capacity_stack, test_directory, published.reason, published.numbers
                         )
                     if isinstance(published, _Waiting):  # grant order, the limit or co-holders: retry next pass
-                        waits.note(published.reason)
+                        waits.note(published.reason, published.numbers)
                     else:
                         break
             except _AdmissionFault as error:
@@ -12726,36 +12711,43 @@ def admission_decision(
             return alone
     if not coholders and not shared:
         return CapacityDecision(CapacityState.READY, "static-capacity")
-    together = assess_capacity(_as_budget(combined([effective_reservation(phases), *coholders])), snapshot)
+    both = _as_budget(combined([effective_reservation(phases), *coholders]))
+    together = assess_capacity(both, snapshot)
     if together.state == CapacityState.READY or not coholders:
         return together
-    return CapacityDecision(CapacityState.WAITING, "coholder-capacity", together.guest_bytes, together.host_bytes)
+    operand = "cpu" if together.reason == "insufficient-cpu" else "memory"
+    held = combined(coholders)
+    values = {
+        **_capacity_values(both, snapshot),
+        "coholders": len(coholders),
+        "coholder_container_bytes": held.container_bytes,
+        "coholder_host_process_bytes": held.host_process_bytes,
+    }
+    return CapacityDecision(
+        CapacityState.WAITING,
+        "coholder-capacity",
+        together.guest_bytes,
+        together.host_bytes,
+        numbers=numbers_for("coholder-capacity", values, operand),
+    )
 
 
-def observation_decision(
-    budget: PhaseBudget, snapshot: "CapacitySnapshot", coholders: Sequence[PhaseReservation], unknown: bool
-) -> "CapacityDecision":
-    """Check a shared run's current phase beside its co-holders' reservations.
+def observation_decision(unknown: bool) -> "CapacityDecision":
+    """Judge a granted shared run on the toolkit's own records only, never on the capacity sums of the moment.
 
-    An unreadable co-holder record is account corruption: REFUSED ``unknown-external-capacity`` (sticky).
+    An unreadable co-holder record is account corruption: REFUSED ``coholder-record-unreadable`` (sticky).
     """
     if unknown:
-        return CapacityDecision(CapacityState.REFUSED, UNKNOWN_EXTERNAL_CAPACITY)
-    if not coholders:
-        return assess_capacity(budget, snapshot)
-    current = PhaseReservation(
-        budget.container_bytes, budget.host_process_bytes, budget.daemon_cpus, budget.host_threads
-    )
-    return assess_capacity(_as_budget(combined([current, *coholders])), snapshot)
+        return CapacityDecision(CapacityState.REFUSED, "coholder-record-unreadable")
+    return CapacityDecision(CapacityState.READY, "static-capacity")
 
 
 @dataclass(frozen=True)
 class CoholderRead:
-    """One read of the co-holders' records: their facts, whether any record was unreadable, and the host reserve."""
+    """One read of the co-holders' records: their facts and whether any record was unreadable."""
 
     holders: tuple[HolderFacts, ...]
     unknown: bool
-    host_reserve_bytes: int
     revisions: tuple[tuple[str, int], ...] = ()
     grants: tuple[Grant, ...] | None = ()  # None: the grants log was unreadable or invalid
     held: tuple[Grant, ...] = ()  # the current granted co-holders' own grants, read from their records
@@ -12817,14 +12809,13 @@ def _gather_coholders(read_once: Callable[[], CoholderRead], attempts: int = 3) 
 
 
 def _read_coholders(context: RunContext, directory: Path, deadline: "Deadline") -> CoholderRead:
-    """Read the co-holders' queue entries and records and the host reserve under one short metadata section.
+    """Read the co-holders' queue entries and records under one short metadata section.
 
     The limit is not read: it governs future admissions, never an incumbent's observation.
     """
     deadline_ns = time.monotonic_ns() + deadline.remaining_ns(NativeClock())
     with lock(Context(directory, directory), "metadata", deadline_ns=deadline_ns) as anchor:
         state = _load_queue(directory, anchor)
-        reserve = read_host_reserve(directory)
         holders: list[HolderFacts] = []
         revisions: list[tuple[str, int]] = []
         held: list[Grant] = []
@@ -12848,7 +12839,7 @@ def _read_coholders(context: RunContext, directory: Path, deadline: "Deadline") 
             # in the allowance before its recovery repairs the log. One grant identity counts once.
             identities = {(grant.run_id, grant.generation, grant.origin) for grant in logged}
             grants = (*logged, *(g for g in held if (g.run_id, g.generation, g.origin) not in identities))
-    return CoholderRead(tuple(holders), unknown, reserve, tuple(revisions), grants, tuple(held))
+    return CoholderRead(tuple(holders), unknown, tuple(revisions), grants, tuple(held))
 
 
 def enroll_guardian(context: RunContext, attempt: str, *, _test_directory: Path | None = None) -> int:
@@ -12911,9 +12902,10 @@ def _is_own_reference(entry: QueueEntry, context: RunContext, attempt: str, tick
 
 @dataclass(frozen=True)
 class _Refused:
-    """A publication the version gate refused inside its section: nothing was written; the run must be revoked."""
+    """A publication refused inside its section: nothing was written; the run must be revoked."""
 
     reason: str
+    numbers: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -12921,6 +12913,7 @@ class _Waiting:
     """A publication that must wait inside its section (grant order, the limit, co-holders): nothing was written."""
 
     reason: str
+    numbers: Mapping[str, int] = field(default_factory=dict)
 
 
 def _entry_view(run_id: str, entry: QueueEntry, facts: "EntryFacts") -> QueueEntryView:
@@ -12947,6 +12940,7 @@ class ReserveOutcome:
     descriptor: TextIO | None
     waiting: str | None
     refusal: str | None = None  # the version gate's reason: the run must be revoked after leaving the sections
+    numbers: Mapping[str, int] = field(default_factory=dict)  # those of the decision behind ``waiting`` or ``refusal``
 
 
 def _holders_present(data: dict) -> bool:
@@ -13076,7 +13070,8 @@ def reserve_capacity(
             )
             if verdict.run_id != context.run_id and not overtakes:  # a head's reason about its own mode is its alone
                 head = fifo_head(views) == context.run_id
-                return ReserveOutcome(None, verdict.reason if head and verdict.reason else "queue-position")
+                reason = verdict.reason if head and verdict.reason else "queue-position"
+                return ReserveOutcome(None, reason, numbers=holder_numbers(views, settings.limit))
             holding = [(run_id, entry) for run_id, entry in state.entries.items() if entry.phase in HOLDER_PHASES]
             if holding:  # a shared joiner (the verdict admits nothing else beside holders)
                 if inputs is None:
@@ -13085,9 +13080,9 @@ def reserve_capacity(
                 for run_id, entry in holding:
                     holder_record = _entry_record(run_id, entry, directory)
                     if holder_record is None:
-                        return ReserveOutcome(None, "exclusive-holder")
+                        return ReserveOutcome(None, "exclusive-holder", numbers=holder_numbers(views, settings.limit))
                     if _other_repository(settings, data, holder_record):
-                        return ReserveOutcome(None, "other-repository")
+                        return ReserveOutcome(None, "other-repository", numbers=holder_numbers(views, settings.limit))
                     holders.append(_holder_facts(run_id, entry, holder_record))
                 snapshot = _coholder_snapshot(inputs.snapshot, inputs.containers, holders, settings.host_reserve_bytes)
                 decided = admission_decision(
@@ -13096,19 +13091,19 @@ def reserve_capacity(
                     [holder.reservation for holder in holders],
                 )
                 if decided.state == CapacityState.REFUSED:
-                    return ReserveOutcome(None, None, decided.reason)
+                    return ReserveOutcome(None, None, decided.reason, decided.numbers)
                 if decided.state != CapacityState.READY:
-                    return ReserveOutcome(None, decided.reason)
+                    return ReserveOutcome(None, decided.reason, numbers=decided.numbers)
                 if cpu_pressure_blocks_join(inputs.cpu_pressure):
-                    return ReserveOutcome(None, "cpu-pressure")
+                    return ReserveOutcome(None, "cpu-pressure", numbers=cpu_pressure_numbers(inputs.cpu_pressure))
             gated = disk is not None and data["purpose"] != RELEASE_PURPOSE
             leases: dict[str, Lease] = {}
             if disk is not None and gated:
                 fit, leases = _disk_gate(disk, directory, state, context.run_id, clock.origin)
                 if fit.state == CapacityState.REFUSED:
-                    return ReserveOutcome(None, None, fit.reason)
+                    return ReserveOutcome(None, None, fit.reason, fit.numbers)
                 if fit.state != CapacityState.READY:
-                    return ReserveOutcome(None, fit.reason)
+                    return ReserveOutcome(None, fit.reason, numbers=fit.numbers)
             try:
                 descriptor = capacity.enter_context(
                     lock(account, "capacity", shared=mode == AdmissionMode.SHARED, nonblocking=True)
@@ -13222,10 +13217,13 @@ def _publish_grant(
             current.origin != clock.origin
             or current.physical_bytes != snapshot.host_memory_bytes
             or not 0 <= now - current.tick_ns <= 5_000_000_000
-            or assess_pressure(current, window_start, admission_baseline=_admission_baseline, window_ns=window_ns).state
-            != CapacityState.READY
         ):
             raise ResourceError("A fresh complete native pressure observation is required before grant.")
+        pressure = assess_pressure(current, window_start, admission_baseline=_admission_baseline, window_ns=window_ns)
+        if pressure.state == CapacityState.WAITING:
+            return _Waiting(pressure.reason, pressure.numbers)  # pressure rose since the reservation: retry
+        if pressure.state == CapacityState.REFUSED:
+            return _Refused(pressure.reason, pressure.numbers)
         if observe_process(_identity_from_json(data["requester"])) != "executing":
             raise ResourceError("Requester ended before grant publication.")
         account = Context(directory, directory)
@@ -13253,14 +13251,18 @@ def _publish_grant(
                 for run_id, entry in state.entries.items()
             ]
             waiting = publication_verdict(views, publisher=context.run_id, publisher_mode=mode, limit=settings.limit)
-            if waiting is not None:
-                return _Waiting(waiting)  # keeps its admitting slot and retries on the next pass
+            if waiting is not None:  # keeps its admitting slot and retries on the next pass
+                return _Waiting(waiting, holder_numbers(views, settings.limit))
             decided = replace(snapshot, host_reserve_bytes=settings.host_reserve_bytes)
             holders: list[HolderFacts] = []
             baselines: dict[str, tuple[str, int]] = {}
             if mode != AdmissionMode.SHARED:
-                if any(assess_capacity(budget, decided).state != CapacityState.READY for budget in budgets.values()):
+                decisions = [assess_capacity(budget, decided) for budget in budgets.values()]
+                if any(decision.state == CapacityState.REFUSED for decision in decisions):
                     raise ResourceError("Not every declared phase passed capacity admission.")
+                held_back = next((decision for decision in decisions if decision.state == CapacityState.WAITING), None)
+                if held_back is not None:
+                    return _Waiting(held_back.reason, held_back.numbers)
             else:  # E(self) + Σ E(co-holders), on the snapshot's own inventory, co-holders attributed
                 for run_id, entry in state.entries.items():
                     if entry.phase != "granted" or run_id == context.run_id:
@@ -13282,9 +13284,9 @@ def _publish_grant(
                 if together.state == CapacityState.REFUSED:
                     raise ResourceError("Not every declared phase passed capacity admission.")
                 if together.state != CapacityState.READY:
-                    return _Waiting(together.reason)
-                if holders and cpu_pressure_blocks_join(join_pressure):
-                    return _Waiting("cpu-pressure")  # pressure may have risen since the reservation (re-checked here)
+                    return _Waiting(together.reason, together.numbers)
+                if holders and cpu_pressure_blocks_join(join_pressure):  # it may have risen since the reservation
+                    return _Waiting("cpu-pressure", cpu_pressure_numbers(join_pressure))
             if disk is not None and data["purpose"] != RELEASE_PURPOSE:  # the disk may have filled since reservation
                 if not disk_figures_fresh(disk, clock):  # sampled before this section waited for its locks
                     raise _AdmissionFault(
@@ -13293,9 +13295,9 @@ def _publish_grant(
                     )
                 fit, _leases = _disk_gate(disk, directory, state, context.run_id, clock.origin)
                 if fit.state == CapacityState.REFUSED:
-                    return _Refused(fit.reason)
+                    return _Refused(fit.reason, fit.numbers)
                 if fit.state != CapacityState.READY:
-                    return _Waiting(fit.reason)
+                    return _Waiting(fit.reason, fit.numbers)
 
             def require_fresh() -> None:
                 """Refuse to grant from a sample that aged past its limit while this section waited or worked."""
@@ -13373,13 +13375,14 @@ def _publish_grant(
             ]
             clock = NativeClock()
             granted_ns = clock.read()
+            spans = waits.waiting_at(granted_ns)
             timeline = {
-                "schema": 1,
+                "schema": schema_for(any("numbers" in item for item in spans)),
                 "origin": clock.origin,
                 "accounting_from_ns": waits.first_tick_ns,
                 "reserved_ns": reserved_ns,
                 "granted_ns": granted_ns,
-                "waiting": waits.waiting_at(granted_ns),
+                "waiting": spans,
                 "release": None,
                 "release_origin": None,
                 "released_ns": None,
@@ -13780,15 +13783,6 @@ def reconcile_account(
     return report
 
 
-@dataclass
-class JobMemoryLimit:
-    """Carry one native job/cgroup memory ceiling and attributed usage."""
-
-    memory_bytes: int
-    managed_docker_bytes: int | None
-    external_docker_bytes: int | None
-
-
 # the runtime a synthetic private-account snapshot stands for, by its declared topology
 _TOPOLOGY_RUNTIME = {"desktop": "docker-desktop", "native": "docker-engine", "remote": None}
 
@@ -13800,7 +13794,7 @@ def _bound_runtime(bound: dict, topology: str) -> str | None:
 
 @dataclass
 class CapacitySnapshot:
-    """Carry one consistent daemon/host/job capacity observation."""
+    """Carry one consistent daemon and host capacity observation."""
 
     daemon_memory_bytes: int
     daemon_cpus: int
@@ -13808,182 +13802,8 @@ class CapacitySnapshot:
     host_cpus: int
     topology: str
     external_limits: tuple[int | None, ...]
-    job_limits: tuple[JobMemoryLimit, ...] | None = ()
     host_reserve_bytes: int = HOST_RESERVE_DEFAULT
     runtime: str | None = field(kw_only=True)  # the detected runtime; ``None`` for a remote daemon
-
-
-def _cgroup_path(pid: int) -> PurePosixPath:
-    rows = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
-    matches = [row.partition("::") for row in rows if row.startswith("0::")]
-    if len(matches) != 1 or matches[0][0] != "0" or not matches[0][1]:
-        raise ResourceError("Linux process cgroup identity is unavailable.")
-    path = PurePosixPath(matches[0][2])
-    if not path.is_absolute() or ".." in path.parts:
-        raise ResourceError("Linux process cgroup identity is invalid.")
-    return path
-
-
-def _cgroup2_mount() -> tuple[PurePosixPath, Path]:
-    matches = []
-    for row in Path("/proc/self/mountinfo").read_text().splitlines():
-        left, separator, right = row.partition(" - ")
-        fields = left.split()
-        if separator and right.split()[:1] == ["cgroup2"] and len(fields) >= 5:
-            matches.append((PurePosixPath(fields[3]), Path(fields[4])))
-    if len(matches) != 1 or not matches[0][0].is_absolute() or not matches[0][1].is_absolute():
-        raise ResourceError("Linux cgroup-v2 mount identity is unavailable.")
-    return matches[0]
-
-
-def _linux_job_limits(
-    containers: list[dict], owned_ids: set[str], is_stopped: Callable[[str], bool] | None = None
-) -> tuple[JobMemoryLimit, ...] | None:
-    """Read finite enclosing job limits and Docker commitments sharing each one.
-
-    ``is_stopped(container_id)`` re-inspects one container whose inventory process ended before its cgroup was read;
-    without it such a container keeps the containment unknown.
-    """
-    try:
-        mount_root, mount = _cgroup2_mount()
-        current = _cgroup_path(os.getpid())
-        relative = current.relative_to(mount_root)
-        current_fs = mount / Path(*relative.parts)
-        read = _container_cgroup_paths(containers, is_stopped)
-        if read is None:
-            return None
-        container_paths, stopped = read
-        live = [item for item in containers if item["Id"] not in stopped]
-        return _job_limits_in_tree(mount_root, mount, current_fs, live, container_paths, owned_ids)
-    except (OSError, ValueError, ResourceError):
-        return None
-
-
-def _container_stopped(observed: DockerObservation) -> bool:
-    """Whether a re-inspected container provably holds no process: removed, or reported neither running nor
-    restarting. A restart under a new PID, or a state that cannot be read, is not stopped."""
-    if not observed.exists:
-        return True
-    state = observed.attributes.get("State")
-    return isinstance(state, dict) and state.get("Running") is False and state.get("Restarting") is False
-
-
-def _container_cgroup_paths(
-    containers: list[dict],
-    is_stopped: Callable[[str], bool] | None,
-    read: Callable[[int], PurePosixPath] = _cgroup_path,
-) -> tuple[dict[str, PurePosixPath], set[str]] | None:
-    """Return each running container's cgroup and the containers that stopped since the inventory, or None (unknown).
-
-    A container that stops between the inventory and its ``/proc/<pid>/cgroup`` read is routine on a shared daemon (a
-    co-holder's or another project's container). Its process being gone proves nothing by itself: a /proc without the
-    daemon's PIDs, or a container that restarted under a new PID, looks the same. So the container is inspected again,
-    and only one that is gone or neither running nor restarting is left out (it holds no memory); any other answer
-    keeps the containment unknown.
-    """
-    paths: dict[str, PurePosixPath] = {}
-    stopped: set[str] = set()
-    for item in containers:
-        if not item["State"]["Running"]:
-            continue
-        pid = item["State"].get("Pid")
-        if type(pid) is not int or pid <= 0:
-            return None
-        try:
-            paths[item["Id"]] = read(pid)
-        except (FileNotFoundError, ProcessLookupError):
-            if is_stopped is None or not is_stopped(item["Id"]):
-                return None
-            stopped.add(item["Id"])
-    return paths, stopped
-
-
-def _job_limits_in_tree(
-    mount_root: PurePosixPath,
-    mount: Path,
-    current_fs: Path,
-    containers: list[dict],
-    container_paths: dict[str, PurePosixPath],
-    owned_ids: set[str],
-) -> tuple[JobMemoryLimit, ...] | None:
-    """Walk from ``current_fs`` up to the cgroup-v2 ``mount`` and collect every finite ``memory.max``.
-
-    The kernel gives only its root cgroup no ``memory.max`` (and no ``cgroup.type``), so a mount that shows that root
-    adds no ceiling of its own. Anywhere else a missing file stays unknown, never unlimited: a cgroup-namespace root or
-    a bind-mounted subtree without one hides an ancestor's ceiling. Returns None for an invalid limit; an unreadable
-    level raises ``OSError``, which the caller reports as unknown containment.
-    """
-    result = []
-    candidate = current_fs
-    while candidate == mount or mount in candidate.parents:
-        try:
-            raw = (candidate / "memory.max").read_text().strip()
-        except FileNotFoundError:
-            if candidate != mount or (candidate / "cgroup.type").exists():
-                raise
-            (candidate / "cgroup.controllers").read_text()  # a live cgroup directory, not a vanished path
-            break
-        if raw != "max":
-            if not raw.isdigit() or int(raw) <= 0:
-                return None
-            logical = mount_root / PurePosixPath(candidate.relative_to(mount).as_posix())
-            managed = external = 0
-            for item in containers:
-                if not item["State"]["Running"]:
-                    continue
-                path = container_paths[item["Id"]]
-                if path != logical and logical not in path.parents:
-                    continue
-                limit = item["HostConfig"]["Memory"]
-                if item["Id"] in owned_ids:
-                    managed += limit
-                else:
-                    external += limit
-            result.append(JobMemoryLimit(int(raw), managed, external))
-        if candidate == mount:
-            break
-        candidate = candidate.parent
-    return tuple(result)
-
-
-def _mutation_capacity_ids(
-    containers: list[dict],
-    owned_ids: set[str],
-    plan: dict,
-    limits: dict[str, int],
-) -> set[str]:
-    """Include one bounded Compose one-off that substitutes for its stopped service."""
-    _validate_compose_plan(plan)
-    services = set(plan["services"])
-    if set(limits) != services or any(type(limit) is not int or limit <= 0 for limit in limits.values()):
-        raise ResourceError("Compose mutation capacity limits are invalid.")
-    expected = plan["labels"]
-    running: dict[str, list[tuple[str, int, bool]]] = {service: [] for service in services}
-    for item in containers:
-        if not item["State"]["Running"]:
-            continue
-        labels = item.get("Config", {}).get("Labels") or {}
-        service = labels.get("com.docker.compose.service")
-        exact = (
-            labels.get("com.docker.compose.project") == plan["project"]
-            and all(labels.get(key) == value for key, value in expected.items())
-            and isinstance(service, str)
-            and service in services
-        )
-        container_id = item["Id"]
-        if container_id in owned_ids and not exact:
-            raise ResourceError("Owned mutation capacity identity lost its exact Compose labels.")
-        if (
-            exact
-            and isinstance(service, str)
-            and (container_id in owned_ids or labels.get("com.docker.compose.oneoff") == "True")
-        ):
-            running[service].append((container_id, item["HostConfig"]["Memory"], container_id in owned_ids))
-    effective = set(owned_ids)
-    for service, items in running.items():
-        if all(limit > 0 for _, limit, _ in items) and sum(limit for _, limit, _ in items) <= limits[service]:
-            effective.update(container_id for container_id, _, _ in items)
-    return effective
 
 
 def passwd_home() -> Path:
@@ -14035,8 +13855,6 @@ def observe_capacity(
     topology: str,
     owned_ids: set[str] | frozenset[str] = frozenset(),
     *,
-    mutation_plan: dict | None = None,
-    mutation_limits: dict[str, int] | None = None,
     inventory: list[dict] | None = None,
     deadline: Deadline | None = None,
 ) -> tuple[str, CapacitySnapshot]:
@@ -14044,17 +13862,12 @@ def observe_capacity(
 
     The caller supplies the profile's verified daemon relationship. Every other
     running container needs a positive hard memory limit; sampled usage never
-    substitutes for that ceiling. Native Linux also records finite enclosing
-    cgroup-v2 limits and only the Docker commitments that share each ancestor.
+    substitutes for that ceiling.
 
     ``inventory`` is a container inventory the caller already read (before it read other records that explain some
     of those containers); without it the inventory is read here.
     """
-    if (
-        topology not in ("desktop", "native", "remote")
-        or not isinstance(owned_ids, (set, frozenset))
-        or (mutation_plan is None) != (mutation_limits is None)
-    ):
+    if topology not in ("desktop", "native", "remote") or not isinstance(owned_ids, (set, frozenset)):
         raise ResourceError("Invalid declared daemon topology or owned container set.")
     if any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in owned_ids):
         raise ResourceError("Owned capacity inputs require exact container IDs.")
@@ -14077,13 +13890,6 @@ def observe_capacity(
         topology = "remote"  # a remote endpoint is accounted as remote from any client
     containers = docker.objects("container", deadline=deadline) if inventory is None else inventory
     capacity_owned_ids = set(owned_ids)
-    if mutation_plan is not None and mutation_limits is not None:
-        capacity_owned_ids = _mutation_capacity_ids(
-            containers,
-            capacity_owned_ids,
-            mutation_plan,
-            mutation_limits,
-        )
     observed_ids = set()
     external_limits = []
     for item in containers:
@@ -14111,12 +13917,6 @@ def observe_capacity(
     host_cpus = os.cpu_count()
     if type(host_cpus) is not int or host_cpus <= 0:
         raise ResourceError("Host CPU capacity is unavailable.")
-
-    def is_stopped(container_id: str) -> bool:
-        """Whether one container holds no process now (the job read asks once its inventory process seemed gone)."""
-        return _container_stopped(docker.inspect_exact(ExactInspection("container", container_id), deadline=deadline))
-
-    jobs = _job_read(containers, capacity_owned_ids, is_stopped) if topology == "native" else ()
     return daemon_id, CapacitySnapshot(
         body["MemTotal"],
         body["NCPU"],
@@ -14124,26 +13924,19 @@ def observe_capacity(
         host_cpus,
         topology,
         tuple(external_limits),
-        jobs,
         runtime=runtime,
     )
 
 
 def assess_capacity(budget: PhaseBudget, observed: CapacitySnapshot) -> CapacityDecision:
-    """Apply separate guest, physical-host and job-cgroup commitment inequalities.
+    """Apply separate guest and physical-host commitment inequalities.
 
     Inputs must come from a calibrated phase and verified topology/limits. READY
     here is only static fit, never an execution grant or a native-pressure result.
-    Finite external pressure waits; unknown evidence or an impossible base refuses.
-    Job inputs include only Docker commitments proved to share that ancestor.
+    A run that can never fit refuses; foreign containers, limited or not, only make it wait.
     """
     if observed.runtime is not None and observed.runtime not in RUNTIME_OVERHEADS:
         return CapacityDecision(CapacityState.REFUSED, "runtime-unqualified")
-    guest_reserve, host_side = REMOTE_OVERHEADS if observed.runtime is None else RUNTIME_OVERHEADS[observed.runtime]
-    host_reserve = observed.host_reserve_bytes  # the developer-machine default unless the account declared one
-    # Reuse the conservative existing reserve inside a finite job boundary; no
-    # smaller job allowance is inferred from unused host RAM or a passing sample.
-    job_reserve = host_reserve
     for value in (budget.container_bytes, budget.host_process_bytes):
         if type(value) is not int or value < 0:
             raise ResourceError("Phase memory commitments must be nonnegative byte counts.")
@@ -14159,44 +13952,52 @@ def assess_capacity(budget: PhaseBudget, observed: CapacitySnapshot) -> Capacity
             raise ResourceError("Effective capacity and CPU prerequisites must be positive integers.")
     if observed.topology not in ("desktop", "native", "remote"):
         return CapacityDecision(CapacityState.REFUSED, "unknown-daemon-relationship")
+    values = _capacity_values(budget, observed)
+
+    def decided(state: CapacityState, reason: str, guest: int | None = None, host: int | None = None):
+        return CapacityDecision(state, reason, guest, host, numbers=numbers_for(reason, values))
+
     if observed.daemon_cpus < budget.daemon_cpus or observed.host_cpus < budget.host_threads:
-        return CapacityDecision(CapacityState.REFUSED, "insufficient-cpu")
-    if any(type(limit) is not int or limit <= 0 for limit in observed.external_limits):
-        return CapacityDecision(CapacityState.REFUSED, UNKNOWN_EXTERNAL_CAPACITY)
-    if observed.job_limits is None:
-        return CapacityDecision(CapacityState.REFUSED, "unknown-job-containment")
-    for job in observed.job_limits:
-        if type(job.memory_bytes) is not int or job.memory_bytes <= 0:
-            raise ResourceError("Job memory ceiling is invalid.")
-        managed = job.managed_docker_bytes
-        external_docker = job.external_docker_bytes
-        if managed is None or external_docker is None or managed < 0 or external_docker < 0:
-            return CapacityDecision(CapacityState.REFUSED, "unknown-job-containment")
+        return decided(CapacityState.REFUSED, "insufficient-cpu")
+    guest_base, host_base = values["guest_base_bytes"], values["host_base_bytes"]
+    if guest_base > observed.daemon_memory_bytes or host_base > observed.host_memory_bytes:
+        values.update(guest_needed_bytes=guest_base, host_needed_bytes=host_base)  # the base alone cannot fit
+        return decided(CapacityState.REFUSED, "unsupported-base-capacity", guest_base, host_base)
+    if values["unlimited_containers"]:
+        return decided(CapacityState.WAITING, UNKNOWN_EXTERNAL_CAPACITY)  # a foreign state: wait, never end
+    guest, host = values["guest_needed_bytes"], values["host_needed_bytes"]
+    if guest > observed.daemon_memory_bytes or host > observed.host_memory_bytes:
+        return decided(CapacityState.WAITING, "external-capacity", guest, host)
+    return CapacityDecision(CapacityState.READY, "static-capacity", guest, host)
+
+
+def _capacity_values(budget: PhaseBudget, observed: CapacitySnapshot) -> dict[str, int]:
+    """Every operand ``assess_capacity`` compares, named as ``domain.numbers`` records them (runtime qualified)."""
+    guest_reserve, host_side = REMOTE_OVERHEADS if observed.runtime is None else RUNTIME_OVERHEADS[observed.runtime]
     guest_base = budget.container_bytes + guest_reserve
-    host_base = budget.host_process_bytes + host_reserve
+    finite = [limit for limit in observed.external_limits if type(limit) is int and limit > 0]
+    host_base = budget.host_process_bytes + observed.host_reserve_bytes
     if observed.topology != "remote":
         host_base += guest_base + host_side
-    external = sum(cast(tuple[int, ...], observed.external_limits))
-    guest = guest_base + external
-    host = host_base + (external if observed.topology != "remote" else 0)
-    if guest_base > observed.daemon_memory_bytes or host_base > observed.host_memory_bytes:
-        return CapacityDecision(CapacityState.REFUSED, "unsupported-base-capacity", guest, host)
-    for job in observed.job_limits:
-        managed = job.managed_docker_bytes
-        if managed is None:
-            return CapacityDecision(CapacityState.REFUSED, "unknown-job-containment")
-        if budget.host_process_bytes + job_reserve + managed > job.memory_bytes:
-            return CapacityDecision(CapacityState.REFUSED, "job-cgroup-base-capacity", guest, host)
-    if guest > observed.daemon_memory_bytes or host > observed.host_memory_bytes:
-        return CapacityDecision(CapacityState.WAITING, "external-capacity", guest, host)
-    for job in observed.job_limits:
-        managed = job.managed_docker_bytes
-        external_docker = job.external_docker_bytes
-        if managed is None or external_docker is None:
-            return CapacityDecision(CapacityState.REFUSED, "unknown-job-containment")
-        if budget.host_process_bytes + job_reserve + managed + external_docker > job.memory_bytes:
-            return CapacityDecision(CapacityState.WAITING, "job-cgroup-external-capacity", guest, host)
-    return CapacityDecision(CapacityState.READY, "static-capacity", guest, host)
+    external = sum(finite)
+    return {
+        "guest_base_bytes": guest_base,
+        "host_base_bytes": host_base,
+        "guest_needed_bytes": guest_base + external,
+        "host_needed_bytes": host_base + (external if observed.topology != "remote" else 0),
+        "daemon_memory_bytes": observed.daemon_memory_bytes,
+        "host_memory_bytes": observed.host_memory_bytes,
+        "container_bytes": budget.container_bytes,
+        "host_process_bytes": budget.host_process_bytes,
+        "host_reserve_bytes": observed.host_reserve_bytes,
+        "external_bytes": external,
+        "external_containers": len(observed.external_limits),
+        "unlimited_containers": len(observed.external_limits) - len(finite),
+        "daemon_cpus_needed": budget.daemon_cpus,
+        "daemon_cpus": observed.daemon_cpus,
+        "host_threads_needed": budget.host_threads,
+        "host_cpus": observed.host_cpus,
+    }
 
 
 @dataclass
@@ -14435,6 +14236,11 @@ def select_window_start(
     return max(candidates, key=lambda sample: sample.tick_ns, default=None)
 
 
+HEADROOM_FLOOR_BYTES = 3 * 1024**3 // 2  # the native headroom every admission keeps
+SWAPOUT_LIMIT_BYTES_PER_S = 128 * 1024**2
+SWAP_GROWTH_LIMIT_BYTES = 3 * 1024**3  # since admission, before a run's shared allowance
+
+
 def assess_pressure(
     current: HostMemoryObservation,
     window_start: HostMemoryObservation | None,
@@ -14462,8 +14268,22 @@ def assess_pressure(
     envelope here, its containers' limits elsewhere) and for host-wide pressure, whoever caused it: the floor and the
     swap-out rate unless it has shared, and swap growth from its admission.
     """
-    gib = 1024**3
     failure = CapacityState.REFUSED if granted else CapacityState.WAITING
+    growth_limit = SWAP_GROWTH_LIMIT_BYTES + growth_allowance_bytes
+    values: dict[str, object] = {
+        "headroom_bytes": current.headroom_bytes,
+        "headroom_floor_bytes": HEADROOM_FLOOR_BYTES,
+        "host_memory_bytes": current.physical_bytes,
+        "host_swap_used_bytes": current.swap_used_bytes,
+        "swapout_bytes": current.swapout_bytes,
+        "swapout_limit_bytes_per_s": SWAPOUT_LIMIT_BYTES_PER_S,
+        "growth_allowance_bytes": growth_allowance_bytes,
+        "swap_growth_limit_bytes": growth_limit,
+    }
+
+    def decided(state: CapacityState, reason: str) -> CapacityDecision:
+        return CapacityDecision(state, reason, numbers=numbers_for(reason, values))
+
     baselines = [sample for sample in (window_start, admission_baseline, phase_baseline) if sample is not None]
     for sample in [current, *baselines]:
         if (
@@ -14480,30 +14300,35 @@ def assess_pressure(
             or sample.physical_bytes <= 0
             or sample.headroom_bytes > sample.physical_bytes
         ):
-            return CapacityDecision(CapacityState.REFUSED, "invalid-memory-observation")
+            values.update(headroom_bytes=sample.headroom_bytes, host_memory_bytes=sample.physical_bytes)
+            values.update(host_swap_used_bytes=sample.swap_used_bytes, swapout_bytes=sample.swapout_bytes)
+            return decided(CapacityState.REFUSED, "invalid-memory-observation")  # the invalid figure is left out
         if (
             sample.origin != current.origin
             or sample.physical_bytes != current.physical_bytes
             or (sample.tick_ns > current.tick_ns or sample.swapout_bytes > current.swapout_bytes)
         ):
-            return CapacityDecision(CapacityState.REFUSED, "telemetry-discontinuity")
+            values.update(baseline_host_memory_bytes=sample.physical_bytes, baseline_swapout_bytes=sample.swapout_bytes)
+            return decided(CapacityState.REFUSED, "telemetry-discontinuity")
     if window_start is None or current.tick_ns - window_start.tick_ns < window_ns:
         return CapacityDecision(failure, "incomplete-pressure-window")
     gated = granted and shared_gate
-    if current.headroom_bytes < 3 * gib // 2 and not gated:
-        return CapacityDecision(failure, "native-headroom")
+    if current.headroom_bytes < HEADROOM_FLOOR_BYTES and not gated:
+        return decided(failure, "native-headroom")
     elapsed = current.tick_ns - window_start.tick_ns
     swapped = current.swapout_bytes - window_start.swapout_bytes
-    if swapped * 1_000_000_000 > 128 * 1024**2 * elapsed and not gated:
-        return CapacityDecision(failure, "swapout-rate")
+    values.update(window_ns=elapsed, swapout_bytes_per_s=swapped * 1_000_000_000 // elapsed)
+    if swapped * 1_000_000_000 > SWAPOUT_LIMIT_BYTES_PER_S * elapsed and not gated:
+        return decided(failure, "swapout-rate")
     if not granted:
         return CapacityDecision(CapacityState.READY, "native-pressure")
     if admission_baseline is None or phase_baseline is None:
         return CapacityDecision(CapacityState.REFUSED, "incomplete-admission-baseline")
     if host_rss_bytes is None or host_envelope_bytes is None or host_rss_bytes < 0 or host_envelope_bytes < 0:
         return CapacityDecision(CapacityState.REFUSED, "incomplete-admission-baseline")
-    if current.swap_used_bytes - admission_baseline.swap_used_bytes > 3 * gib + growth_allowance_bytes:
-        return CapacityDecision(CapacityState.REFUSED, "admission-swap-growth")
+    values.update(swap_growth_bytes=current.swap_used_bytes - admission_baseline.swap_used_bytes)
+    if current.swap_used_bytes - admission_baseline.swap_used_bytes > growth_limit:
+        return decided(CapacityState.REFUSED, "admission-swap-growth")
     if host_rss_bytes > host_envelope_bytes:
         return CapacityDecision(CapacityState.REFUSED, "host-process-envelope")
     return CapacityDecision(CapacityState.READY, "native-pressure")

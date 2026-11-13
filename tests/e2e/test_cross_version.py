@@ -357,6 +357,25 @@ def test_x3_a_new_run_waits_for_the_old_holder_then_is_granted(pairings: list[_P
 
 
 @previous_release_runs_here
+def test_x4_upgrade_refuses_a_waiting_older_run(pairings: list[_Pairing]) -> None:
+    """An older run that has not entered when a newer version is installed is refused by its own version gate, so runs
+    of two versions never hold together (their admission sums and records differ)."""
+    for pairing in pairings:
+        pairing.install(pairing.old)
+        older = pairing.started("older", "prepare", go=False)
+        assert older["version"] == pairing.old_version
+
+        pairing.install(pairing.new)
+        pairing.signal("go", "older")
+
+        assert pairing.report("refused", "older") == {
+            "version": pairing.old_version,
+            "category": "incompatible_state",
+            "reason": "toolkit-upgraded",
+        }
+
+
+@previous_release_runs_here
 def test_x4_rollback_refuses_the_newer_build_and_admits_the_older(pairings: list[_Pairing]) -> None:
     for pairing in pairings:
         pairing.install(pairing.old)
@@ -581,7 +600,12 @@ def _intended_differences(previous: str, before: dict, after: dict) -> list[str]
 
     0.7.1 read a loopback ``tcp://`` daemon (the CI host's) as a remote one; 0.7.2 accounts it as this machine's.
     """
-    found = _differences(before, after)
+    found = [
+        path
+        for path in _differences(before, after)
+        if not path.endswith((".admission_observation.capacity.job_limits", ".hold_timeline.schema"))
+        and not re.search(r"\.hold_timeline\.waiting\[\d+\]\.numbers$", path)  # the numbers every wait records now
+    ]
     if previous != "0.7.1":
         return found
 
@@ -833,6 +857,7 @@ def test_previous_release_loads_every_record_and_file_the_new_release_writes(
         assert pairing.report("done", "builder")["state"] == "complete"
         record_path = Path(context["record"])
         record = json.loads(record_path.read_text())
+        assert record["hold_timeline"]["schema"] == 1, "the run waited with numbers; this needs a run that never queued"
         builders = record["owned_resources"]["builders"].values()
         images = record["owned_resources"]["images"].values()
         assert any("state_volume" in item["evidence"] for item in builders)  # the evidence additions are present

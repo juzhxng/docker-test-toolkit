@@ -105,6 +105,15 @@ report timing changed; [Operations](operations.md#dead-owners-and-the-takeover-w
 resumes a recovery a 0.7.7 recoverer began does not know the marker; finish a recovery with the version that started
 it.
 
+The release after 0.7.7 changes two record shapes, one way. `failure_evidence` and `hold_timeline` gain schema 2 when
+a refusal, wait or breach carries `numbers` (and the evidence category `admission-refused` with them); a run that never
+waited on a compared quantity keeps schema 1, which older versions read. An older version lists a schema-2 record as
+unreadable and cannot recover such a run, so install and roll back while no run holds the account. The reasons
+`unknown-job-containment`, `job-cgroup-base-capacity`, `job-cgroup-external-capacity` are no longer written (older
+records keep them); `coholder-record-unreadable` is new; `unknown-external-capacity` now waits instead of refusing;
+`admission_observation.capacity` no longer carries `job_limits`. The release raises `SHARED_QUEUE_MIN_VERSION` to
+itself, so its runs never hold together with an older version's: their admission sums differ.
+
 Protocol `batch:1` versions only the live Python facade and bridge messages. It adds no durable field and does not change
 run, project, account or cleanup record schemas, so a crashed batch has no toolkit batch status or replay operation; its
 recovery is decided solely from its ordinary run records.

@@ -353,7 +353,9 @@ def test_static_exclusivity_despite_positive_verdict(purpose: str, relationship:
 
 
 def _snapshot(*, cpus: int = 4, external: tuple[int | None, ...] = ()) -> lifecycle.CapacitySnapshot:
-    return lifecycle.CapacitySnapshot(8 * GIB, cpus, 32 * GIB, 8, "native", external, (), GIB, runtime="docker-engine")
+    return lifecycle.CapacitySnapshot(
+        8 * GIB, cpus, 32 * GIB, 8, "native", external, host_reserve_bytes=GIB, runtime="docker-engine"
+    )
 
 
 def test_admission_decision_waits_on_a_cpu_only_coholder_shortfall() -> None:
@@ -372,7 +374,9 @@ def test_admission_decision_waits_on_a_cpu_only_coholder_shortfall() -> None:
 def test_shared_publisher_alone_checks_its_effective_reservation() -> None:
     """A build-capable shared run reserves its builder too, even with no co-holder; an exclusive one does not."""
     phases = {"build": PhaseBudget(4 * GIB, 0, 2, 1)}  # E = 6 GiB with the builder reserve
-    snapshot = lifecycle.CapacitySnapshot(6 * GIB, 4, 32 * GIB, 8, "native", (), (), GIB, runtime="docker-engine")
+    snapshot = lifecycle.CapacitySnapshot(
+        6 * GIB, 4, 32 * GIB, 8, "native", (), host_reserve_bytes=GIB, runtime="docker-engine"
+    )
 
     shared = lifecycle.admission_decision(phases, snapshot, [], shared=True)
     exclusive = lifecycle.admission_decision(phases, snapshot, [])
@@ -387,7 +391,7 @@ def test_shared_publisher_alone_under_external_pressure_keeps_its_own_reason() -
     the alone shared decision is that pressure's own WAITING, never ``coholder-capacity``."""
     phases = {"build": PhaseBudget(2 * GIB, 0, 2, 1)}  # E = 4 GiB with the builder reserve
     pressed = lifecycle.CapacitySnapshot(
-        8 * GIB, 4, 32 * GIB, 8, "native", (4 * GIB,), (), GIB, runtime="docker-engine"
+        8 * GIB, 4, 32 * GIB, 8, "native", (4 * GIB,), host_reserve_bytes=GIB, runtime="docker-engine"
     )
     assert lifecycle.admission_decision(phases, pressed, []).state == lifecycle.CapacityState.READY  # phase alone
 
@@ -404,7 +408,15 @@ def test_publication_verdict_without_the_publisher_raises_value_error() -> None:
         publication_verdict(views, publisher="missing", publisher_mode="shared", limit=2)
 
 
-def test_unreadable_coholder_record_is_sticky_unknown_external_capacity() -> None:
-    decision = lifecycle.observation_decision(PhaseBudget(GIB, 0, 1, 1), _snapshot(), [], True)
+@pytest.mark.parametrize(
+    ("unknown", "expected"),
+    [
+        (True, (lifecycle.CapacityState.REFUSED, "coholder-record-unreadable")),
+        (False, (lifecycle.CapacityState.READY, "static-capacity")),
+    ],
+)
+def test_after_the_grant_only_an_unreadable_coholder_record_ends_the_observer(unknown: bool, expected: tuple) -> None:
+    """A granted run is judged on the toolkit's own records, never on the capacity sums of the moment."""
+    decision = lifecycle.observation_decision(unknown)
 
-    assert (decision.state, decision.reason) == (lifecycle.CapacityState.REFUSED, "unknown-external-capacity")
+    assert (decision.state, decision.reason) == expected

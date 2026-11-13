@@ -22,9 +22,13 @@ def _evidence(
     detail: str | None = None,
     waiting: Any = None,
     pressure: Any = None,
+    numbers: Any = ...,
 ) -> dict[str, Any]:
+    """Schema 1 without ``numbers``; schema 2 with them (``None`` or a numbers object)."""
+    extra = {} if numbers is ... else {"numbers": numbers}
     return {
-        "schema": 1,
+        "schema": 1 if numbers is ... else 2,
+        **extra,
         "category": category,
         "reason": reason or category,
         "detail": detail,
@@ -36,6 +40,7 @@ def _evidence(
 
 
 _WAITING = [{"reason": "native-headroom", "first_tick_ns": 10, "last_tick_ns": 40, "waited_ns": 30}]
+_WAITING_WITH_NUMBERS = [{**_WAITING[0], "reason": "queue-position", "numbers": {"holders": 1}}]
 _PRESSURE = {
     "host_headroom_bytes": 1,
     "host_swap_used_bytes": 2,
@@ -62,6 +67,27 @@ WRITER_ROWS = {
     ),
     "admission-expired-no-sample": _evidence(
         "admission-expired", reason="queue-position", observer="admission", state="admitting", waiting=_WAITING
+    ),
+    "breach-with-numbers": _evidence(
+        "breach",
+        reason="native-headroom",
+        observer="host",
+        numbers={"headroom_bytes": 1, "headroom_floor_bytes": 2, "host_memory_bytes": 3},
+    ),
+    "admission-refused": _evidence(
+        "admission-refused",
+        reason="unsupported-base-capacity",
+        observer="admission",
+        state="admitting",
+        numbers={"container_bytes": 100, "daemon_memory_bytes": 2},
+    ),
+    "admission-expired-with-numbers": _evidence(
+        "admission-expired",
+        reason="queue-position",
+        observer="admission",
+        state="queued",
+        waiting=_WAITING_WITH_NUMBERS,
+        numbers=None,
     ),
 }
 
@@ -92,8 +118,17 @@ def _mutate(path: tuple[str, ...], value: Any, base: str = "observation-late") -
         _mutate(("category",), []),
         _mutate(("observer",), {}),
         _mutate(("detail",), "other"),
-        _mutate(("schema",), 2),
+        _mutate(("schema",), 3),
         _mutate(("schema",), True),
+        _mutate(("schema",), 2),  # schema 2 without its ``numbers`` key
+        {**_evidence(), "numbers": None},  # schema 1 with a ``numbers`` key
+        _mutate(("waiting",), _WAITING_WITH_NUMBERS, base="admission-expired"),  # schema 1, a waiting item with numbers
+        _mutate(("numbers",), {"headroom_bytes": "1"}, base="breach-with-numbers"),
+        _mutate(("numbers",), {"shoe_size": 1}, base="breach-with-numbers"),
+        _mutate(("schema",), 1, base="admission-refused"),
+        _mutate(("numbers",), None, base="admission-refused"),  # a refusal carries the figures that decided it
+        _mutate(("waiting",), _WAITING, base="admission-refused"),
+        _mutate(("numbers",), {"holders": 1}, base="admission-expired-with-numbers"),  # numbers sit on the items
         _mutate(("reason",), ""),
         _mutate(("first_observed", "tick_ns"), -1),
         _mutate(("first_observed", "tick_ns"), True),
@@ -182,12 +217,30 @@ def _oom_record(state: str, **overrides: Any) -> dict[str, Any]:
     return {"state": state, "grant": {"phase": "tests"}, "revision": 3, "infrastructure_failure": None, **overrides}
 
 
-@pytest.mark.parametrize("state", ("active", "stopping"))
-def test_container_oom_as_first_failure_carries_evidence_with_the_literal_state(state: str) -> None:
-    current = _oom_record(state)
+_KILLED = {"memory_bytes": 1024**3, "observation": {"memory_limit_bytes": 1024**3, "oom_killed": True, "oom_events": 2}}
+
+
+@pytest.mark.parametrize(
+    ("state", "resources", "schema", "numbers"),
+    (
+        ("active", {}, 1, None),
+        ("stopping", {}, 1, None),
+        (
+            "active",
+            {"resources": {"containers": {"c" * 64: _KILLED}}},
+            2,
+            {"container_limit_bytes": 1024**3, "oom_events": 2},
+        ),
+    ),
+)
+def test_container_oom_as_first_failure_carries_evidence_with_the_literal_state(
+    state: str, resources: dict[str, Any], schema: int, numbers: dict[str, int] | None
+) -> None:
+    current = _oom_record(state, **resources)
 
     lifecycle._set_container_oom(current)
 
+    assert (current["failure_evidence"]["schema"], current["failure_evidence"].get("numbers")) == (schema, numbers)
     assert current["infrastructure_failure"] == "container-oom"
     assert current["failure_evidence"]["first_observed"]["state"] == state
     assert (current["failure_evidence"]["category"], current["failure_evidence"]["observer"]) == (

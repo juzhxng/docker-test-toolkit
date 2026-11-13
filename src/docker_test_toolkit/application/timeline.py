@@ -138,7 +138,22 @@ def timeline_entry(record: dict, *, indexed: bool) -> dict:
         "phases": _phases(record, leave),
         "builds": _builds(record),
         "waiting": waiting,
+        "failure": _failure(record.get("failure_evidence")),
         "notes": sorted(notes),
+    }
+
+
+def _failure(evidence: object) -> dict | None:
+    """The first failure a record names, with the numbers that decided it (``{}`` for a record without them)."""
+    if not isinstance(evidence, dict):
+        return None
+    observed = evidence.get("first_observed")
+    return {
+        "category": evidence.get("category"),
+        "reason": evidence.get("reason"),
+        "observer": evidence.get("observer"),
+        "phase": observed.get("phase") if isinstance(observed, dict) else None,
+        "numbers": evidence.get("numbers") or {},
     }
 
 

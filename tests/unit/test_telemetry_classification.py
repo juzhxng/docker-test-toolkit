@@ -49,5 +49,6 @@ def test_closed_value_sets_match_the_design() -> None:
         "observation-late",
         "telemetry-unreadable",
         "admission-expired",
+        "admission-refused",
     )
     assert OBSERVERS == ("host", "engine", "container", "process", "admission")

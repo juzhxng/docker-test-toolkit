@@ -10,6 +10,7 @@ CATEGORIES = (
     "observation-late",
     "telemetry-unreadable",
     "admission-expired",
+    "admission-refused",
 )
 OBSERVERS = ("host", "engine", "container", "process", "admission")
 

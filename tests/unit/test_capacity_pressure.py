@@ -162,22 +162,26 @@ def test_an_unsupported_mismatched_or_unqualified_runtime_is_refused(
     assert (str(refused.value), refused.value.reason) == (message, reason)
 
 
-def test_base_capacity_boundary_refuses_a_daemon_that_holds_only_the_container() -> None:
-    """Native, no job limit: a 2 GiB container needs 2.5 GiB of daemon memory, so 2.25 GiB cannot ever admit it."""
-    snapshot = CapacitySnapshot(int(2.25 * GIB), 8, 64 * GIB, 8, "native", (), runtime="docker-engine")
+@pytest.mark.parametrize(
+    ("daemon", "cpus", "external", "budget", "expected"),
+    [
+        (2.25, 8, (), _budget(container=2), (CapacityState.REFUSED, "unsupported-base-capacity")),
+        (3, 8, (GIB,), _budget(container=2), (CapacityState.WAITING, "external-capacity")),
+        (3, 8, (None,), _budget(container=2), (CapacityState.WAITING, "unknown-external-capacity")),
+        (2.25, 8, (None,), _budget(container=2), (CapacityState.REFUSED, "unsupported-base-capacity")),
+        (3, 1, (None,), _budget(cpus=2), (CapacityState.REFUSED, "insufficient-cpu")),
+    ],
+)
+def test_a_run_that_can_never_fit_is_refused_and_one_that_fits_waits_on_foreign_containers(
+    daemon: float, cpus: int, external: tuple[int | None, ...], budget: PhaseBudget, expected: tuple
+) -> None:
+    """Native: a 2 GiB container needs 2.5 GiB of daemon memory. Foreign containers, limited or not, only make a run
+    that fits alone wait; a run that can never fit is refused whatever else runs."""
+    snapshot = CapacitySnapshot(int(daemon * GIB), cpus, 64 * GIB, 8, "native", external, runtime="docker-engine")
 
-    decision = lifecycle.assess_capacity(_budget(container=2), snapshot)
+    decision = lifecycle.assess_capacity(budget, snapshot)
 
-    assert (decision.state, decision.reason) == (CapacityState.REFUSED, "unsupported-base-capacity")
-
-
-def test_external_capacity_boundary_waits_instead_of_refusing() -> None:
-    """The same budget fits a 3 GiB daemon alone; one foreign 1 GiB limit makes it wait, not refuse."""
-    snapshot = CapacitySnapshot(3 * GIB, 8, 64 * GIB, 8, "native", (GIB,), runtime="docker-engine")
-
-    decision = lifecycle.assess_capacity(_budget(container=2), snapshot)
-
-    assert (decision.state, decision.reason) == (CapacityState.WAITING, "external-capacity")
+    assert (decision.state, decision.reason) == expected
 
 
 def test_observe_capacity_refuses_a_docker_desktop_daemon_seen_from_a_linux_client(
