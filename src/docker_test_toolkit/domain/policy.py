@@ -7,7 +7,6 @@ import math
 import re
 import urllib.parse
 from collections.abc import Iterable, Mapping, Sequence
-from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -378,7 +377,7 @@ def memory_limit(container: Mapping[str, Any]) -> int | None:
     return limit if type(limit) is int and limit > 0 else None
 
 
-def _labels(container: Mapping[str, Any]) -> Mapping[str, Any]:
+def container_labels(container: Mapping[str, Any]) -> Mapping[str, Any]:
     """An inspected container's labels; empty when it has none or they are malformed."""
     config = container.get("Config")
     labels = config.get("Labels") if isinstance(config, Mapping) else None
@@ -390,7 +389,7 @@ def owns_container(
 ) -> bool:
     """Whether a container is a run's own: its Compose project or run label, or its BuildKit worker by name (the
     worker carries no label)."""
-    name, labels = container.get("Name"), _labels(container)
+    name, labels = container.get("Name"), container_labels(container)
     labelled = labels.get("com.docker.compose.project") == compose_project or labels.get(run_label) == run_id
     return labelled or (isinstance(name, str) and name.lstrip("/") == worker)
 
@@ -513,19 +512,19 @@ class ExternalCommitments:
 
 
 def _run_host(container: Mapping[str, Any]) -> bool:
-    return _labels(container).get(RUN_HOST_LABEL) == "true"
+    return container_labels(container).get(RUN_HOST_LABEL) == "true"
 
 
-def external_commitments(containers: Sequence[Mapping[str, Any]], owned_ids: AbstractSet[str]) -> ExternalCommitments:
-    """Sum up a complete daemon inventory against the containers a run owns.
+def external_commitments(containers: Sequence[Mapping[str, Any]]) -> ExternalCommitments:
+    """Sum up a complete daemon inventory; co-holders' containers are taken out afterwards (``net_external_limits``).
 
-    A running container the run does not own is an external commitment by its hard limit, unless the operator
+    A running container is an external commitment by its hard limit, unless the operator
     labelled it as the host of a run (a CI runner whose job is accounted by its own run): such a container is counted
     in ``run_hosts`` instead. NOTE: ceiling: a run host's memory is invisible to other accounts; upgrade path: count
     labelled containers by observed use if the record shows over-commitment.
 
     Raises:
-        ResourceError: If the inventory is incomplete or contradictory, or an owned container is missing from it.
+        ResourceError: If the inventory is incomplete or contradictory.
     """
     observed_ids: set[str] = set()
     limits: list[int | None] = []
@@ -547,14 +546,12 @@ def external_commitments(containers: Sequence[Mapping[str, Any]], owned_ids: Abs
         ):
             raise ResourceError("Docker container capacity evidence is contradictory.")
         observed_ids.add(container_id)
-        if not running or container_id in owned_ids:
+        if not running:
             continue
         if _run_host(item):
             run_hosts += 1
         else:
             limits.append(limit or None)
-    if not owned_ids <= observed_ids:
-        raise ResourceError("An owned container is absent from the complete daemon inventory.")
     return ExternalCommitments(tuple(limits), run_hosts)
 
 

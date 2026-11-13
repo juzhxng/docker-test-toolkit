@@ -292,6 +292,17 @@ def test_operator_cleanup_keeps_an_image_in_use(tmp_path: Path) -> None:
     assert result["clean"] is False
 
 
+def test_operator_cleanup_keeps_an_image_another_accounts_container_uses(tmp_path: Path) -> None:
+    """The plan retains an image any container on the engine references, whoever created it (another account's)."""
+    image_id = "sha256:" + "e" * 64
+    context, docker, account = _project_with_image(tmp_path, image_id)
+    docker.resources["container"] = [{"Id": "d" * 64, "Image": image_id, "Config": {"Labels": {}}}]
+
+    cleanup_project(context, docker, execute=True, image_account=account, image_in_use=lambda _image: False)
+
+    assert docker.removals() == [] and [item["Id"] for item in docker.objects("image")] == [image_id]
+
+
 def _stranded_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[lifecycle.RunContext, Path]:
     """A granted run whose requester and guardian are dead, nothing queued, no death time seeded; operator bound."""
     services = build_test_services(tmp_path / "state")

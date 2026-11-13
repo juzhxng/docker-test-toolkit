@@ -814,7 +814,8 @@ class ScriptedDocker:
         self.call(*argv)
         return DockerResult(0, "", "")
 
-    def objects(self, kind: str) -> list[dict]:
+    def objects(self, kind: str, *, deadline: object = None) -> list[dict]:
+        del deadline
         return [dict(item) for item in self.resources.get(kind, [])]
 
     def removals(self) -> list[tuple[str, ...]]:

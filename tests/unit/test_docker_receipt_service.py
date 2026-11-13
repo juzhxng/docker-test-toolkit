@@ -433,32 +433,30 @@ class FakeDockerPort(DockerPort):
             if self.fail_before_remove_kind == "image":
                 self.fail_before_remove_kind = None
                 raise OSError("synthetic interruption before image removal")
-            targets = [target for target in argv[2:] if target != "--force"]
+            targets = list(argv[2:])
             missing = False
             for target in targets:
                 image = self.images.get(target)
                 if image is None:
                     missing = True
                     continue
+                # Docker without --force: it untags while other references remain, and refuses the last reference or
+                # an ID while any container uses the image
+                used = any(container.get("Image") == image.get("Id") for container in self.containers.values())
                 if not target.startswith("sha256:"):
-                    if "--force" not in argv and any(
-                        container.get("Image") == image.get("Id") for container in self.containers.values()
-                    ):
+                    repository_digest = lifecycle._repository_digest(target)
+                    tags = [value for value in image.get("RepoTags", []) if value != target]
+                    digests = [value for value in image.get("RepoDigests", []) if value != repository_digest]
+                    if used and not tags and not digests:
                         return DockerResult(1, "", "image is being used by a stopped container")
                     self.images.pop(target)
-                    image["RepoTags"] = [value for value in image.get("RepoTags", []) if value != target]
-                    repository_digest = lifecycle._repository_digest(target)
-                    image["RepoDigests"] = [
-                        value for value in image.get("RepoDigests", []) if value != repository_digest
-                    ]
-                    referenced = image.get("RepoTags", []) or image.get("RepoDigests", [])
-                    used = any(container.get("Image") == image.get("Id") for container in self.containers.values())
-                    if not referenced and not used:
+                    image["RepoTags"], image["RepoDigests"] = tags, digests
+                    if not tags and not digests:
                         self.images = {key: item for key, item in self.images.items() if item is not image}
                 else:
                     references = [*(image.get("RepoTags") or []), *(image.get("RepoDigests") or [])]
-                    if "--force" not in argv and len(references) > 1:
-                        return DockerResult(1, "", "image is referenced by multiple tags")
+                    if used or len(references) > 1:
+                        return DockerResult(1, "", "image is in use or referenced by multiple tags")
                     self.images = {key: item for key, item in self.images.items() if item.get("Id") != target}
             if self.fail_after_image_remove:
                 self.fail_after_image_remove = False
@@ -2437,10 +2435,10 @@ def test_multi_tag_cleanup_preserves_a_foreign_container_using_the_image(
     with pytest.raises(IncompleteCleanup, match=r"unbound resource \(image-rm: its result could not be reconciled\)"):
         lifecycle.dispatch_docker(handle._context, descriptor, fake, ("image", "rm", BUILT_IMAGE_ID))
 
-    assert fake.images["fixture:first"]["Id"] == BUILT_IMAGE_ID
+    # Docker untags while another reference remains and refuses the last one: the image survives, still named
+    assert "fixture:first" not in fake.images
     assert fake.images["fixture:second"]["Id"] == BUILT_IMAGE_ID
     assert fake.containers[foreign_id]["Image"] == BUILT_IMAGE_ID
-    assert not any("--force" in command for command in fake.commands if command[:2] == ("image", "rm"))
     fake.containers.pop(foreign_id)
     lifecycle._reconcile_docker_receipt(handle._context)
     lifecycle.dispatch_docker(handle._context, descriptor, fake, ("buildx", "rm", handle.docker_context.builder))

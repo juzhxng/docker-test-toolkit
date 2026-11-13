@@ -317,15 +317,18 @@ def _pair_budget(root: Path, margin: int) -> int:
 
 def _running_limits() -> int:
     """Sum the memory limits of the containers already running before a cell starts (another project's load on a
-    shared daemon); a capacity cell budgets beside them. Load that starts during the cell is outside its premise."""
+    shared daemon); a capacity cell budgets beside them. Load that starts during the cell is outside its premise.
+    A container labelled as a run host (a CI runner) is left out, as the toolkit leaves it out of its external sum."""
     docker = shutil.which("docker")
     assert docker is not None
     ids = subprocess.run([docker, "ps", "-q"], capture_output=True, text=True, check=True).stdout.split()
     if not ids:
         return 0
-    limits = subprocess.run(
-        [docker, "inspect", "--format", "{{.HostConfig.Memory}}", *ids], capture_output=True, text=True, check=True
-    ).stdout.split()
+    template = '{{.HostConfig.Memory}} {{index .Config.Labels "com.docker-test-toolkit.run-host"}}'
+    inspected = subprocess.run(
+        [docker, "inspect", "--format", template, *ids], capture_output=True, text=True, check=True
+    )
+    limits = [line.split()[0] for line in inspected.stdout.splitlines() if line.split()[1:] != ["true"]]
     assert all(int(limit) > 0 for limit in limits), "an unlimited container is running: capacity cells cannot budget"
     return sum(int(limit) for limit in limits)
 
@@ -550,9 +553,9 @@ def test_a_coholder_restarting_its_containers_ends_no_other_run(
 
     records = {name: _record(control, name) for name in "abc"}
     assert records["b"]["infrastructure_failure"] is None and records["c"]["infrastructure_failure"] is None
-    assert all(record["infrastructure_failure"] != "unknown-job-containment" for record in records.values())
-    waits = [item for item in records["c"]["hold_timeline"]["waiting"] if item["reason"] == "coholder-capacity"]
-    assert waits and {"coholders", "external_bytes"} <= set(waits[0]["numbers"])
+    waiting = records["c"]["hold_timeline"]["waiting"]
+    waits = [item for item in waiting if item["reason"] == "coholder-capacity"]
+    assert waits and {"coholders", "external_bytes"} <= set(waits[0]["numbers"]), waiting
 
 
 # --- share rules on real renders ---

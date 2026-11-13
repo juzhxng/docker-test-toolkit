@@ -257,7 +257,7 @@ def test_observation_pass_host_budget_exhaustion_is_late(
         return reads.engine(docker, path, given)
 
     with bind_test_observation_reads(engine=slow_engine), pytest.raises(ResourceError) as raised:
-        lifecycle.observe_capacity(fake, topology, frozenset(), deadline=deadline)
+        lifecycle.observe_capacity(fake, topology, deadline=deadline)
 
     assert raised.value.reason == "observation-deadline"
     assert raised.value.observer == "host"
@@ -288,8 +288,7 @@ def test_native_capacity_counts_a_restarting_container_by_its_limit(
         _daemon_id, snapshot = lifecycle.observe_capacity(
             fake,
             topology,
-            frozenset({target}),
-            inventory=[*fake.objects("container"), restarting, runner],
+            inventory=[item for item in fake.objects("container") if item["Id"] != target] + [restarting, runner],
             deadline=Deadline.after(NativeClock(), 30),
         )
     decision = lifecycle.assess_capacity(PhaseBudget(GIB, GIB, 1, 1), snapshot)

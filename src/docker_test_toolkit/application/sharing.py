@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from docker_test_toolkit.application.recovery import atomic_json, failpoint
+from docker_test_toolkit.application.recovery import atomic_json, engine_images, failpoint
 from docker_test_toolkit.application.recovery import read_private_json as _read_private_json
 from docker_test_toolkit.domain.errors import ResourceError
 from docker_test_toolkit.domain.models import ExactInspection
@@ -602,6 +602,8 @@ def drain_pending(
 ) -> DrainOutcome:
     """Under K, delete each pending image of ``daemon_id`` nobody uses after its identity check; return the outcome.
 
+    Nobody: no run ``in_use`` names and no container on the engine, whoever created it.
+
     An entry stays in the list when it is in use, another daemon's, still present after the removal, or reached
     without budget (``allows``, ``spend`` and ``timeout_s`` bound a retention pass; those are ``deferred``). With
     ``drop_retagged`` an image that carries a tag the entry does not record is dropped from the list and never deleted
@@ -609,6 +611,7 @@ def drain_pending(
     a deletion. The caller holds K and has checked that ``adapter`` reaches ``daemon_id``.
     """
     removed: list[PendingImage] = []
+    engine: set[str] | None = None  # the engine's used images, listed once, at the first entry nobody else uses
     retagged: list[PendingImage] = []
     deferred: list[PendingImage] = []
     kept: list[PendingImage] = []
@@ -619,6 +622,11 @@ def drain_pending(
             kept.append(entry)
             continue
         if entry.daemon_id != daemon_id or in_use(entry.image_id):
+            kept.append(entry)
+            continue
+        if engine is None:
+            engine = engine_images(adapter, deadline)
+        if entry.image_id in engine:  # a container of another account on the same engine still uses it
             kept.append(entry)
             continue
         observed = adapter.inspect_exact(ExactInspection("image", entry.image_id), deadline=deadline)

@@ -61,7 +61,8 @@ REASON_KEYS: Mapping[tuple[str, str], frozenset[str]] = {
 NUMBER_KEYS = frozenset().union(*REASON_KEYS.values())
 
 
-def _number(value: object) -> TypeGuard[int]:
+def non_negative_int(value: object) -> TypeGuard[int]:
+    """Whether a record value is a non-negative integer: the only shape a number or a timeline count may have."""
     return type(value) is int and value >= 0  # ``bool`` is an ``int`` subclass and is excluded by the exact type
 
 
@@ -80,7 +81,7 @@ def numbers_for(reason: str, values: Mapping[str, object], operand: str = "") ->
     picked: dict[str, int] = {}
     for key in sorted(keys):
         value = values.get(key)
-        if _number(value):
+        if non_negative_int(value):
             picked[key] = value
     return picked
 
@@ -90,7 +91,7 @@ def valid_numbers(value: object) -> bool:
     return (
         isinstance(value, dict)
         and 0 < len(value) <= MAX_NUMBERS
-        and all(key in NUMBER_KEYS and _number(item) for key, item in value.items())
+        and all(key in NUMBER_KEYS and non_negative_int(item) for key, item in value.items())
     )
 
 
@@ -118,14 +119,14 @@ def oom_numbers(record: Mapping[str, Any]) -> dict[str, int]:
         if isinstance(observation, Mapping) and (
             observation.get("oom_killed") is True or _positive(observation, "oom_events")
         ):
-            events += observation["oom_events"] if _number(observation.get("oom_events")) else 0
-            if _number(resource.get("memory_bytes")):
+            events += observation["oom_events"] if non_negative_int(observation.get("oom_events")) else 0
+            if non_negative_int(resource.get("memory_bytes")):
                 limits.append(resource["memory_bytes"])
     for resource in _items(record, "owned_resources"):
         evidence = resource.get("evidence")
         control = evidence.get("control") if isinstance(evidence, Mapping) else None
         if isinstance(control, Mapping) and (control.get("oom_killed") is True or _positive(control, "oom_events")):
-            events += control["oom_events"] if _number(control.get("oom_events")) else 0
+            events += control["oom_events"] if non_negative_int(control.get("oom_events")) else 0
     found = {"oom_events": events} if events or limits else {}
     return numbers_for("container-oom", {**found, "container_limit_bytes": max(limits)} if limits else found)
 
@@ -138,4 +139,4 @@ def _items(record: Mapping[str, Any], key: str) -> list[Mapping[str, Any]]:
 
 
 def _positive(observation: Mapping[str, Any], key: str) -> bool:
-    return _number(observation.get(key)) and observation[key] > 0
+    return non_negative_int(observation.get(key)) and observation[key] > 0

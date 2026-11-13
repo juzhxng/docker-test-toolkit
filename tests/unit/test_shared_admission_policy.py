@@ -1,4 +1,4 @@
-"""Pure shared-admission policy: reservation and publication predicates, M1, builder reserve and attribution."""
+"""Pure shared-admission policy: reservation and publication predicates, M1 and attribution."""
 
 from __future__ import annotations
 
@@ -207,14 +207,14 @@ def test_a_holders_builder_worker_is_attributed_by_name_within_its_reservation()
     built = attributed_ids(containers, holder, run_label=RUN_LABEL)
 
     assert built == {"a" * 64, "b" * 64, "c" * 64, "d" * 64}  # "1" is a run host: never in a sum, never attributed
-    limits = external_commitments(containers, frozenset()).limits  # an observer of another account owns none of them
+    limits = external_commitments(containers).limits
     external = net_external_limits(limits, containers, built)  # "1" was never in the sum: nothing subtracted for it
     assert sorted(item for item in external if item is not None) == [GIB, GIB]
     assert None in external
 
 
 def test_a_holders_reservation_is_the_maximum_of_its_phases_and_all_its_containers_are_attributed() -> None:
-    """No builder reserve sits on top of a holder's phases, so none of its reservation is held back for a worker."""
+    """A holder with a builder reserves the maximum of its phases, and every one of its containers is attributed."""
     e2e = {
         "build": PhaseBudget(2 * GIB, 25 * GIB // 4, 2, 1),
         "start": PhaseBudget(3425236418, 25 * GIB // 4, 2, 1),
@@ -243,7 +243,7 @@ def test_a_holders_reservation_is_the_maximum_of_its_phases_and_all_its_containe
     ]
 
     assert len(attributed_ids(containers, holder, run_label="docker-test-toolkit.run")) == 3
-    assert holder.reservation == reservation(e2e.values())  # no builder reserve on top
+    assert holder.reservation == reservation(e2e.values())
 
 
 class SharedQueueMachine(RuleBasedStateMachine):

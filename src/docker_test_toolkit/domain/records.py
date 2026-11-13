@@ -8,7 +8,7 @@ from typing import Any
 
 from docker_test_toolkit.domain.errors import ResourceError, ToolkitError
 from docker_test_toolkit.domain.models import ArtifactIdentity, ExternalDockerResource
-from docker_test_toolkit.domain.numbers import valid_numbers
+from docker_test_toolkit.domain.numbers import non_negative_int, valid_numbers
 from docker_test_toolkit.domain.policy import NAME
 from docker_test_toolkit.domain.telemetry import CATEGORIES, OBSERVERS
 
@@ -252,10 +252,6 @@ _EVIDENCE_PRESSURE_FIELDS = {
 }
 
 
-def _evidence_int(value: object) -> bool:
-    return type(value) is int and value >= 0
-
-
 def _valid_waiting_item(item: object, schema: int = 1) -> bool:
     """Return whether one waiting span has the closed shape shared by failure evidence and the hold timeline.
 
@@ -270,7 +266,7 @@ def _valid_waiting_item(item: object, schema: int = 1) -> bool:
         and set(item) == _EVIDENCE_WAITING_FIELDS
         and isinstance(item["reason"], str)
         and bool(item["reason"])
-        and all(_evidence_int(item[key]) for key in ("first_tick_ns", "last_tick_ns", "waited_ns"))
+        and all(non_negative_int(item[key]) for key in ("first_tick_ns", "last_tick_ns", "waited_ns"))
         and item["last_tick_ns"] >= item["first_tick_ns"]
     )
 
@@ -309,11 +305,11 @@ def validate_failure_evidence(value: object) -> None:
         or set(observed) != _EVIDENCE_OBSERVED_FIELDS
         or not isinstance(observed["origin"], str)
         or not observed["origin"]
-        or not _evidence_int(observed["tick_ns"])
+        or not non_negative_int(observed["tick_ns"])
         or not isinstance(observed["state"], str)
         or observed["state"] not in _EVIDENCE_STATES
         or not (observed["phase"] is None or isinstance(observed["phase"], str))
-        or not _evidence_int(observed["revision"])
+        or not non_negative_int(observed["revision"])
         or (value["waiting"] is not None) != admission
         or (value["pressure"] is not None and not admission)
     ):
@@ -330,7 +326,7 @@ def validate_failure_evidence(value: object) -> None:
         if pressure is not None and (
             not isinstance(pressure, dict)
             or set(pressure) != _EVIDENCE_PRESSURE_FIELDS
-            or not all(_evidence_int(item) for item in pressure.values())
+            or not all(non_negative_int(item) for item in pressure.values())
         ):
             raise invalid
 
@@ -370,7 +366,7 @@ def validate_hold_timeline(value: object) -> None:
         or value["schema"] not in (1, 2)
         or not isinstance(value["origin"], str)
         or not value["origin"]
-        or not all(_evidence_int(tick) for tick in ticks)
+        or not all(non_negative_int(tick) for tick in ticks)
         or not ticks[0] <= ticks[1] <= ticks[2]
         or not isinstance(value["waiting"], list)
         or not all(_valid_waiting_item(item, value["schema"]) for item in value["waiting"])
@@ -383,7 +379,7 @@ def validate_hold_timeline(value: object) -> None:
         or release not in _HOLD_RELEASES
         or not isinstance(release_origin, str)
         or not release_origin
-        or not _evidence_int(released_ns)
+        or not non_negative_int(released_ns)
         or (release_origin == value["origin"] and released_ns < ticks[2])
     ):
         raise invalid

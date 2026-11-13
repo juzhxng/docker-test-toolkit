@@ -12,7 +12,7 @@ CATEGORIES = (
     "admission-expired",
     "admission-refused",
 )
-OBSERVERS = ("host", "engine", "container", "process", "admission")
+OBSERVERS = ("host", "engine", "container", "process", "admission")  # "process": older records only (before 0.8.0)
 
 
 @dataclass(frozen=True)

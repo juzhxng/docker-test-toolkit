@@ -68,6 +68,7 @@ from docker_test_toolkit.application.recovery import (
     bind_daemon,
     buildkit_state_volume,
     buildkit_worker,
+    engine_images,
     failpoint,
     image_lock,
     load,
@@ -181,6 +182,7 @@ from docker_test_toolkit.domain.policy import (
     claim_eligible,
     clock_namespace,
     combined,
+    container_labels,
     counted_grant,
     cpu_pressure_blocks_join,
     cpu_pressure_numbers,
@@ -2585,7 +2587,7 @@ def _hard_limit_bytes(container: dict) -> int:
     return memory_limit(container) or _UNBOUNDED_BYTES
 
 
-def _own_running_bytes(adapter, data: dict, *, counted_elsewhere: Callable[[dict], bool]) -> int:
+def _own_running_bytes(adapter, data: dict, *, counted_elsewhere: Callable[[dict], bool] | None = None) -> int:
     """Sum the hard memory limits of the run's own running containers.
 
     A container is the run's when it carries its Compose project or run label, or is its BuildKit worker, which
@@ -2599,7 +2601,7 @@ def _own_running_bytes(adapter, data: dict, *, counted_elsewhere: Callable[[dict
             item, compose_project=authority["compose_project"], run_label=RUN, run_id=data["run_id"], worker=worker
         )
         running = (item.get("State") or {}).get("Running") is True
-        if not own or not running or counted_elsewhere(item):
+        if not own or not running or (counted_elsewhere is not None and counted_elsewhere(item)):
             continue
         total += _hard_limit_bytes(item)
     return total
@@ -2784,7 +2786,7 @@ def _share_verdict(
     """Return the first share rule one creating or starting command breaks."""
     kind, budget = command.kind, _phase_container_bytes(data)
     if kind == "builder-create":  # the worker is the run's own container, checked like a service (R12)
-        running = _own_running_bytes(adapter, data, counted_elsewhere=lambda _item: False)
+        running = _own_running_bytes(adapter, data)
         return own_budget_verdict(running_bytes=running, added_bytes=BUILDER_MEMORY_BYTES, phase_container_bytes=budget)
     if kind == "network-connect":
         return network_connect_verdict()
@@ -2803,7 +2805,7 @@ def _share_verdict(
         )
         if not verdict.shareable or direct.memory_bytes is None:
             return verdict
-        running = _own_running_bytes(adapter, data, counted_elsewhere=lambda _item: False)
+        running = _own_running_bytes(adapter, data)
         return own_budget_verdict(running_bytes=running, added_bytes=direct.memory_bytes, phase_container_bytes=budget)
     if kind == "container-start":
         target = str(command.plan["container_id"])
@@ -2853,7 +2855,7 @@ def _compose_share_verdict(
     def selected(item: dict) -> bool:
         """A running service container that ``up``/``create``/``start``/``restart`` keeps or replaces counts once, at
         its rendered limit; a ``run`` one-off starts beside it, and one-offs are never replaced, so both count."""
-        labels = (item.get("Config") or {}).get("Labels") or {}
+        labels = container_labels(item)
         return (
             subcommand != "run"
             and labels.get("com.docker.compose.oneoff") != "True"
@@ -2865,7 +2867,7 @@ def _compose_share_verdict(
         # start/restart reuse existing containers with their own limits, whatever the render now says: the stopped
         # service containers they start add their inspected limits; running ones are already counted
         stopped = _stopped_service_limits(adapter, project, set(added))
-        running = _own_running_bytes(adapter, data, counted_elsewhere=lambda _item: False)
+        running = _own_running_bytes(adapter, data)
         return own_budget_verdict(running_bytes=running, added_bytes=stopped, phase_container_bytes=budget)
     running = _own_running_bytes(adapter, data, counted_elsewhere=selected)
     return own_budget_verdict(running_bytes=running, added_bytes=sum(added.values()), phase_container_bytes=budget)
@@ -2875,7 +2877,7 @@ def _stopped_service_limits(adapter, project: str, services: set[str]) -> int:
     """Sum the inspected memory limits of the stopped, non-one-off containers of ``services`` in ``project``."""
     total = 0
     for item in adapter.objects("container"):
-        labels = (item.get("Config") or {}).get("Labels") or {}
+        labels = container_labels(item)
         if (
             labels.get("com.docker.compose.project") != project
             or labels.get("com.docker.compose.service") not in services
@@ -4168,11 +4170,9 @@ def _owned_removal_command(
         return (
             ("container", "rm", "-f", identity) if keep_anonymous_volumes else ("container", "rm", "-f", "-v", identity)
         )
-    if kind == "image" and reference is not None:
-        # Never forced: Docker then refuses while any container uses the image, so a container of another account on
-        # the same engine never leaves it untagged under it, dangling and owned by no record.
-        return "image", "rm", reference
-    return kind, "rm", identity
+    # An image is never removed with force: Docker then refuses while any container uses it, so a container of another
+    # account on the same engine never leaves it untagged under it, dangling and owned by no record.
+    return kind, "rm", reference or identity
 
 
 def _image_removal(resource: dict) -> tuple[tuple[str, ...], dict[str, object]]:
@@ -5104,8 +5104,7 @@ def _stop_owned_docker_resources(context: RunContext, deadline_ns: int | None = 
 def _cleanup_owned_docker_resources(context: RunContext, deadline_ns: int | None = None) -> None:
     """Remove only exact promoted resources, journaling each mutation first.
 
-    Images last: a shared run, or any run while handed-off images are pending, runs the image step under the image lock
-    K; an exclusive run with nothing pending removes its images exactly as today.
+    Images last, under the image lock K when the record asks for it or a container on the engine uses a kept image.
     """
     operations = (
         ("builders", "builder"),
@@ -5117,8 +5116,9 @@ def _cleanup_owned_docker_resources(context: RunContext, deadline_ns: int | None
     failpoint("owned-containers-removed")
     data = _load_run(context)
     account = Path(data["account_directory"])
-    kept = [key for key, item in data["owned_resources"]["images"].items() if item["state"] != "removed"]
-    if not _image_step_locked(data) and not (kept and set(kept) & _engine_images(_bound_docker(data))):
+    kept = {key for key, item in data["owned_resources"]["images"].items() if item["state"] != "removed"}
+    # The run's own containers are gone here: a container still using a kept image is another account's
+    if not _image_step_locked(data) and not (kept and kept & engine_images(_bound_docker(data))):
         _remove_owned(context, (("images", "image"),), deadline_ns)
         return
     with image_lock(Context(account, account), deadline_ns=deadline_ns) as hold_fd:
@@ -5135,8 +5135,7 @@ def _owned_cleanup_needed(data: dict) -> bool:
 
 
 def _image_step_locked(data: dict) -> bool:
-    """Whether the image step runs under K: a shared record, or handed-off images pending; an exclusive run with
-    nothing pending removes its images exactly as before shared runs."""
+    """Whether the record alone puts the image step under K: a shared record, or handed-off images pending."""
     return _record_mode(data) == AdmissionMode.SHARED or not pending_absent(Path(data["account_directory"]))
 
 
@@ -5240,8 +5239,8 @@ def _interest_view(run_id: str, record: dict) -> InterestView:
 def _image_step(context: RunContext, deadline_ns: int | None, hold_fd: int) -> None:
     """Decide and delete owned images under K, then drain handed-off images nobody uses any more.
 
-    A shared run hands an image still in use to the pending list instead of deleting it; an exclusive run deletes as
-    today. An unreadable pending list hands nothing off and drains nothing: the cleanup stays incomplete.
+    An image another live run or any container on the engine uses goes to the pending list instead of being deleted.
+    An unreadable pending list hands nothing off and drains nothing: the cleanup stays incomplete.
     """
     data = _load_run(context)
     account = Path(data["account_directory"])
@@ -5249,18 +5248,16 @@ def _image_step(context: RunContext, deadline_ns: int | None, hold_fd: int) -> N
         read_pending(account)  # an unreadable list hands nothing off and drains nothing
     except ResourceError as error:
         raise IncompleteCleanup("The pending image deletion list is unreadable; images are kept.") from error
+    # Listed once, and only when the records leave an image unused: a hand-off the records decide needs no Docker call
+    engine = functools.cache(lambda: engine_images(_bound_docker(data)))
     for identity, resource in data["owned_resources"]["images"].items():
-        if resource["state"] == "removed" or _hand_off_if_in_use(context, data, identity, resource, deadline_ns):
+        if resource["state"] == "removed" or _hand_off_if_in_use(
+            context, data, identity, resource, deadline_ns, engine=engine
+        ):
             continue
         argv, plan = _image_removal(resource)
         _run_owned_mutation(context, argv, "image-rm", {"image_id": identity, **plan}, deadline_ns, hold_fd)
     _drain_pending(context, account, deadline_ns, hold_fd)
-
-
-def _engine_images(adapter: DockerPort) -> set[str]:
-    """The images the daemon's containers use, whoever created them (another toolkit account on the same engine is
-    invisible to this account's records); a run's own containers are removed before its images."""
-    return {str(item.get("Image")) for item in adapter.objects("container")}
 
 
 def _hand_off_if_in_use(
@@ -5271,16 +5268,19 @@ def _hand_off_if_in_use(
     deadline_ns: int | None,
     *,
     image_lock_wait: tuple[str, int, int] | None = None,
+    engine: Callable[[], set[str]] | None = None,
 ) -> bool:
-    """Under K, hand one owned image another live run uses to the pending list; return whether it was handed off.
+    """Under K, hand one owned image another live run or a container on the engine uses to the pending list; return
+    whether it was handed off. ``engine`` returns the engine's used images (the caller's cached listing); it is read
+    only when no live run uses the image, so a hand-off the records decide makes no Docker call.
 
     The entry is appended once (a re-run after a crash finds it and only marks), then the resource is marked removed
     with ``pending_deletion`` evidence; a dispatch's K wait is merged into that write. Raises IncompleteCleanup
     when the pending list is unreadable.
     """
-    views = _interest_views(context, data, deadline_ns)
-    engine = _engine_images(_bound_docker(data))
-    if not image_in_use(identity, views, actor_run=data["run_id"]) and identity not in engine:
+    if not image_in_use(identity, _interest_views(context, data, deadline_ns), actor_run=data["run_id"]) and (
+        identity not in (engine() if engine is not None else engine_images(_bound_docker(data)))
+    ):
         return False
     account = Path(data["account_directory"])
     try:
@@ -5290,7 +5290,7 @@ def _hand_off_if_in_use(
     daemon_id = data["grant"]["daemon_id"]
     if not any(entry.image_id == identity and entry.daemon_id == daemon_id for entry in pending):
         argv, _plan = _image_removal(resource)
-        references = tuple(str(reference) for reference in argv[2:] if reference != "--force")
+        references = tuple(str(reference) for reference in argv[2:])
         created = resource["evidence"].get("created")
         owner = (data["run_id"], data["project_id"], daemon_id)  # only a granted run hands off
         pending.append(PendingImage(identity, created if isinstance(created, str) else "", references, *owner))
@@ -5316,7 +5316,8 @@ def _mark_handed_off(context: RunContext, identity: str, image_lock_wait: tuple[
 
 
 def _drain_pending(context: RunContext, account: Path, deadline_ns: int | None, hold_fd: int) -> None:
-    """Under K, delete each pending image no live run uses, after its identity check; drop absent or changed ones."""
+    """Under K, delete each pending image no live run and no engine container uses, after its identity check; drop
+    absent or changed ones."""
     pending = read_pending(account)
     if not pending:
         return
@@ -5326,20 +5327,15 @@ def _drain_pending(context: RunContext, account: Path, deadline_ns: int | None, 
     # only entries its own grant's daemon recorded, and only when the discovered daemon is that daemon.
     daemon_id = (data.get("grant") or {}).get("daemon_id")
 
-    if not any(
-        entry.daemon_id == daemon_id and not image_in_use(entry.image_id, views, actor_run=data["run_id"])
-        for entry in pending
-    ):
+    def in_use(image_id: str) -> bool:
+        """Whether a live run other than this one uses the image (``drain_pending`` adds the engine's containers)."""
+        return image_in_use(image_id, views, actor_run=data["run_id"])
+
+    if not any(entry.daemon_id == daemon_id and not in_use(entry.image_id) for entry in pending):
         return  # nothing to delete: no Docker call and nothing to rewrite
     adapter = _bound_docker(data) if data["docker_authority"] is not None else _docker()
     if adapter.observe_daemon().daemon_id != daemon_id:
         return  # another daemon is reachable now: nothing is deleted and every entry stays
-    engine_images = _engine_images(adapter)
-
-    def in_use(image_id: str) -> bool:
-        """Whether a live run other than this one, or any container on the engine (another account's), uses it."""
-        return image_id in engine_images or image_in_use(image_id, views, actor_run=data["run_id"])
-
     drain_pending(adapter, account, daemon_id, in_use, hold_fd)
 
 
@@ -8122,7 +8118,7 @@ def _test_capacity_inputs(
     daemon_memory = bound.get("daemon_memory_bytes", max(64 * gib, largest_container + gib))
     host_memory = bound.get("host_memory_bytes", 64 * gib)
     containers = list(bound.get("containers", []))
-    commitments = external_commitments(containers, frozenset())
+    commitments = external_commitments(containers)
     snapshot = CapacitySnapshot(
         daemon_memory,
         bound.get("daemon_cpus", 64),
@@ -9477,7 +9473,7 @@ def transition_phase(lease: RunLease, phase: str) -> RunStatus:
             raise ResourceError("Running container limits exceed the target phase commitment.")
         if _record_mode(data) == AdmissionMode.SHARED and data["docker_authority"] is not None:
             # R12: every own running container counts: Compose, dispatcher-created and the BuildKit worker
-            own = _own_running_bytes(_bound_docker(data), data, counted_elsewhere=lambda _item: False)
+            own = _own_running_bytes(_bound_docker(data), data)
             _refuse_or_record(
                 context,
                 data,
@@ -12494,7 +12490,7 @@ def admission_decision(
     Each own phase must fit alone first (today's rule; a REFUSED stays REFUSED, ``insufficient-cpu`` included). With
     co-holders, ``E(self) + Σ E(co-holders)`` plus the reserves (counted once, by ``assess_capacity``) must fit too;
     any shortfall of that sum, a CPU-only one included, is WAITING ``coholder-capacity``. Without co-holders an
-    exclusive run's result is today's; a ``shared`` run checks ``E(self)`` (its builder reserve included) even alone,
+    exclusive run's result is today's; a ``shared`` run checks ``E(self)`` even alone,
     and keeps that check's own decision: no co-holder can leave to make room, so a REFUSED stays REFUSED.
     """
     for budget in phases.values():
@@ -12731,7 +12727,7 @@ class ReserveOutcome:
 
     descriptor: TextIO | None
     waiting: str | None
-    refusal: str | None = None  # the version gate's reason: the run must be revoked after leaving the sections
+    refusal: str | None = None  # the refusal's reason: the run must be revoked after leaving the sections
     numbers: Mapping[str, int] = field(default_factory=dict)  # those of the decision behind ``waiting`` or ``refusal``
 
 
@@ -13650,7 +13646,6 @@ def _identified_info(docker, deadline: Deadline | None, expected: str | None = N
 def observe_capacity(
     docker,
     topology: str,
-    owned_ids: set[str] | frozenset[str] = frozenset(),
     *,
     inventory: list[dict] | None = None,
     deadline: Deadline | None = None,
@@ -13664,10 +13659,8 @@ def observe_capacity(
     ``inventory`` is a container inventory the caller already read (before it read other records that explain some
     of those containers); without it the inventory is read here.
     """
-    if topology not in ("desktop", "native", "remote") or not isinstance(owned_ids, (set, frozenset)):
-        raise ResourceError("Invalid declared daemon topology or owned container set.")
-    if any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item) for item in owned_ids):
-        raise ResourceError("Owned capacity inputs require exact container IDs.")
+    if topology not in ("desktop", "native", "remote"):
+        raise ResourceError("Invalid declared daemon topology.")
     podman = docker.engine == "podman"
     daemon_id, body = _identified_info(docker, deadline)
     if (
@@ -13686,7 +13679,7 @@ def observe_capacity(
     if runtime is None:
         topology = "remote"  # a remote endpoint is accounted as remote from any client
     containers = docker.objects("container", deadline=deadline) if inventory is None else inventory
-    commitments = external_commitments(containers, owned_ids)
+    commitments = external_commitments(containers)
     host = _host_read(NativeClock(), deadline)
     host_cpus = os.cpu_count()
     if type(host_cpus) is not int or host_cpus <= 0:

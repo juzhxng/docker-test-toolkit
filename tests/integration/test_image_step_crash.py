@@ -79,6 +79,26 @@ def test_owner_hands_off_and_the_last_user_drains(world: _World) -> None:
     _leave(world, binder)
 
 
+def test_a_pending_image_another_accounts_container_uses_is_not_drained(world: _World) -> None:
+    """The drain keeps an entry while any container on the engine uses it, whoever created that container."""
+    owner, binder, image_id = _owner_and_binder(world)
+    owner.leave()
+    foreign = "d" * 64  # another account's container: no record of this account names it
+    world.fake.containers[foreign] = {"Id": foreign, "Image": image_id, "Config": {"Labels": {}}, "State": {}}
+
+    commands = len(world.fake.commands)
+    lifecycle._cleanup_owned_docker_resources(binder._context)  # B is the last run that uses X: the drain is due
+
+    # no removal is tried: Docker would untag every reference but the last before it refuses
+    assert not any(argv[:2] == ("image", "rm") for argv in world.fake.commands[commands:])
+    assert _image_present(world, image_id)
+    assert [entry.image_id for entry in sharing.read_pending(_account(world))] == [image_id]
+    world.fake.containers.pop(foreign)
+    lifecycle._cleanup_owned_docker_resources(binder._context)
+    assert not _image_present(world, image_id) and sharing.read_pending(_account(world)) == []
+    _leave(world, binder)
+
+
 def test_image_step_crash_after_pending_append_marks_only(world: _World) -> None:
     owner, binder, image_id = _owner_and_binder(world)
     install_failpoint(_exit_at("pending-appended"))

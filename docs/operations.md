@@ -461,7 +461,8 @@ carries, not by where it was raised:
 | `admission-expired` | the queue deadline passed before a grant (see above) | not applicable |
 | `admission-refused` | admission was refused on compared values (a run that can never fit, a disk that can never hold it); `numbers` names them | not applicable |
 
-The observer names what was being read: `host`, `engine`, `container`, `process` or `admission`.
+The observer names what was being read: `host`, `engine`, `container` or `admission` (`process` appears in records of
+versions before 0.8.0 only).
 
 A daemon inventory read (`ls` followed by `inspect`) tolerates another project removing an object between the two
 commands. An object that Docker's exact not-found line proves vanished is left out of the inventory, and the returned

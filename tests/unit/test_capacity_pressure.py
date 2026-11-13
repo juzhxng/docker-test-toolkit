@@ -257,20 +257,17 @@ RUN_HOST = {"com.docker-test-toolkit.run-host": "true"}
 
 
 @pytest.mark.parametrize(
-    ("container", "owned", "expected"),
+    ("container", "expected"),
     [
-        (_running("a", 12 * GIB, RUN_HOST), frozenset(), ((), 1)),  # a CI runner hosting a run of another account
-        (_running("a", 0, RUN_HOST), frozenset(), ((), 1)),  # without a limit too
-        (_running("a", 12 * GIB, {"com.docker-test-toolkit.run-host": "1"}), frozenset(), ((12 * GIB,), 0)),
-        (_running("a", 12 * GIB, RUN_HOST), frozenset({"a" * 64}), ((), 0)),  # the run's own container: never external
-        (_running("a", 12 * GIB, RUN_HOST, running=False), frozenset(), ((), 0)),
-        (_running("a", GIB), frozenset(), ((GIB,), 0)),
+        (_running("a", 12 * GIB, RUN_HOST), ((), 1)),  # a CI runner hosting a run of another account
+        (_running("a", 0, RUN_HOST), ((), 1)),  # without a limit too
+        (_running("a", 12 * GIB, {"com.docker-test-toolkit.run-host": "1"}), ((12 * GIB,), 0)),
+        (_running("a", 12 * GIB, RUN_HOST, running=False), ((), 0)),
+        (_running("a", GIB), ((GIB,), 0)),
     ],
 )
-def test_a_run_host_container_is_not_an_external_commitment(
-    container: dict, owned: frozenset[str], expected: tuple
-) -> None:
+def test_a_run_host_container_is_not_an_external_commitment(container: dict, expected: tuple) -> None:
     """A container the operator labels as the host of a run (a CI runner) is left out of every run's external sum."""
-    commitments = policy.external_commitments([container], owned)
+    commitments = policy.external_commitments([container])
 
     assert (commitments.limits, commitments.run_hosts) == expected

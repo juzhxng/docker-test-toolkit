@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from docker_test_toolkit.application.ports.docker import DockerPort
 from docker_test_toolkit.application.state import archive_directory, make_private_directories, registry_directory
 from docker_test_toolkit.config.runtime import (
     BUILDER_PREFIX,
@@ -116,6 +117,12 @@ def configure_failpoint(callback: Callable[[str], None] | None) -> None:
     """Install or clear the test-only failpoint callback; production composition never installs one."""
     global _FAILPOINT
     _FAILPOINT = callback
+
+
+def engine_images(docker: DockerPort, deadline: object | None = None) -> set[str]:
+    """The images the engine's containers use, whoever created them: another toolkit account on the same engine is
+    invisible to this account's records. Callers remove their own containers before their images."""
+    return {str(item.get("Image")) for item in docker.objects("container", deadline=deadline)}
 
 
 def failpoint(stage: str) -> None:
