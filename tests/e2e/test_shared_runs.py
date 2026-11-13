@@ -22,7 +22,7 @@ import pytest
 from tests.e2e.conftest import redis_id
 from tests.installation_fixtures import base_python, temporary_installation
 
-from docker_test_toolkit.application import probe, sharing
+from docker_test_toolkit.application import lifecycle, probe, sharing
 from docker_test_toolkit.application.recovery import atomic_json, project_id_for
 from docker_test_toolkit.config.installation import ARCHIVE_NAME, installation_of
 from docker_test_toolkit.domain.share_policy import SHARE_RULES_VERSION
@@ -541,6 +541,9 @@ def test_a_coholder_restarting_its_containers_ends_no_other_run(
         worker_c = _worker(root, c, control, "c", "hold", container=budget, host=256 * 1024**2, service=0)
         _wait(control / "prepared-c.json")
         _until(lambda: _record(control, "c")["state"] == "queued", message="c queued beside a and b")
+        # C's capacity check waits only once its pressure window is full; waits are written when they end, so hold A
+        # for the window plus a few passes. NOTE: a derived sleep; a live wait reason in the record would replace it.
+        time.sleep(lifecycle._WINDOW_NS / 1e9 + 10)
         assert not (control / "entered-c.json").exists()
         assert _record(control, "b")["infrastructure_failure"] is None
         (control / "release-a").touch()  # A's own outcome is not asserted: its daemon restarts are its own state
