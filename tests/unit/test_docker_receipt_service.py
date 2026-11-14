@@ -126,6 +126,7 @@ class FakeDockerPort(DockerPort):
         self.compose_image_volume = False
         self.compose_runtime_image_id = IMAGE_ID
         self.compose_ports: dict[str, list[dict[str, str]] | None] = {}
+        self.restart_moves_ports = False  # Docker Desktop: a restarted container gets compose_ports' new port
         self._stopped_ports: dict[str, dict] = {}
         self.in_use: set[str] = set()  # networks Docker refuses to remove because something still uses them
         self.compose_services = ("fixture",)
@@ -306,6 +307,8 @@ class FakeDockerPort(DockerPort):
                 return DockerResult(0, argv[-1] + "\n", "")
             self._start(argv[-1])
             container["State"]["StartedAt"] = f"{container['State']['StartedAt']}-restarted"
+            if self.restart_moves_ports and argv[-1] == "c" * 64:
+                container["NetworkSettings"]["Ports"] = dict(self.compose_ports)
             self._mutate(container)
             return DockerResult(0, argv[-1] + "\n", "")
         if argv[:2] == ("network", "connect"):
@@ -628,6 +631,8 @@ class FakeDockerPort(DockerPort):
                 if container["Config"]["Labels"].get("com.docker.compose.project") == project:
                     self._start(container["Id"])
                     container["State"]["StartedAt"] += f"-{subcommand}ed"
+                    if self.restart_moves_ports and container["Id"] == "c" * 64:
+                        container["NetworkSettings"]["Ports"] = dict(self.compose_ports)
                     self._mutate(container)
             return DockerResult(0, "", "")
         if subcommand == "down":
@@ -1445,6 +1450,41 @@ def test_a_client_declared_inside_desktops_vm_gets_endpoints_it_can_reach(
     stored = json.loads(handle._context.record.read_text())["endpoints"]["fixture"][-1]
     assert (stored["host"], stored["port"]) == ("127.0.0.1", 28080)  # the record keeps the exact binding
     assert handle.status().state == "active"  # and still loads
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "down", "--volumes"))
+    handle.leave()
+
+
+@pytest.mark.parametrize(
+    "restart",
+    [(("compose", "restart"),), (("container", "stop", "c" * 64), ("container", "start", "c" * 64))],
+    ids=["compose-restart", "container-stop-start"],
+)
+def test_a_restart_that_moves_the_published_port_retires_the_endpoint(tmp_path: Path, restart: tuple) -> None:
+    """Docker Desktop gives a restarted container a new random port: the endpoint of the old binding is retired, so the
+    client republishes the new port instead of reaching a dead one (Linux usually keeps the port)."""
+    fake = FakeDockerPort()
+    project = tmp_path / "project"
+    project.mkdir()
+    handle = (
+        build_test_services(tmp_path / "state")
+        .open_run(_spec(project), docker_factory=lambda: fake, admit_docker=True)
+        .enter()
+    )
+    _ = handle.docker_context
+    descriptor = json.loads((handle.private_root / "docker-authority.json").read_text())
+    fake.compose_ports = {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "28080"}]}
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "up", "--detach"))
+    assert handle.publish_endpoint("fixture", "http", 8080).port == 28080
+
+    fake.restart_moves_ports = True
+    fake.compose_ports = {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "28081"}]}  # the restart moves it
+    for argv in restart:
+        lifecycle.dispatch_docker(handle._context, descriptor, fake, argv)
+
+    with pytest.raises(ResourceError):
+        handle.require_endpoint("fixture")  # never the dead port
+    assert handle.publish_endpoint("fixture", "http", 8080).port == 28081
+    assert handle.require_endpoint("fixture").port == 28081
     lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "down", "--volumes"))
     handle.leave()
 

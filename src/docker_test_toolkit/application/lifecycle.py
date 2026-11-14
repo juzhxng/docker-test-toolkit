@@ -1841,7 +1841,33 @@ def _container_promotion(
     return "promoted", [resource]
 
 
-def _exact_control_promotion(adapter, receipt: dict, result: DockerResult) -> tuple[str, list[dict]]:
+def _port_bindings(ports: dict) -> dict[str, list[dict[str, str | int]]] | None:
+    """A container's published port map as recorded bindings; ``None`` when Docker's map is malformed."""
+    bindings: dict[str, list[dict[str, str | int]]] = {}
+    for target, published in ports.items():
+        if not isinstance(target, str) or not re.fullmatch(r"[1-9][0-9]{0,4}/(?:tcp|udp)", target):
+            return None
+        if published is None:
+            bindings[target] = []
+            continue
+        if not isinstance(published, list):
+            return None
+        converted = []
+        for binding in published:
+            if (
+                not isinstance(binding, dict)
+                or not isinstance(binding.get("HostIp"), str)
+                or not isinstance(binding.get("HostPort"), str)
+                or not binding["HostPort"].isdigit()
+                or not 0 < int(binding["HostPort"]) <= 65535
+            ):
+                return None
+            converted.append({"host_ip": binding["HostIp"], "host_port": int(binding["HostPort"])})
+        bindings[target] = sorted(converted, key=lambda value: (value["host_ip"], value["host_port"]))
+    return bindings
+
+
+def _exact_control_promotion(adapter, receipt: dict, result: DockerResult, data: dict) -> tuple[str, list[dict]]:
     container_id = receipt["plan"]["container_id"]
     observation = adapter.inspect_exact(ExactInspection("container", container_id))
     action = receipt["kind"].removeprefix("container-")
@@ -1853,6 +1879,17 @@ def _exact_control_promotion(adapter, receipt: dict, result: DockerResult) -> tu
     expected = action == "start"
     if not isinstance(state, dict) or state.get("Running") is not expected:
         return ("failed" if result.exit_code else "unresolved"), []
+    existing = data["owned_resources"]["containers"].get(container_id)
+    ports = (observation.attributes.get("NetworkSettings") or {}).get("Ports")
+    if action == "start" and existing is not None and isinstance(ports, dict):
+        # A start may publish new host ports (Docker Desktop allocates random ports anew): refresh the bindings
+        bindings = _port_bindings(ports)
+        if bindings is None:
+            return "unresolved", []
+        if bindings != existing["evidence"].get("bindings"):
+            return "promoted", [
+                {**existing, "state": "running", "evidence": {**existing["evidence"], "bindings": bindings}}
+            ]
     return "promoted", []
 
 
@@ -1969,27 +2006,9 @@ def _compose_promotion(adapter, receipt: dict, result: DockerResult, data: dict)
             or not isinstance(ports, dict)
         ):
             return "unresolved", []
-        bindings: dict[str, list[dict[str, str | int]]] = {}
-        for target, published in ports.items():
-            if not isinstance(target, str) or not re.fullmatch(r"[1-9][0-9]{0,4}/(?:tcp|udp)", target):
-                return "unresolved", []
-            if published is None:
-                bindings[target] = []
-                continue
-            if not isinstance(published, list):
-                return "unresolved", []
-            converted = []
-            for binding in published:
-                if (
-                    not isinstance(binding, dict)
-                    or not isinstance(binding.get("HostIp"), str)
-                    or not isinstance(binding.get("HostPort"), str)
-                    or not binding["HostPort"].isdigit()
-                    or not 0 < int(binding["HostPort"]) <= 65535
-                ):
-                    return "unresolved", []
-                converted.append({"host_ip": binding["HostIp"], "host_port": int(binding["HostPort"])})
-            bindings[target] = sorted(converted, key=lambda value: (value["host_ip"], value["host_port"]))
+        bindings = _port_bindings(ports)
+        if bindings is None:
+            return "unresolved", []
         for mount in mounts:
             if not isinstance(mount, dict):
                 return "unresolved", []
@@ -3458,7 +3477,7 @@ def _promote_docker_result(adapter, receipt: dict, result: DockerResult, data: d
     if receipt["kind"] == "container-create":
         return _container_promotion(adapter, receipt, result, labels)
     if receipt["kind"] in {"container-rm", "container-start", "container-stop"}:
-        return _exact_control_promotion(adapter, receipt, result)
+        return _exact_control_promotion(adapter, receipt, result, data)
     if receipt["kind"] in {"image-rm", "network-rm", "volume-rm"}:
         return _exact_resource_removal_promotion(adapter, receipt)
     if receipt["kind"] == "builder-rm":
@@ -3668,7 +3687,7 @@ def _apply_receipt_result(
             # A compose receipt re-observes every container of its project; only its volatile evidence (start
             # generation and port map) may have changed since it was recorded: a restart, a stop, an engine restart.
             container_refresh = (
-                receipt["kind"] in {"compose", "compose-run"}
+                receipt["kind"] in {"compose", "compose-run", "container-start"}
                 and same_identity
                 and resource["kind"] == "container"
                 and all(
@@ -3692,6 +3711,9 @@ def _apply_receipt_result(
                 resource = {**resource, "receipt_id": existing["receipt_id"]}
             if container_refresh and _first_sight_of_oom(data, existing, resource):
                 _set_container_oom(data)
+            if container_refresh and existing["evidence"].get("bindings") != resource["evidence"].get("bindings"):
+                # an endpoint names its binding: one whose port moved is stale, and the client republishes
+                _retire_container_endpoints(data, resource["identifier"], data["revision"] + 1)
         elif (
             # a service killed before its first promotion is stored stopped and never observed again; a compose run's
             # one-off is the caller's own task, whose exit code already reports its fate
