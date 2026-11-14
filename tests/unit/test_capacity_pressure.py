@@ -271,3 +271,33 @@ def test_a_run_host_container_is_not_an_external_commitment(container: dict, exp
     commitments = policy.external_commitments([container])
 
     assert (commitments.limits, commitments.run_hosts) == expected
+
+
+@pytest.mark.parametrize(
+    ("info", "declared", "vm_client"),
+    [
+        (_DESKTOP_INFO, True, True),  # a runner inside Desktop's VM, declared: its endpoints name host.docker.internal
+        (_ENGINE_INFO, True, False),  # the flag on a plain Docker Engine changes nothing
+        (_DESKTOP_INFO, False, False),  # undeclared: the runtime is refused, no client inside the VM is assumed
+    ],
+)
+def test_runtime_facts_say_when_the_client_is_inside_desktops_vm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, info: dict, declared: bool, vm_client: bool
+) -> None:
+    monkeypatch.setattr(lifecycle.sys, "platform", "linux")
+    monkeypatch.setattr(lifecycle, "passwd_home", lambda: Path("/home/x"))
+    account = tmp_path / "account"
+    account.mkdir(mode=0o700)
+    sharing.record_desktop_vm_client(account, declared)
+    monkeypatch.setattr(lifecycle, "canonical_account", lambda: account)
+    monkeypatch.setattr(lifecycle, "_DAEMON_RUNTIMES", {})
+    monkeypatch.setattr(
+        lifecycle, "_engine_read", lambda _docker, _path, _deadline: lifecycle.EngineReply(info, b"", 0)
+    )
+    monkeypatch.setattr(
+        lifecycle, "_daemon_endpoint", lambda _docker, _daemon, _deadline: "unix:///var/run/docker.sock"
+    )
+
+    facts = lifecycle._runtime_facts(SimpleNamespace(binding=None), "d" * 64, None)
+
+    assert facts.vm_client is vm_client
