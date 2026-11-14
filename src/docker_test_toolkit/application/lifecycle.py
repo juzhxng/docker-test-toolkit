@@ -191,6 +191,7 @@ from docker_test_toolkit.domain.policy import (
     detect_runtime,
     disk_estimate,
     disk_fit,
+    docker_desktop,
     engine_stats,
     external_commitments,
     fifo_head,
@@ -8404,6 +8405,7 @@ class RuntimeFacts:
     runtime: str | None
     disk_place: Path | None
     machine: MachineFacts | None
+    vm_client: bool = False  # a declared client inside Docker Desktop's VM: Docker Engine seen on a Desktop daemon
 
 
 _DAEMON_RUNTIMES: dict[str, RuntimeFacts] = {}  # daemon ID -> its runtime facts, per process
@@ -8430,7 +8432,8 @@ def _runtime_facts(docker, daemon_id: str, deadline: Deadline) -> RuntimeFacts:
         runtime = None if isinstance(detected, RuntimeRefusal) else detected
         name = info.get("Name")
         place = vm_disk_place(runtime, name if isinstance(name, str) else None)
-        _DAEMON_RUNTIMES[daemon_id] = RuntimeFacts(runtime, place, None)
+        vm_client = runtime == "docker-engine" and docker_desktop(info)
+        _DAEMON_RUNTIMES[daemon_id] = RuntimeFacts(runtime, place, None, vm_client)
     return _DAEMON_RUNTIMES[daemon_id]
 
 
@@ -10714,6 +10717,25 @@ def control_compose_containers(
         return generations
 
 
+DESKTOP_HOST = "host.docker.internal"  # how a client inside Docker Desktop's VM reaches a loopback-published port
+
+
+def _for_client(endpoint: Endpoint, data: dict) -> Endpoint:
+    """The endpoint as the client reaches it: a host endpoint's IPv4 loopback binding becomes ``host.docker.internal``
+    for a declared client inside Docker Desktop's VM, where Desktop publishes ports on the Mac side; the record keeps
+    the exact binding. NOTE: an IPv6 loopback binding is left as is (its reach through Desktop is not verified)."""
+    if endpoint.audience != "host" or ipaddress.ip_address(endpoint.host).version != 4:
+        return endpoint
+    if not read_desktop_vm_client(Path(data["account_directory"])):
+        return endpoint  # the common case: no client declared inside the VM, no Docker read
+    docker = _bound_docker(data) if data["docker_authority"] is not None else _docker()
+    facts = _runtime_facts(docker, data["grant"]["daemon_id"], Deadline.after(NativeClock(), _ENDPOINT_FACTS_SECONDS))
+    return replace(endpoint, host=DESKTOP_HOST) if facts.vm_client else endpoint
+
+
+_ENDPOINT_FACTS_SECONDS = 30  # one cached /info read per daemon and process, the engine-read bound used elsewhere
+
+
 def publish_endpoint(
     lease: RunLease,
     service: str,
@@ -10781,7 +10803,7 @@ def publish_endpoint(
         history.append({**asdict(endpoint), "active": True, "retired_revision": None})
         data["revision"] = revision
         atomic_json(context.record, data)
-        return endpoint
+    return _for_client(endpoint, data)  # outside the run lock: it may read the daemon's /info once
 
 
 def publish_host_endpoint(
@@ -10851,7 +10873,7 @@ def require_endpoint(
     resource = _endpoint_container(data, item["container_id"])
     if resource is None or resource["state"] != "running":
         raise ResourceError("Current endpoint target is no longer an active resource.")
-    return Endpoint(**{key: item[key] for key in Endpoint.__dataclass_fields__})
+    return _for_client(Endpoint(**{key: item[key] for key in Endpoint.__dataclass_fields__}), data)
 
 
 def _endpoint_container(data: dict, container_id: str) -> dict | None:

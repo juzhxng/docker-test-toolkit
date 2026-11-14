@@ -124,7 +124,7 @@ services needs that room in its budget, otherwise it is refused once and runs ex
 The account file `desktop-vm-client.json` (`install --desktop-vm-client on|off`) is new; older versions ignore it and
 refuse a Linux client on Docker Desktop's socket, so stop a CI stack that relies on it before rolling back. The label
 `com.docker-test-toolkit.run-host=true` is honoured by this version only: an older version counts a labelled runner as
-foreign memory, so a stopped stack is also the rollback condition for local runs beside it.
+foreign memory, so a stopped stack is also the rollback condition for local runs beside it. For such an account, `Endpoint.host` of a host endpoint is `host.docker.internal` instead of `127.0.0.1` (the run record keeps the loopback binding), so a client that pins `localhost` (a TLS name, an allow-list) needs the new name.
 
 Protocol `batch:1` versions only the live Python facade and bridge messages. It adds no durable field and does not change
 run, project, account or cleanup record schemas, so a crashed batch has no toolkit batch status or replay operation; its

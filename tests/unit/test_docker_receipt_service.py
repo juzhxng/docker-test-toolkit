@@ -1414,6 +1414,41 @@ def test_shim_compose_resources_back_public_dynamic_endpoints(tmp_path: Path) ->
     handle.leave()
 
 
+@pytest.mark.parametrize(("desktop_daemon", "host"), [(True, "host.docker.internal"), (False, "127.0.0.1")])
+def test_a_client_declared_inside_desktops_vm_gets_endpoints_it_can_reach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, desktop_daemon: bool, host: str
+) -> None:
+    """Docker Desktop publishes ports on the Mac side: a client inside its VM reaches them as host.docker.internal.
+    The record keeps the exact loopback binding; a declared flag against a plain Docker Engine changes nothing."""
+    fake = FakeDockerPort()
+    project = tmp_path / "project"
+    project.mkdir()
+    handle = (
+        build_test_services(tmp_path / "state")
+        .open_run(_spec(project), docker_factory=lambda: fake, admit_docker=True)
+        .enter()
+    )
+    _ = handle.docker_context
+    descriptor = json.loads((handle.private_root / "docker-authority.json").read_text())
+    record = json.loads(handle._context.record.read_text())
+    sharing.record_desktop_vm_client(Path(record["account_directory"]), True)
+    monkeypatch.setattr(lifecycle, "_BOUND_DOCKER_FACTORY", lambda _identity: fake)
+    facts = lifecycle.RuntimeFacts("docker-engine", None, None, desktop_daemon)  # as _runtime_facts decides it
+    monkeypatch.setitem(lifecycle._DAEMON_RUNTIMES, record["grant"]["daemon_id"], facts)
+    fake.compose_ports = {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "28080"}]}
+
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "up", "--detach"))
+    published = handle.publish_endpoint("fixture", "http", 8080)
+    required = handle.require_endpoint("fixture")
+
+    assert (published.host, published.port) == (host, 28080) and required == published
+    stored = json.loads(handle._context.record.read_text())["endpoints"]["fixture"][-1]
+    assert (stored["host"], stored["port"]) == ("127.0.0.1", 28080)  # the record keeps the exact binding
+    assert handle.status().state == "active"  # and still loads
+    lifecycle.dispatch_docker(handle._context, descriptor, fake, ("compose", "down", "--volumes"))
+    handle.leave()
+
+
 def test_resume_loader_rejects_non_quiescent_managed_resources(tmp_path: Path, request: pytest.FixtureRequest) -> None:
     fake = FakeDockerPort()
     project = tmp_path / "project"

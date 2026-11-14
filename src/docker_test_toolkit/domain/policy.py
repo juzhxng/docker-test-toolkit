@@ -823,6 +823,12 @@ def loopback_endpoint(endpoint: str) -> bool:
         return False
 
 
+def docker_desktop(info: Mapping[str, Any]) -> bool:
+    """Whether a daemon's ``/info`` names Docker Desktop's engine."""
+    operating_system = info.get("OperatingSystem")
+    return isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
+
+
 def detect_runtime(
     info: Mapping[str, object], client_platform: str, endpoint: str, home: Path, *, desktop_vm_client: bool = False
 ) -> str | RuntimeRefusal | None:
@@ -841,8 +847,7 @@ def detect_runtime(
     local_socket = endpoint.startswith("unix://")
     if not local_socket and not loopback_endpoint(endpoint):
         return None
-    operating_system = info.get("OperatingSystem")
-    desktop = isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
+    desktop = docker_desktop(info)
     name = info.get("Name")
     colima = _COLIMA_NAME.fullmatch(name) if isinstance(name, str) else None
     if client_platform == "darwin":

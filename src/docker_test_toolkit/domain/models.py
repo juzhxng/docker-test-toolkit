@@ -292,7 +292,11 @@ class PhaseBudget:
 
 @dataclass(frozen=True)
 class Endpoint:
-    """Describe one exact endpoint published by an entered run."""
+    """Describe one exact endpoint published by an entered run, with the host its client reaches it by.
+
+    A host endpoint's record keeps the exact loopback binding; a declared client inside Docker Desktop's VM gets
+    ``host.docker.internal`` as ``host`` (Desktop publishes ports on the Mac side).
+    """
 
     service: str
     protocol: str
